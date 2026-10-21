@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Generate the per-track PERF.md and README.md from one source of truth.
 
@@ -550,8 +550,14 @@ Recompute with `python tooling/k_calc.py --t _ --m _ --s _ --d 1 --x _`.
 
 ## 2. The ladder
 
-Every row below is a step that was actually taken, with the measurement that
-justified keeping it. Rows marked `EXPECTED` have not been measured yet.
+Every row below is a step in the optimisation sequence, with the measurement
+that justified keeping it.
+
+> **The T and M cells are empty until the harness has produced them.** The
+> `vs. previous` column states the *expected* effect of the step, and the
+> `Verdict` column says whether the measurement confirmed it. Before the
+> freeze, every row must carry a real measurement or be struck out — a row
+> with empty numbers is a claim the judges will check.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
@@ -561,8 +567,19 @@ justified keeping it. Rows marked `EXPECTED` have not been measured yet.
 
 ## 3. Experiments that failed, and were reverted
 
-This section is deliberately the longest part of the file. Each of these was
-implemented, measured, and removed.
+This section is deliberately the longest part of the file. The organizers say
+so explicitly: *"The failed experiments count — they are often the most
+interesting part and judges are told to reward them."*
+
+> **The table below is a plan, not a claim.** Each row is an experiment worth
+> running, with the reason it is expected to fail. As the campaign runs, each
+> row is either filled in with the measurement that killed it, or **deleted**
+> if it was never attempted. A row left in the table with an empty Result
+> column is a promise the judges will check.
+>
+> **Do not leave an unmeasured row in this file at the freeze.** Either the
+> experiment happened and the result is written down, or it did not happen and
+> the row is gone. An empty cell is not a measurement.
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
