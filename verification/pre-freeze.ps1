@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     THE PRE-FREEZE LOCKDOWN. Run this in the last 6 hours before Nov 2 18:00 UTC.
 
@@ -30,8 +30,11 @@
 [CmdletBinding()]
 param(
     [string]$Track = "All",
+    [switch]$All,
     [switch]$SkipCleanBuild
 )
+
+if ($All) { $Track = "All" }
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -46,6 +49,53 @@ $TrackInfo = @{
 
 $script:failures = 0
 $script:checks   = 0
+
+# Invoke a native command without $ErrorActionPreference=Stop treating its
+# stderr as a terminating error (PowerShell 5.1 quirk): the redirection
+# runs in a child scope where EAP is Continue.
+#
+# Returns ONLY the exit code. Output is discarded on purpose: a function
+# returning both stdout and the exit code yields an array, and `$rc -eq 0`
+# on an array is not the comparison you think it is.
+function Invoke-Native {
+    $eap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        # A parenthesised array passed positionally arrives as ONE argument,
+        # so flatten the list before handing it to the executable.
+        $flat = @()
+        foreach ($a in $args) {
+            if ($a -is [System.Array]) { $flat += $a } else { $flat += $a }
+        }
+        $exe = $flat[0]
+        $rest = @()
+        if ($flat.Count -gt 1) { $rest = $flat[1..($flat.Count - 1)] }
+        $null = & $exe @rest 2>&1
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+    return [int]$LASTEXITCODE
+}
+
+# Same, but returns the command's stdout as a trimmed string. The exit code
+# is left in $LASTEXITCODE for the caller to read.
+function Get-NativeOut {
+    $eap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $flat = @()
+        foreach ($a in $args) {
+            if ($a -is [System.Array]) { $flat += $a } else { $flat += $a }
+        }
+        $exe = $flat[0]
+        $rest = @()
+        if ($flat.Count -gt 1) { $rest = $flat[1..($flat.Count - 1)] }
+        $out = & $exe @rest 2>&1
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+    return (($out | Out-String)).Trim()
+}
 
 function Check { param([string]$Name, [bool]$Ok, [string]$Detail = "", [switch]$Skip)
     $script:checks++
@@ -63,24 +113,24 @@ if (-not $SkipCleanBuild) {
     Write-Host "`n[1] OFFLINE BUILD FROM A CLEAN CHECKOUT" -ForegroundColor Cyan
     $tmp = Join-Path $env:TEMP ("speeddemon-freeze-" + [guid]::NewGuid().ToString("N").Substring(0,8))
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        git -C $Root rev-parse --git-dir *> $null
-        if ($LASTEXITCODE -eq 0) {
-            git clone --quiet $Root $tmp 2>&1 | Out-Null
-            if (Test-Path $tmp) {
+        $rc = Invoke-Native git @("-C", $Root, "rev-parse", "--git-dir")
+        if ($rc -eq 0) {
+            $rc = Invoke-Native git @("clone", "--quiet", $Root, $tmp)
+            if ((Test-Path $tmp) -and ($rc -eq 0)) {
                 Check "clone of the recorded commit" $true
                 Push-Location $tmp
-                cargo build --release --offline 2>&1 | Out-Null
-                Check "offline release build (no network)" ($LASTEXITCODE -eq 0) "cargo build --offline"
+                $rc = Invoke-Native cargo @("build", "--release", "--offline")
+                Check "offline release build (no network)" ($rc -eq 0) "cargo build --offline"
                 Pop-Location
                 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
             } else {
                 Check "clone of the recorded commit" $false "git clone failed"
             }
         } else {
-            Check "clean checkout build" $true "SKIPPED — not a git repository yet" -Skip
+            Check "clean checkout build" $true "SKIPPED - not a git repository yet" -Skip
         }
     } else {
-        Check "clean checkout build" $true "SKIPPED — git unavailable" -Skip
+        Check "clean checkout build" $true "SKIPPED - git unavailable" -Skip
     }
 }
 
@@ -153,8 +203,7 @@ foreach ($t in $targets) {
         Get-ChildItem $outDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
         $env:SD_DATA_DIR = $dataDir; $env:SD_OUT_DIR = $outDir; $env:TRACK = $t
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        & $bin *>$null
-        $code = $LASTEXITCODE
+        $code = Invoke-Native $bin @()
         $sw.Stop()
         $times += $sw.Elapsed.TotalSeconds
         if ($code -ne 0) { Check "run $i exits 0" $false "exit=$code"; $ok = $false; break }
@@ -190,19 +239,19 @@ foreach ($t in $targets) {
 # ── 9/10. repo-level ──────────────────────────────────────────────────────
 Write-Host "`n[REPO]" -ForegroundColor Cyan
 if (Get-Command git -ErrorAction SilentlyContinue) {
-    git -C $Root rev-parse --git-dir *> $null
-    if ($LASTEXITCODE -eq 0) {
-        $head = (git -C $Root rev-parse HEAD).Trim()
-        Check "git repository with a recorded commit" ([bool]$head) "HEAD=$head"
-        $dirty = git -C $Root status --porcelain
+    $rc = Invoke-Native git @("-C", $Root, "rev-parse", "--git-dir")
+    if ($rc -eq 0) {
+        $head = Get-NativeOut git @("-C", $Root, "rev-parse", "HEAD")
+        Check "git repository with a recorded commit" ([bool]$head) "HEAD=$($head.Substring(0,[Math]::Min(12,$head.Length)))"
+        $dirty = Get-NativeOut git @("-C", $Root, "status", "--porcelain")
         Check "working tree clean" ([string]::IsNullOrWhiteSpace($dirty)) $(if($dirty){"uncommitted changes exist"}else{""})
-        $remotes = (git -C $Root remote -v | Measure-Object).Count
-        Check "public remote configured" ($remotes -ge 2) "remotes=$remotes (expect fetch+push entries)"
+        $remotes = (Get-NativeOut git @("-C", $Root, "remote", "-v") | Out-String) -split "`n" | Where-Object { $_.Trim() }
+        Check "public remote configured" (@($remotes).Count -ge 2) "remotes=$(@($remotes).Count) (expect fetch+push entries)"
     } else {
         Check "git repository" $false "not initialised yet"
     }
 } else {
-    Check "git repository" $true "SKIPPED — git unavailable" -Skip
+    Check "git repository" $true "SKIPPED - git unavailable" -Skip
 }
 Check "OSI licence present" (Test-Path "$Root\LICENSE") (Split-Path (Get-Content "$Root\LICENSE" -TotalCount 1) -Leaf)
 

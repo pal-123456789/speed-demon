@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Speed Demon local scoring-box replica + gate verifier.
 
@@ -33,8 +33,11 @@
 param(
     [string]$Track = "All",
     [int]$Runs = 5,
+    [switch]$All,
     [switch]$NoDocker
 )
+
+if ($All) { $Track = "All" }
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
@@ -54,6 +57,28 @@ function Write-Ok($text)   { Write-Host "  [PASS] $text" -ForegroundColor Green 
 function Write-Bad($text)  { Write-Host "  [FAIL] $text" -ForegroundColor Red }
 function Write-Warn($text) { Write-Host "  [WARN] $text" -ForegroundColor Yellow }
 function Write-Info($text) { Write-Host "  [INFO] $text" -ForegroundColor Gray }
+
+# Invoke a native command without $ErrorActionPreference=Stop treating its
+# stderr as a terminating error (PowerShell 5.1 quirk).
+function Invoke-Native {
+    $eap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        # A parenthesised array passed positionally arrives as ONE argument,
+        # so flatten the list before handing it to the executable.
+        $flat = @()
+        foreach ($a in $args) {
+            if ($a -is [System.Array]) { $flat += $a } else { $flat += $a }
+        }
+        $exe = $flat[0]
+        $rest = @()
+        if ($flat.Count -gt 1) { $rest = $flat[1..($flat.Count - 1)] }
+        $null = & $exe @rest 2>&1
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+    return [int]$LASTEXITCODE
+}
 
 function Get-ExpectedHash {
     param([string]$TrackId)
@@ -134,7 +159,7 @@ foreach ($t in $targets) {
         $env:SD_DATA_DIR = $dataDir
         $env:SD_OUT_DIR  = $outDir
         $env:TRACK       = $t
-        & $bin *>$null
+        $null = Invoke-Native $bin @()
         $code = $LASTEXITCODE
         $sw.Stop()
         $times += $sw.Elapsed.TotalSeconds

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     5-run trimmed-mean benchmark + full per-axis ratio report for one track.
 
