@@ -1,0 +1,169 @@
+# Contract registry — the single source of truth for every value the
+# organizer freezes on Oct 28 18:00 UTC.
+#
+# Every row marked DEFERRED is a value this plan cannot honestly know yet.
+# The plan deliberately does NOT invent them. On Oct 28, fill them in, and
+# every downstream number (K budgets, ladder targets, harness wiring) becomes
+# real instead of parametric.
+#
+# `verification/contract.toml` is the machine-readable twin of this file and
+# is what the stub binaries and the harness scripts read.
+
+[global]
+data_dir = "/data"
+out_dir = "/out"
+# The harness runs ONE image and selects the track at RUN time:
+#   -v /srv/speeddemon/data/track-$TRACK:/data:ro -e TRACK=$TRACK IMAGE
+# Therefore the entrypoint dispatches on $TRACK. See /app/run.
+dispatch_env = "TRACK"
+# Sandbox: read-only root, no network, 1 GiB tmpfs at /tmp, dataset ro.
+tmpfs = "/tmp"
+tmpfs_size = "1g"
+network = "none"
+readonly_root = true
+# 5 runs, discard highest and lowest, mean of the middle three.
+runs = 5
+trim = 2
+# Every ratio is capped at 50x on every axis.
+axis_cap = 50
+# Weights, frozen by the event page. They sum to 1.0.
+weight_t = 0.40
+weight_m = 0.20
+weight_s = 0.15
+weight_d = 0.15
+weight_x = 0.10
+# speed score = 100 * ln(K)/ln(25), clamped to [0,100]
+k_anchor = 25
+
+# ── Track A — Ingest ───────────────────────────────────────────────────────
+[A]
+status = "DEFERRED"
+ref_time_s = 41.20
+ref_peak_mem_mb = 2940
+ref_source_bytes = 3180
+timeout_s = 412
+# FILENAME: the spec fixes the dataset filenames; only the schema is public.
+input_file = "access.log"
+output_file = "ingest.txt"
+# Output contract (pin these):
+#   - grouping key: endpoint x hour? endpoint only? endpoint x status class?
+#   - line ordering: by endpoint id (sorted bytes) or by first-seen order?
+#   - percentile definition: nearest-rank on the sorted list? which index?
+#   - error rate: fraction or percentage? how many decimals? trailing zeros?
+#   - separator: single space or tab? trailing newline present?
+#   - hour bucket format: RFC3339 hour, or an integer hour index?
+group_key = "DEFERRED"
+sort_order = "DEFERRED"
+percentile_rule = "DEFERRED"
+error_rate_format = "DEFERRED"
+field_separator = "DEFERRED"
+trailing_newline = "DEFERRED"
+
+# ── Track B — Index ───────────────────────────────────────────────────────
+[B]
+status = "DEFERRED"
+ref_time_s = 58.70
+ref_build_time_s = "DEFERRED"
+ref_query_time_s = "DEFERRED"
+ref_peak_mem_mb = "DEFERRED"
+ref_source_bytes = "DEFERRED"
+timeout_s = 587
+corpus_file = "corpus.txt"
+queries_file = "queries.txt"     # published name: QUERIES.TXT
+output_file = "index.txt"
+# The build/query blend formula. The public page says "combined into a
+# single T, weighted 40% build / 60% query". Pin the EXACT formula:
+#   additive ratio : 0.40*rB + 0.60*rQ
+#   harmonic       : 1 / (0.40/rB + 0.60/rQ)
+# The harmonic reading is always <= additive, so guessing wrong here costs
+# real K. This is the #1 Track B uncertainty.
+blend_formula = "DEFERRED"
+# Boolean semantics: left-associative, no parentheses. How does the
+# reference treat NOT? Does it bind tighter than AND? Pin it.
+boolean_associativity = "left"
+boolean_precedence = "DEFERRED"
+# Phrase semantics: tokenisation rule, whether stopwords are indexed
+# (the page says stopwords are RETAINED), whether matching is on the raw
+# byte stream or on a normalised token stream.
+tokenizer = "DEFERRED"
+stopwords_indexed = true
+# Result output: per-query line? doc ids space separated? how many ids per
+# query (all, or a cap)?
+result_format = "DEFERRED"
+
+# ── Track C — Join ────────────────────────────────────────────────────────
+[C]
+status = "DEFERRED"
+ref_time_s = 36.90
+ref_peak_mem_mb = "DEFERRED"
+ref_source_bytes = "DEFERRED"
+timeout_s = 369
+records_file = "records.csv"     # published name: RECORDS.CSV
+lookup_file = "DEFERRED"         # the lookup table's name is not public
+output_file = "join.txt"
+# The QUOTING RULES are the whole task. Pin every one:
+#   - a quoted field containing a bare LF: is the LF kept in the value?
+#   - is a CRLF inside a quoted field kept as CRLF or normalised to LF?
+#   - a BOM mid-file: is it stripped, kept, or does it make the field
+#     start with U+FEFF?
+#   - trailing spaces inside quotes: kept (sample suggests yes)
+#   - an unquoted field containing a quote: legal or not?
+#   - what terminates a record: LF, CRLF, or either?
+quoting = "DEFERRED"
+bom_handling = "DEFERRED"
+newline_in_quotes = "DEFERRED"
+# Amount handling: scale (2 decimals?), rounding mode, negative zero.
+amount_scale = "DEFERRED"
+amount_rounding = "DEFERRED"
+# Aggregate: sum of amount per group? which group key? which sort order?
+aggregate_key = "DEFERRED"
+sort_order = "DEFERRED"
+output_number_format = "DEFERRED"
+
+# ── Track D — Traverse ────────────────────────────────────────────────────
+[D]
+status = "DEFERRED"
+ref_time_s = 72.40
+ref_peak_mem_mb = "DEFERRED"
+ref_source_bytes = "DEFERRED"
+timeout_s = 724
+graph_file = "graph.txt"         # published name: GRAPH.TXT
+queries_file = "DEFERRED"
+output_file = "traverse.txt"
+# Distance only, or the full path? If distance only, tie-breaks are moot
+# and Contraction Hierarchies becomes far safer to attempt.
+output_contract = "DEFERRED"
+unreachable_spelling = "DEFERRED"
+# Is the edge list guaranteed to contain both directions, or must we build
+# the reverse graph ourselves? (The page says reverse edges are listed
+# SEPARATELY when they exist — so the reverse graph must be built.)
+weights_are = "uint32"
+max_distance_bound = "DEFERRED"   # needed to prove u32 is safe
+
+# ── Track E — Compress ────────────────────────────────────────────────────
+[E]
+status = "DEFERRED"
+ref_time_s = 29.80
+ref_ratio = 2.41
+ref_compressed_bytes = "DEFERRED"   # = 104857600 / 2.41
+ref_source_bytes = "DEFERRED"
+timeout_s = 298
+corpus_file = "corpus.bin"          # published name: CORPUS.BIN
+output_file = "corpus.sd"
+# The M slot on this track is COMPRESSED SIZE. The ratio that feeds K is
+# (our ratio) / (ref ratio 2.41) — NOT the raw ratio. Getting this wrong
+# inflates K by ~18%.
+m_axis = "compressed_size"
+# Compression time is weighted at 1/4 of decompression time. Pin the exact
+# blend: is T = 0.8*decomp + 0.2*comp, or 4*decomp+comp normalised?
+time_blend = "DEFERRED"
+# Segment geometry: published offsets are 1 MiB aligned and the four byte
+# counts are public. Pin whether the coder may assume those offsets or must
+# detect them.
+segments_published = true
+segment_offsets = [0, 31457280, 58982400, 82031168, 104857600]
+# The container wrapper: does the harness expect a specific magic/header,
+# or any file whose decode(encode(x)) == x? The SHA gate applies to THIS
+# file, so the exact bytes matter enormously.
+container_format = "DEFERRED"
+output_hash_source = "DEFERRED"

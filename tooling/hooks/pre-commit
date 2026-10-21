@@ -1,0 +1,72 @@
+#!/bin/sh
+# Pre-commit gate for the Speed Demon campaign.
+#
+# A gate failure on the scoring box means ZERO on that track, and the
+# organizers publish which gate you failed. This hook makes the most common
+# failure — a broken output hash — impossible to commit in the first place.
+#
+# What it does:
+#   1. rustfmt check (the S axis is measured on formatted source, so an
+#      unformatted tree is an inaccurately measured tree)
+#   2. clippy with warnings denied
+#   3. offline build
+#   4. for every TRACK whose source changed: run the binary and compare the
+#      output SHA-256 against the pinned expected hash, if one is pinned.
+#      Without a pinned hash (the Oct 30 sample has not shipped yet) it
+#      checks determinism instead: 3 runs, byte-identical.
+#
+# Install with:  sh tooling/install-hooks.sh
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+fail() {
+    echo "" >&2
+    echo "PRE-COMMIT BLOCKED: $1" >&2
+    echo "" >&2
+    exit 1
+}
+
+# ---- 1. formatting --------------------------------------------------------
+if command -v cargo >/dev/null 2>&1; then
+    if ! cargo fmt --all -- --check 2>/dev/null; then
+        echo "  formatting drift — run: cargo fmt --all" >&2
+        fail "rustfmt check failed"
+    fi
+
+    # ---- 2. clippy --------------------------------------------------------
+    if ! cargo clippy --all-targets --offline -- -D warnings 2>/dev/null; then
+        echo "  clippy warnings are errors here — fix them or justify them" >&2
+        fail "clippy failed"
+    fi
+
+    # ---- 3. offline build -------------------------------------------------
+    if ! cargo build --release --offline 2>/dev/null; then
+        fail "offline release build failed"
+    fi
+fi
+
+# ---- 4. per-track gate ----------------------------------------------------
+if command -v pwsh >/dev/null 2>&1; then
+    STAGED="$(git diff --cached --name-only | grep -E '^tracks/[A-E]-' | cut -d/ -f2 | sort -u || true)"
+    for dir in $STAGED; do
+        case "$dir" in
+            A-ingest)   T=A ;;
+            B-index)    T=B ;;
+            C-join)     T=C ;;
+            D-traverse) T=D ;;
+            E-compress) T=E ;;
+            *) continue ;;
+        esac
+        echo "  running the gate for track $T ($dir)"
+        if ! pwsh -NoProfile -File verification/verify.ps1 -Track "$T" >/tmp/sd-gate-$T.log 2>&1; then
+            cat /tmp/sd-gate-$T.log >&2
+            fail "track $T did not pass the gate"
+        fi
+        # Surface warnings (e.g. an unpinned expected hash) without failing.
+        grep -E '\[WARN\]' /tmp/sd-gate-$T.log || true
+    done
+fi
+
+exit 0

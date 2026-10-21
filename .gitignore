@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/target/
+# Cargo.lock IS committed: this is a binary project and the lockfile is part
+# of the reproducible build.
+
+# Verification output
+/out/
+/out-*/
+/verification/out/
+/verification/data/
+/verification/adversarial/
+*.out
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
+
+# Bench artifacts
+perf.data
+perf.data.old
+flamegraph.svg
+*.profraw
+*.profdata
+
+# Sample data (never commit real datasets)
+/data/
+sample-data/
+
+# Toolchain vendor cache (regenerated offline)
+vendor/

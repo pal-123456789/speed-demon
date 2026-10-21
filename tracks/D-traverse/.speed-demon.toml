@@ -1,0 +1,17 @@
+﻿# Machine-readable track descriptor. The harness uses this to queue the
+# submission without a human in the loop.
+#
+# declared_dependencies MUST match reality: this file feeds the D axis and
+# the D-axis honesty check in verification/d_axis.py. We ship D = 1
+# (std-only Rust, no vendored runtime crates).
+track = "D"
+team = "solo"
+language = "rust"
+language_version = "1.86.0"
+declared_dependencies = 0
+vendored_dependency_bytes = 0
+entrypoint = "/app/run"
+input_dir = "/data"
+output_dir = "/out"
+output_file = "traverse.txt"
+data_files = ["graph.txt"]

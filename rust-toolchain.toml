@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned for reproducible builds. The SAME channel must be vendored into the
+# Docker build context (see tooling/vendor-toolchain.sh) because the scoring
+# build runs with `--network=none` and cannot download a toolchain.
+channel = "1.86.0"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu"]
+profile = "minimal"

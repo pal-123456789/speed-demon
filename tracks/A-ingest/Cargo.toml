@@ -1,0 +1,17 @@
+﻿[package]
+name = "speeddemon-a"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Speed Demon Track A - Ingest - per-endpoint counts, p50/p95/p99 latency, hourly error rates"
+rust-version.workspace = true
+
+[[bin]]
+name = "speeddemon-a"
+path = "src/main.rs"
+
+[dependencies]
+speeddemon-core = { path = "../../core" }
+
+[lints.rust]
+unused_must_use = "deny"
