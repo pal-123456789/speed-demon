@@ -6,6 +6,8 @@
 # failure — a broken output hash — impossible to commit in the first place.
 #
 # What it does:
+#   0. rule 05 compliance (pre-kickoff only): refuse a commit that
+#      contains track-solution code before the 72-hour window opens
 #   1. rustfmt check (the S axis is measured on formatted source, so an
 #      unformatted tree is an inaccurately measured tree)
 #   2. clippy with warnings denied
@@ -28,6 +30,16 @@ fail() {
     exit 1
 }
 
+# ---- 0. rule 05 compliance -------------------------------------------------
+# Before kickoff, this is the most important check in the file: a commit
+# containing a track solution can disqualify the whole submission.
+if command -v python3 >/dev/null 2>&1; then
+    if ! python3 tooling/rule05_guard.py >/tmp/sd-rule05.log 2>&1; then
+        cat /tmp/sd-rule05.log >&2
+        fail "rule 05 guard blocked this commit"
+    fi
+fi
+
 # ---- 1. formatting --------------------------------------------------------
 if command -v cargo >/dev/null 2>&1; then
     if ! cargo fmt --all -- --check 2>/dev/null; then
@@ -48,25 +60,40 @@ if command -v cargo >/dev/null 2>&1; then
 fi
 
 # ---- 4. per-track gate ----------------------------------------------------
-if command -v pwsh >/dev/null 2>&1; then
-    STAGED="$(git diff --cached --name-only | grep -E '^tracks/[A-E]-' | cut -d/ -f2 | sort -u || true)"
-    for dir in $STAGED; do
-        case "$dir" in
-            A-ingest)   T=A ;;
-            B-index)    T=B ;;
-            C-join)     T=C ;;
-            D-traverse) T=D ;;
-            E-compress) T=E ;;
-            *) continue ;;
-        esac
-        echo "  running the gate for track $T ($dir)"
-        if ! pwsh -NoProfile -File verification/verify.ps1 -Track "$T" >/tmp/sd-gate-$T.log 2>&1; then
+# The Rust harness is preferred: it is the same implementation that runs on
+# the scoring box, where PowerShell does not exist.
+HARNESS="target/release/sd-harness"
+STAGED="$(git diff --cached --name-only | grep -E '^tracks/[A-E]-' | cut -d/ -f2 | sort -u || true)"
+for dir in $STAGED; do
+    case "$dir" in
+        A-ingest)   T=A ;;
+        B-index)    T=B ;;
+        C-join)     T=C ;;
+        D-traverse) T=D ;;
+        E-compress) T=E ;;
+        *) continue ;;
+    esac
+    echo "  running the gate for track $T ($dir)"
+    RAN=0
+    if [ -x "$HARNESS" ]; then
+        if "$HARNESS" verify --track "$T" --no-docker >/tmp/sd-gate-$T.log 2>&1; then
+            RAN=1
+        else
             cat /tmp/sd-gate-$T.log >&2
             fail "track $T did not pass the gate"
         fi
+    elif command -v pwsh >/dev/null 2>&1; then
+        if pwsh -NoProfile -File verification/verify.ps1 -Track "$T" >/tmp/sd-gate-$T.log 2>&1; then
+            RAN=1
+        else
+            cat /tmp/sd-gate-$T.log >&2
+            fail "track $T did not pass the gate"
+        fi
+    fi
+    if [ "$RAN" = "1" ]; then
         # Surface warnings (e.g. an unpinned expected hash) without failing.
-        grep -E '\[WARN\]' /tmp/sd-gate-$T.log || true
-    done
-fi
+        grep -E '\[WARN\]|UNVERIFIABLE' /tmp/sd-gate-$T.log || true
+    fi
+done
 
 exit 0

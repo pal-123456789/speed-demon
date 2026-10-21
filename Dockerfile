@@ -31,11 +31,21 @@ FROM debian:13-slim AS builder
 # (tooling/vendor-toolchain.sh) because the build runs with --network=none.
 # If it is absent the build fails loudly rather than silently trying the
 # network.
+#
+# The build context is filtered by .dockerignore, which keeps the image
+# free of everything that is not the submission: the verification harness,
+# the tooling, the fixtures, the docs and the build cache never enter it.
+# `vendor/` is deliberately NOT ignored — that is where the vendored
+# toolchain lives.
+#
+# The result is an image whose entire contents are: the dispatcher, the
+# five binaries, and the toolchain used to build them. Nothing in the
+# image is a file nobody remembers adding.
 COPY . /app
 WORKDIR /app
 
 # Build all five track binaries into /app/bin (core is compiled once).
-RUN chmod +x /app/build.sh /app/build-all.sh /app/run \
+RUN chmod +x /app/build-all.sh /app/run \
  && /app/build-all.sh
 
 

@@ -18,18 +18,25 @@
 |---|---|---|
 | Workspace (5 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
 | Core library (13 unit tests) | **GREEN** | 13/13 pass: arena, interner, chunking, pool, cents, float bits |
+| **`verification/harness`** — the scoring-box replica | **GREEN** | 12/12 tests: pure-Rust SHA-256 (known vectors), cgroup v2 peak reader, JSONL ledger, lockdown, contract table |
 | `rustfmt` + `clippy -D warnings` | **GREEN** | pre-commit hook enforces both |
 | Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build.sh` / `build-all.sh` compile core + 5 binaries with `--extern` |
-| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile` |
-| 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | `verify.ps1` — ran on all 5 tracks |
-| 5-run trimmed-mean benchmark | **GREEN** | `bench.ps1` |
-| Pre-freeze lockdown (81 checks) | **GREEN** | `pre-freeze.ps1` — 74/81, 7 honest FAILs (see §2) |
+| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile` + `.dockerignore` |
+| 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows) — same checklist, two hosts |
+| 5-run trimmed-mean benchmark | **GREEN** | `harness bench` + `bench.ps1` |
+| Pre-freeze lockdown (81 checks) | **GREEN** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux) |
+| **Rule 05 compliance guard** | **GREEN** | `tooling/rule05_guard.py` — proved to block a planted violation |
+| **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered |
+| **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
+| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 5 × ~290 lines, decision-complete, no solution code |
+| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` — free T-axis win, output-equivalence checked |
+| One-command CI | **GREEN** | `sh tooling/ci.sh` — 10 gates, cheapest-fails-first |
 | K calculator | **GREEN** | reproduces the published Nightshade example exactly (K 6.2569, speed 56.97, total 65.73) |
 | S/D axis measurement | **GREEN** | **D = 1.0000 on all five tracks** |
 | Anti-overfit fixture generator | **GREEN** | grammar-preserving data + 11 hand-crafted hostile CSV cases |
 | Track implementations (A–E) | **STUB** | scaffold sentinel present — *correct* pre-kickoff state |
 
-### The 7 open FAILs, and why each is correct right now
+### The open FAILs, and why each is correct right now
 
 | FAIL | Why it is correct now | When it clears |
 |---|---|---|
@@ -40,6 +47,26 @@
 **Two SKIPs, both informational:** "sample SHA-256 green" cannot be checked
 before the Oct 30 06:00 UTC sample ships, and the per-track reference source
 sizes for B–E are not published yet.
+
+---
+
+## 1b. The five decisions that are already locked
+
+These are made, with the arithmetic behind them, in `docs/specs/`. They are
+locked **before** the window opens so that H0 is typing, not deciding.
+
+| # | Decision | Why it is locked |
+|---|---|---|
+| 1 | **Contraction Hierarchies are REJECTED for Track D** | CH preprocessing costs 60–120 s *inside* the timed run, against a Commit budget of 2.9 s total. Amortised over only 2,000 queries it needs a ~30 ms/query saving to break even — about two orders of magnitude off. Chosen instead: CSR + radix heap + bidirectional + 6–8 ALT landmarks, with runtime-adaptive batching by distinct source/target. |
+| 2 | **Track B is deliberately blend-robust** | The published build/query blend (40/60) is DEFERRED and may be additive, harmonic or geometric. Balanced bets (β = q = 30×) survive all three; unbalanced bets swing the result by up to 2.1×. Query speedup carries ~4.5× the marginal leverage of build speedup under the additive blend. |
+| 3 | **Track E is speed-first, not ratio-first** | The M axis is `our_ratio / 2.41`, and across the entire realistic ratio band (2.6×–4.0×) the M factor only spans 1.0153–1.1066 ≈ **2.2 points**, while the T axis spans ~13. Trading 10% of ratio for 2× compression speed is **+3.2 points net**. Target ratio 3.1–3.4; never chase the last 5%. |
+| 4 | **Source bytes are bought for speed, globally** | Doubling the S axis costs 2.1 points; a 1.5× T gain is worth 3.3. So writing more code is a *net win* everywhere — which is why every plan targets a larger source footprint than the reference, not a smaller one. |
+| 5 | **D = 1 is a free axis and must be defended** | 0.15 of the weight, ~10–17% of K, for std-only Rust with zero vendored bytes. The rule-05 guard and the D-axis checks exist to keep it that way. |
+
+**One risk already identified:** if the page cache is charged to the memory
+cgroup on HEL1, Track A's M ratio collapses to ~8.6× and K drops ~2 points.
+There is a scheduled H1 measurement for exactly this, because it changes the
+memory design of the biggest track.
 
 ---
 
@@ -152,21 +179,60 @@ Then record the final commit hash in every `PERF.md`.
 
 ## 4. Tool reference
 
-| Command | What it does |
+### The one command
+
+```bash
+sh tooling/ci.sh              # every gate, cheapest-fails-first
+sh tooling/ci.sh --fast       # skip the container runs
+sh tooling/ci.sh --tracks A,C
+```
+
+### On the scoring box (Linux — no PowerShell, no Python needed)
+
+```bash
+cargo build --release --offline -p sd-harness
+
+./target/release/sd-harness bench   --track A --runs 5 --image speeddemon/solo:final
+./target/release/sd-harness verify  --track A
+./target/release/sd-harness ledger
+./target/release/sd-harness plan
+./target/release/sd-harness lockdown
+./target/release/sd-harness prewarm --file /srv/speeddemon/data/track-A/access.log
+./target/release/sd-harness hash    --file out/ingest.txt
+```
+
+`bench` reproduces the organizer's protocol exactly: the verbatim
+`docker run` flags (`--cpuset-cpus=0-11`, `--memory=8g --memory-swap=8g`,
+`--network=none`, `--read-only`, the 1 GiB tmpfs), peak memory from the
+kernel's cgroup `memory.peak`, 5 runs with the high and low discarded, and
+all four gates reported.
+
+### On the dev machine
+
+```bash
+cargo build --release --offline
+cargo test --offline
+python3 tooling/measure_axes.py --all      # the S and D axes
+python3 tooling/k_calc.py --preset nightshade
+python3 tooling/gen-fixtures.py --all      # the anti-overfit corpus
+python3 tooling/gen_docs.py                # regenerate PERF.md / README.md
+python3 tooling/rule05_guard.py            # the pre-kickoff compliance check
+python3 tooling/difftest.py out.txt ref.txt  # why did the hash mismatch?
+sh tooling/vendor-toolchain.sh             # vendor rustc for --network=none
+sh tooling/pgo-build.sh --track A          # offline profile-guided build
+sh tooling/install-hooks.sh                # the pre-commit gate
+```
+
+### The tools that exist because of how the 72 hours will go wrong
+
+| Tool | The failure it prevents |
 |---|---|
-| `cargo build --release --offline` | build everything, no network |
-| `cargo test --offline` | 13 core unit tests |
-| `powershell -File verification/verify.ps1 -Track A` | the four gates on one track |
-| `powershell -File verification/bench.ps1 -Track A -Runs 5` | 5-run trimmed mean, exactly the organizer's protocol |
-| `powershell -File verification/pre-freeze.ps1 -All` | the 81-check lockdown |
-| `python tooling/k_calc.py --preset nightshade` | reproduce the published worked example |
-| `python tooling/k_calc.py --t 30 --m 15 --s 0.62 --d 1 --x 1.05` | price a candidate |
-| `python tooling/measure_axes.py --all` | where the S and D axes stand |
-| `python tooling/gen-fixtures.py --all` | grammar-preserving fixtures (the anti-overfit guard) |
-| `python tooling/gen-fixtures.py --track C --adversarial` | the 11 hostile CSV edge cases |
-| `python tooling/gen_docs.py` | regenerate the per-track PERF.md / README.md |
-| `sh tooling/vendor-toolchain.sh` | vendor rustc for the offline Docker build |
-| `sh tooling/install-hooks.sh` | install the pre-commit gate |
+| `tooling/rule05_guard.py` | Committing a solution before kickoff → disqualification from the whole event |
+| `tooling/difftest.py` | Losing 3 hours to a hash mismatch that is actually a trailing newline |
+| `verification/harness` (ledger) | Writing PERF.md from memory instead of from measurements |
+| `verification/harness` (lockdown) | A stub reaching the freeze because nobody checked |
+| `tooling/pgo-build.sh` | Leaving 10–20% of T on the table because the build is free |
+| `tooling/ci.sh` | Discovering a broken gate 20 minutes before a commit you needed |
 
 ---
 
@@ -184,3 +250,23 @@ Then record the final commit hash in every `PERF.md`.
    bytes is a liability, and code that recognises the input is
    disqualification from the whole event. The fixture generator exists so that
    every optimisation is gated on data that is *not* the sample.
+
+## 6. The pre-kickoff design, in one place
+
+`docs/specs/` holds one decision-complete design specification per track,
+each with the same eight sections: Reference Teardown, Axis Budget,
+Algorithm & Data Layout, Hash-Gate Correctness & Determinism, Optimization
+Ladder, X-Scaling Safeguard, Hour Budget, Risk Register & Stop Rule.
+
+They contain **no solution code** — only design, arithmetic, and decisions.
+That is both the point and the legal position: rule 05 requires the code to
+be written inside the window, and a design document is what turns H0 into
+typing instead of thinking.
+
+| Spec | Lines | The headline decision |
+|---|---|---|
+| `docs/specs/track-a-ingest.md` | 285 | Two-level radix histogram for exact percentiles without sorting; the timestamp parse is the second-biggest cost and nobody expects it |
+| `docs/specs/track-b-index.md` | 261 | Blend-robust balanced bets; StreamVByte postings; positions are where the memory goes |
+| `docs/specs/track-c-join.md` | 303 | 12-feature hostile-input matrix with a parallel-vs-sequential parity scan before the fast path is enabled |
+| `docs/specs/track-d-traverse.md` | 291 | CH rejected on amortization arithmetic; CSR + radix heap + bidirectional + ALT landmarks |
+| `docs/specs/track-e-compress.md` | 311 | Speed-first: the M axis is only worth 2.2 points across the whole ratio band; per-segment models, byte-plane transposition for the float blob |

@@ -1,0 +1,40 @@
+# The build context for the SCORED image.
+#
+# Everything here is excluded from the image, so the image contains only the
+# submission itself: the dispatcher, the five track sources, the shared
+# core, and the vendored toolchain.
+#
+# vendor/ is deliberately NOT excluded — that is where the vendored Rust
+# toolchain lives, and the build runs with --network=none, so it has to
+# come from the context. Run tooling/vendor-toolchain.sh before the hack.
+
+# Build cache and VCS
+target/
+.git/
+.gitignore
+
+# Verification infrastructure — never part of the submission
+verification/
+tooling/
+docs/
+
+# Generated fixtures — large, and reproducible with gen-fixtures.py
+verification/data/
+*.profdata
+*.profraw
+
+# Per-track documentation and metadata
+tracks/*/verification/
+tracks/*/PERF.md
+tracks/*/README.md
+
+# Editor and OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# CI and editor config that the container has no use for
+.github/
+*.log

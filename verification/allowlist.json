@@ -1,0 +1,4 @@
+{
+  "_comment": "Entries here exempt a specific (pattern, path) pair from the rule 05 pre-kickoff scan. Each needs a reason. Keep this list as short as possible: every entry is a place where a reader could wonder whether the rules were bent.",
+  "allowlist": []
+}
