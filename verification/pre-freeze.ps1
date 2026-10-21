@@ -244,7 +244,13 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         $head = Get-NativeOut git @("-C", $Root, "rev-parse", "HEAD")
         Check "git repository with a recorded commit" ([bool]$head) "HEAD=$($head.Substring(0,[Math]::Min(12,$head.Length)))"
         $dirty = Get-NativeOut git @("-C", $Root, "status", "--porcelain")
-        Check "working tree clean" ([string]::IsNullOrWhiteSpace($dirty)) $(if($dirty){"uncommitted changes exist"}else{""})
+        # The measurement ledger is an append-only log: running the gates
+        # legitimately appends to it, so it is not an "uncommitted change".
+        # Everything else is.
+        $dirtyReal = (($dirty -split "`n") | Where-Object {
+            $_.Trim() -and $_.Trim() -notmatch 'verification/ledger\.jsonl$'
+        }) -join ""
+        Check "working tree clean" ([string]::IsNullOrWhiteSpace($dirtyReal)) $(if($dirtyReal){"uncommitted changes exist"}else{""})
         $remotes = (Get-NativeOut git @("-C", $Root, "remote", "-v") | Out-String) -split "`n" | Where-Object { $_.Trim() }
         Check "public remote configured" (@($remotes).Count -ge 2) "remotes=$(@($remotes).Count) (expect fetch+push entries)"
     } else {

@@ -237,7 +237,72 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
         ld.fail("runtime dispatcher present", "missing");
     }
 
+    // ── git state ───────────────────────────────────────────────────────
+    // The submission must be a public repository with an OSI licence at
+    // the freeze. These checks are skipped when git is unavailable, which
+    // is the case on a bare scoring box.
+    if git_output(root, &["rev-parse", "--git-dir"]).is_some() {
+        match git_output(root, &["rev-parse", "HEAD"]) {
+            Some(head) if !head.is_empty() => {
+                let short: String = head.chars().take(12).collect();
+                ld.pass(
+                    "git repository with a recorded commit",
+                    &format!("HEAD={short}"),
+                )
+            }
+            _ => ld.fail("git repository with a recorded commit", "no commit"),
+        }
+
+        // The measurement ledger is an append-only log: running the gates
+        // legitimately appends to it, so it is not an "uncommitted change".
+        // Everything else is.
+        let dirty = git_output(root, &["status", "--porcelain"]).unwrap_or_default();
+        let real: Vec<&str> = dirty
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter(|l| !l.trim_end().ends_with("verification/ledger.jsonl"))
+            .collect();
+        if real.is_empty() {
+            ld.pass("working tree clean", "");
+        } else {
+            ld.fail(
+                "working tree clean",
+                &format!("{} uncommitted change(s)", real.len()),
+            );
+        }
+
+        let remotes = git_output(root, &["remote", "-v"]).unwrap_or_default();
+        let count = remotes.lines().filter(|l| !l.trim().is_empty()).count();
+        if count >= 2 {
+            ld.pass("public remote configured", &format!("remotes={count}"));
+        } else {
+            ld.fail(
+                "public remote configured",
+                &format!("remotes={count} (expect fetch+push entries)"),
+            );
+        }
+    } else {
+        ld.skip(
+            "git repository with a recorded commit",
+            "git is not available here",
+        );
+    }
+
     ld
+}
+
+/// Run a git command in `root` and return its trimmed stdout, if it succeeds.
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 impl Lockdown {
