@@ -43,25 +43,42 @@ M is peak RSS (cgroup `memory.peak`). The reference's 2,940 MB comes mostly from
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+> **Generated from `verification/ledger.jsonl`** — every row below is a
+> measurement a machine produced, trimmed the same way the organizers
+> trim theirs (high and low discarded, mean of the middle three).
+> Commits represented: 241e64c.
+> **Do not edit this table by hand.** It is regenerated.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
-| 1 | Correct baseline: `split_whitespace` + `HashMap` + sort-per-endpoint | _ | _ | _the naive shape, SHA-green_ | EXPECTED |
-| 2 | Dense endpoint ids; per-endpoint `Vec<u32>` replaced by a flat histogram | _ | _ | _removes the sort and the retained list_ | EXPECTED |
-| 3 | Custom byte scanner over the fixed line grammar | _ | _ | _removes the general-purpose splitter_ | EXPECTED |
-| 4 | Timestamp by arithmetic instead of a date library | _ | _ | _removes the second-biggest cost_ | EXPECTED |
-| 5 | Two-level radix histogram for exact percentiles | _ | _ | _percentiles without sorting_ | EXPECTED |
-| 6 | Thread-local aggregation + deterministic merge | _ | _ | _12 threads on 6 P-cores_ | EXPECTED |
-| 7 | Bump arena for interned endpoints; buffer reuse | _ | _ | _M axis_ | EXPECTED |
-| 8 | PGO / branchless inner loop / cache blocking | _ | _ | _the last 10%_ | EXPECTED |
+| 1 | baseline | 0.030 | _ | baseline | MEASURED (`241e64c`) |
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
+
+| # | Change | T (s) | M (MB) | vs. previous | Verdict |
+|---|---|---:|---:|---:|---|
+| 1 | Correct baseline: `split_whitespace` + `HashMap` + sort-per-endpoint | _ | _ | _the naive shape, SHA-green_ | PLANNED |
+| 2 | Dense endpoint ids; per-endpoint `Vec<u32>` replaced by a flat histogram | _ | _ | _removes the sort and the retained list_ | PLANNED |
+| 3 | Custom byte scanner over the fixed line grammar | _ | _ | _removes the general-purpose splitter_ | PLANNED |
+| 4 | Timestamp by arithmetic instead of a date library | _ | _ | _removes the second-biggest cost_ | PLANNED |
+| 5 | Two-level radix histogram for exact percentiles | _ | _ | _percentiles without sorting_ | PLANNED |
+| 6 | Thread-local aggregation + deterministic merge | _ | _ | _12 threads on 6 P-cores_ | PLANNED |
+| 7 | Bump arena for interned endpoints; buffer reuse | _ | _ | _M axis_ | PLANNED |
+| 8 | PGO / branchless inner loop / cache blocking | _ | _ | _the last 10%_ | PLANNED |
 
 ---
 

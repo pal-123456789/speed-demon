@@ -43,23 +43,36 @@ M is easy to win here by streaming: the reference materialises rows the aggregat
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+> **No measurements yet.** This table is filled automatically from
+> `verification/ledger.jsonl` the moment the harness records a run.
+> A hand-written number in this section would be a guess.
+
+_(no measurements recorded yet)_
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
-| 1 | Correct scalar 4-state CSV machine, single threaded | _ | _ | _SHA-green — this is the oracle and is protected_ | EXPECTED |
-| 2 | Fixed-point cents instead of float; dense region ids | _ | _ | _bit-exact sums_ | EXPECTED |
-| 3 | Serial structural pre-scan for safe row boundaries | _ | _ | _makes parallel parsing legal_ | EXPECTED |
-| 4 | SIMD candidate-byte locator feeding the scalar machine | _ | _ | _finds candidates, never decides meaning_ | EXPECTED |
-| 5 | Thread-local aggregates + deterministic merge | _ | _ | _12 threads on 6 P-cores_ | EXPECTED |
-| 6 | Hash join vs sort-merge, measured | _ | _ | _the join strategy is a decision, not an assumption_ | EXPECTED |
+| 1 | Correct scalar 4-state CSV machine, single threaded | _ | _ | _SHA-green — this is the oracle and is protected_ | PLANNED |
+| 2 | Fixed-point cents instead of float; dense region ids | _ | _ | _bit-exact sums_ | PLANNED |
+| 3 | Serial structural pre-scan for safe row boundaries | _ | _ | _makes parallel parsing legal_ | PLANNED |
+| 4 | SIMD candidate-byte locator feeding the scalar machine | _ | _ | _finds candidates, never decides meaning_ | PLANNED |
+| 5 | Thread-local aggregates + deterministic merge | _ | _ | _12 threads on 6 P-cores_ | PLANNED |
+| 6 | Hash join vs sort-merge, measured | _ | _ | _the join strategy is a decision, not an assumption_ | PLANNED |
 
 ---
 

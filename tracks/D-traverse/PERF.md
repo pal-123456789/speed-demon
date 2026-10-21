@@ -43,23 +43,36 @@ M has to hold the graph *and* whatever preprocessing we build, inside an 8 GB ce
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+> **No measurements yet.** This table is filled automatically from
+> `verification/ledger.jsonl` the moment the harness records a run.
+> A hand-written number in this section would be a guess.
+
+_(no measurements recorded yet)_
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
-| 1 | Bidirectional Dijkstra on forward + reverse CSR | _ | _ | _SHA-green — the permanent rollback_ | EXPECTED |
-| 2 | Generation-stamp scratch, no per-query clears | _ | _ | _removes O(n) setup per query_ | EXPECTED |
-| 3 | Tuned priority queue + early termination on the meeting condition | _ | _ | _the constant factor_ | EXPECTED |
-| 4 | Parallel CSR build | _ | _ | _the build is inside the timed run_ | EXPECTED |
-| 5 | ALT landmarks, bounded sweep | _ | _ | _kept only if it beats plain bidirectional_ | EXPECTED |
-| 6 | Contraction Hierarchies, time-boxed with abort gates | _ | _ | _kept only if it wins the 1x AND the 10x ratio_ | EXPECTED |
+| 1 | Bidirectional Dijkstra on forward + reverse CSR | _ | _ | _SHA-green — the permanent rollback_ | PLANNED |
+| 2 | Generation-stamp scratch, no per-query clears | _ | _ | _removes O(n) setup per query_ | PLANNED |
+| 3 | Tuned priority queue + early termination on the meeting condition | _ | _ | _the constant factor_ | PLANNED |
+| 4 | Parallel CSR build | _ | _ | _the build is inside the timed run_ | PLANNED |
+| 5 | ALT landmarks, bounded sweep | _ | _ | _kept only if it beats plain bidirectional_ | PLANNED |
+| 6 | Contraction Hierarchies, time-boxed with abort gates | _ | _ | _kept only if it wins the 1x AND the 10x ratio_ | PLANNED |
 
 ---
 

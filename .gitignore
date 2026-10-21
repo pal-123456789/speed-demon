@@ -12,6 +12,12 @@
 /verification/adversarial/
 *.out
 
+# The measurement ledger IS committed: it is the evidence behind every
+# number in the per-track PERF.md files. A table the judges read has to
+# have a machine-produced provenance, and that provenance is this file.
+!verification/ledger.jsonl
+/verification/tmp/
+
 # OS / Editor
 .DS_Store
 Thumbs.db

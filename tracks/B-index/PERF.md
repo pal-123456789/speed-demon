@@ -43,24 +43,37 @@ M is the weakest axis on this track: positional postings dominate the footprint,
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+> **No measurements yet.** This table is filled automatically from
+> `verification/ledger.jsonl` the moment the harness records a run.
+> A hand-written number in this section would be a guess.
+
+_(no measurements recorded yet)_
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
-| 1 | Correct baseline: authored inverted index, boolean + phrase | _ | _ | _SHA-green_ | EXPECTED |
-| 2 | Dense term ids, byte-sorted dictionary, no per-token allocation | _ | _ | _removes allocation churn from the build_ | EXPECTED |
-| 3 | Parallel tokenise over document ranges + deterministic merge | _ | _ | _the build is the weighted-but-slow phase_ | EXPECTED |
-| 4 | Blocked delta postings: StreamVByte vs PForDelta, benchmarked | _ | _ | _memory and query speed_ | EXPECTED |
-| 5 | Boolean: smallest-posting-first intersection | _ | _ | _intersection order is most of the win_ | EXPECTED |
-| 6 | Phrase: rarest-term anchor + positional verify | _ | _ | _38% of queries_ | EXPECTED |
-| 7 | Parallel query execution into fixed per-query result slots | _ | _ | _12 threads, deterministic output_ | EXPECTED |
+| 1 | Correct baseline: authored inverted index, boolean + phrase | _ | _ | _SHA-green_ | PLANNED |
+| 2 | Dense term ids, byte-sorted dictionary, no per-token allocation | _ | _ | _removes allocation churn from the build_ | PLANNED |
+| 3 | Parallel tokenise over document ranges + deterministic merge | _ | _ | _the build is the weighted-but-slow phase_ | PLANNED |
+| 4 | Blocked delta postings: StreamVByte vs PForDelta, benchmarked | _ | _ | _memory and query speed_ | PLANNED |
+| 5 | Boolean: smallest-posting-first intersection | _ | _ | _intersection order is most of the win_ | PLANNED |
+| 6 | Phrase: rarest-term anchor + positional verify | _ | _ | _38% of queries_ | PLANNED |
+| 7 | Parallel query execution into fixed per-query result slots | _ | _ | _12 threads, deterministic output_ | PLANNED |
 
 ---
 

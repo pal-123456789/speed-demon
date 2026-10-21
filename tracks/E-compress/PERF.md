@@ -43,23 +43,36 @@ On this track the M slot holds COMPRESSED SIZE, and the ratio that feeds K is (o
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+> **No measurements yet.** This table is filled automatically from
+> `verification/ledger.jsonl` the moment the harness records a run.
+> A hand-written number in this section would be a guess.
+
+_(no measurements recorded yet)_
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
-| 1 | Raw-block container + minimal rANS, exact round trip | _ | _ | _SHA-green_ | EXPECTED |
-| 2 | One shared canonical decoder, per-segment dispatch | _ | _ | _the decoder is what is measured_ | EXPECTED |
-| 3 | Logs transform reusing the Track A tokenizer | _ | _ | _the biggest ratio lever_ | EXPECTED |
-| 4 | prose / json / blob transforms, each with a raw fallback | _ | _ | _per-segment models_ | EXPECTED |
-| 5 | Parallel rANS decoder across blocks | _ | _ | _12 threads on 6 P-cores_ | EXPECTED |
-| 6 | Encoder-side search improvements that do not slow the decoder | _ | _ | _cheap on the 4x-weighted axis_ | EXPECTED |
+| 1 | Raw-block container + minimal rANS, exact round trip | _ | _ | _SHA-green_ | PLANNED |
+| 2 | One shared canonical decoder, per-segment dispatch | _ | _ | _the decoder is what is measured_ | PLANNED |
+| 3 | Logs transform reusing the Track A tokenizer | _ | _ | _the biggest ratio lever_ | PLANNED |
+| 4 | prose / json / blob transforms, each with a raw fallback | _ | _ | _per-segment models_ | PLANNED |
+| 5 | Parallel rANS decoder across blocks | _ | _ | _12 threads on 6 P-cores_ | PLANNED |
+| 6 | Encoder-side search improvements that do not slow the decoder | _ | _ | _cheap on the 4x-weighted axis_ | PLANNED |
 
 ---
 

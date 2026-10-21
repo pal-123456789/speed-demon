@@ -20,6 +20,7 @@ documents are generated with a strict honesty discipline baked in:
 Run:  python tooling/gen_docs.py
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -550,14 +551,25 @@ Recompute with `python tooling/k_calc.py --t _ --m _ --s _ --d 1 --x _`.
 
 ## 2. The ladder
 
-Every row below is a step in the optimisation sequence, with the measurement
-that justified keeping it.
+### 2a. What was measured
 
-> **The T and M cells are empty until the harness has produced them.** The
-> `vs. previous` column states the *expected* effect of the step, and the
-> `Verdict` column says whether the measurement confirmed it. Before the
-> freeze, every row must carry a real measurement or be struck out — a row
-> with empty numbers is a claim the judges will check.
+{measured_intro}
+
+{measured_ladder}
+
+### 2b. What was planned
+
+Every row below is a step in the optimisation sequence. The `vs. previous`
+column states the *expected* effect of the step.
+
+> **The T and M cells stay empty until the harness has produced them.** A row
+> with empty numbers is a plan, not a result. When a step is attempted, it
+> moves up into table 2a with a real number attached — and if it fails, it
+> moves down into section 3 with the measurement that killed it.
+>
+> **Before the freeze, every planned row must be either measured or struck
+> out.** A plan that was never attempted is not a result and must not be
+> presented as one.
 
 | # | Change | T (s) | M (MB) | vs. previous | Verdict |
 |---|---|---:|---:|---:|---|
@@ -692,10 +704,16 @@ MIT, at the repository root. The source is public at code freeze.
 
 
 def build_ladder_rows(steps):
+    """The PLANNED ladder: what the optimisation sequence will attempt.
+
+    Every T and M cell is empty. The measured ladder is a different table,
+    generated from the ledger, and appears above it once there are
+    measurements. Keeping them separate is what stops a plan from being
+    mistaken for a result.
+    """
     rows = []
     for num, change, effect in steps:
-        verdict = "EXPECTED"
-        rows.append(f"| {num} | {change} | _ | _ | _{effect}_ | {verdict} |")
+        rows.append(f"| {num} | {change} | _ | _ | _{effect}_ | PLANNED |")
     return "\n".join(rows)
 
 
@@ -706,12 +724,120 @@ def build_failed_rows(failed):
     return "\n".join(rows)
 
 
+# ── the measured ladder, from the ledger ───────────────────────────────────
+
+LEDGER = ROOT / "verification" / "ledger.jsonl"
+
+
+def read_ledger(path=LEDGER):
+    """Read the JSONL measurement ledger into records.
+
+    Deliberately dependency-free: the ledger is a fixed-shape, one-object-
+    per-line file that this repository writes, so a line-oriented reader is
+    enough and keeps the toolchain at zero third-party packages.
+    """
+    if not path.is_file():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        out.append(rec)
+    return out
+
+
+def _trimmed_mean(values):
+    """The organizer's protocol: discard the high and the low, mean the rest."""
+    if not values:
+        return None
+    vals = sorted(values)
+    if len(vals) >= 3:
+        vals = vals[1:-1]
+    return sum(vals) / len(vals)
+
+
+def build_measured_ladder(track, records):
+    """The MEASURED ladder for one track, grouped by experiment label.
+
+    Each label is one rung of the ladder. Within a label the runs are
+    trimmed-meanmed exactly the way the organizers trim theirs, so the
+    number in PERF.md is the same statistic the score uses.
+    """
+    rows = records
+    if not rows:
+        return None
+
+    # Preserve first-seen order: the ladder is a sequence, and a table that
+    # reorders itself between regenerations is unreadable.
+    order = []
+    by_label = {}
+    for r in rows:
+        label = r.get("label", "run")
+        if label not in by_label:
+            by_label[label] = []
+            order.append(label)
+        by_label[label].append(r)
+
+    lines = [
+        "| # | Change | T (s) | M (MB) | vs. previous | Verdict |",
+        "|---|---|---:|---:|---:|---|",
+    ]
+    base_t = None
+    base_m = None
+    for i, label in enumerate(order, 1):
+        recs = by_label[label]
+        t = _trimmed_mean([float(r.get("wall_s", 0.0)) for r in recs])
+        peaks = [float(r["peak_mib"]) for r in recs if r.get("peak_mib") is not None]
+        m = (max(peaks) / (1024.0 * 1024.0)) if peaks else None
+        if base_t is None:
+            base_t = t
+            base_m = m
+            vs = "baseline"
+        else:
+            if t is not None and base_t:
+                ratio = base_t / t if t > 0 else 0.0
+                vs = f"{ratio:.2f}x faster"
+            else:
+                vs = "-"
+        mem_s = f"{m:.1f}" if m is not None else "_"
+        t_s = f"{t:.3f}" if t is not None else "_"
+        commit = recs[0].get("commit", "")[:8]
+        lines.append(f"| {i} | {label} | {t_s} | {mem_s} | {vs} | MEASURED (`{commit}`) |")
+    return "\n".join(lines)
+
+
+def build_measured_intro(track, records):
+    if not records:
+        return (
+            "> **No measurements yet.** This table is filled automatically from\n"
+            "> `verification/ledger.jsonl` the moment the harness records a run.\n"
+            "> A hand-written number in this section would be a guess."
+        )
+    commits = sorted({r.get("commit", "")[:8] for r in records})
+    return (
+        "> **Generated from `verification/ledger.jsonl`** — every row below is a\n"
+        "> measurement a machine produced, trimmed the same way the organizers\n"
+        f"> trim theirs (high and low discarded, mean of the middle three).\n"
+        f"> Commits represented: {', '.join(commits)}.\n"
+        "> **Do not edit this table by hand.** It is regenerated."
+    )
+
+
 def main() -> int:
     for track, cfg in TRACKS.items():
         tdir = ROOT / "tracks" / cfg["dir"]
         tdir.mkdir(parents=True, exist_ok=True)
 
         m_label = "compressed size" if track == "E" else "peak memory"
+
+        track_records = [r for r in read_ledger() if r.get("track") == track]
+        measured = build_measured_ladder(track, track_records)
+        measured_intro = build_measured_intro(track, track_records)
 
         perf = PERF_TEMPLATE.format(
             track=track,
@@ -722,6 +848,8 @@ def main() -> int:
             ref_src=cfg["ref_src"],
             m_label=m_label,
             axis_note=cfg["axis_note"],
+            measured_intro=measured_intro,
+            measured_ladder=measured or "_(no measurements recorded yet)_",
             ladder_rows=build_ladder_rows(cfg["ladder"]),
             failed_rows=build_failed_rows(cfg["failed"]),
             determinism=cfg["determinism"],
