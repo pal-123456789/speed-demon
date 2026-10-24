@@ -8,7 +8,41 @@
 > require all project code to be written inside the 72-hour window
 > (Oct 30 18:00 UTC → Nov 2 18:00 UTC).
 >
-> Last updated: pre-kickoff build complete.
+> Last updated: after the Oct 22 full audit. See §1a.
+
+---
+
+## 1a. What the Oct 22 audit changed
+
+The audit ran the build scripts rather than reading them. Five of them had
+never been executed, and every one of those five was broken. Because the
+harness builds a single image for all five tracks, each defect was a total
+loss on submission rather than a degraded score.
+
+| Defect | Consequence if it had shipped | Fixed |
+|---|---|---|
+| `--crate-name speeddemon-a` | rustc rejects hyphens; build fails | one build implementation, underscore crate names |
+| Core rlib built for the host triple, binary linked for musl | link fails with E0461 | core compiled with `--target` |
+| `-C linker-flavor=gnu-lld` | unstable option, hard error on stable | `ld.lld`, which is stable |
+| musl "detected" via `--print target-libdir` | succeeds for uninstalled targets; build fails later | checks for the std archive |
+| gnu link in an image with no C compiler | impossible link, no network to fix it | static musl link via the toolchain's rust-lld |
+| Per-track Dockerfiles | referenced `/app/build.sh` with the track dir as context; nothing was in the image | generated from a template, repo root as context, `--check` in CI |
+| `pgo-build.sh` | built with cargo into `target/pgo`, never reached the image; no `llvm-profdata merge`, so `-profile-use` had nothing to read | profile lands in `target/pgo/prof`, consumed by `build-one.sh` |
+| `ci.sh` | hardcoded `python3`; called an unimplemented `--s-only`, so the S axis silently passed | interpreter detection, one pass for both axes, 5 new gates |
+| No executable bits in git | a fresh clone silently ignores the pre-commit hook | all scripts `100755` |
+
+Two things came out of it that were not repairs:
+
+- `tooling/spec_intake.py` — the Oct 28 checklist. It enumerates all 36
+  DEFERRED values, records pins, recomputes the K budget, and refuses to
+  report ready while a blocking value is unanswered.
+- A harness test that asserts the Rust contract table still agrees with
+  `verification/contract.toml`, so the two cannot drift when the specs freeze.
+
+The dashboard below overclaimed before this audit: rows marked GREEN for the
+offline build path, dispatch, and one-command CI were describing scripts that
+had never been run. They are green now, and `tooling/ci.sh` proves it on
+every run.
 
 ---
 
@@ -18,10 +52,10 @@
 |---|---|---|
 | Workspace (5 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
 | Core library (13 unit tests) | **GREEN** | 13/13 pass: arena, interner, chunking, pool, cents, float bits |
-| **`verification/harness`** — the scoring-box replica | **GREEN** | 12/12 tests: pure-Rust SHA-256 (known vectors), cgroup v2 peak reader, JSONL ledger, lockdown, contract table |
+| **`verification/harness`** — the scoring-box replica | **GREEN** | 13/13 tests: pure-Rust SHA-256 (known vectors), cgroup v2 peak reader, JSONL ledger, lockdown, contract table *and contract.toml agreement* |
 | `rustfmt` + `clippy -D warnings` | **GREEN** | pre-commit hook enforces both |
-| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build.sh` / `build-all.sh` compile core + 5 binaries with `--extern` |
-| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile` + `.dockerignore` |
+| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build-one.sh` builds all 5 statically for musl; `build-all.sh` loops over it; verified from a clean 54-file context |
+| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test 5/5 in CI |
 | 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows) — same checklist, two hosts |
 | 5-run trimmed-mean benchmark | **GREEN** | `harness bench` + `bench.ps1` |
 | Pre-freeze lockdown (81 checks) | **GREEN** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux) |
@@ -177,6 +211,43 @@ Then record the final commit hash in every `PERF.md`.
 
 ---
 
+## 3a. Oct 28 18:00 UTC — SPEC.md intake
+
+The organizers freeze the specs on Oct 28, two days before the window opens.
+36 values in `verification/contract.toml` are marked `DEFERRED` until then;
+24 of them block a track outright (get one wrong and the submission writes a
+file nobody asked for). `tooling/spec_intake.py` is the checklist for that
+day so the work is bookkeeping rather than archaeology.
+
+```bash
+python tooling/spec_intake.py --status    # every DEFERRED value + where SPEC.md answers it
+python tooling/spec_intake.py --set B.blend_formula='0.40*rB + 0.60*rQ'
+python tooling/spec_intake.py --check     # the gate; fails while a blocker is unanswered
+python tooling/spec_intake.py --kbudget   # the K budget from the pinned numbers
+```
+
+`--check` runs the harness consistency test, so it catches the one failure
+mode that reading cannot: a value pinned in `contract.toml` while the Rust
+table keeps the old number. If that test fails, the fix is to update
+`verification/harness/src/contract.rs` to match, not the other way round —
+`contract.toml` is the record of what the organizers froze.
+
+Then, in order:
+
+1. Update the five `tracks/*/.speed-demon.toml` output filenames if the spec
+   renamed anything; the lockdown cross-checks them against the contract.
+2. Re-run `python tooling/fix_encoding.py --scan .` after pasting any spec
+   text into a file — the PowerShell round-trip that produced the Oct 22
+   mojibake is still the default way text gets edited on this host.
+3. Re-read `docs/specs/*.md` against the frozen spec and correct any decision
+   the real spec contradicts. The Track D rejection of Contraction
+   Hierarchies is the one most likely to be affected: it rests on the
+   preprocessing budget, so if the frozen D spec allows untimed
+   preprocessing the arithmetic changes.
+4. `sh tooling/ci.sh` must be all green before the window opens.
+
+---
+
 ## 4. Tool reference
 
 ### The one command
@@ -218,7 +289,9 @@ python3 tooling/gen-fixtures.py --all      # the anti-overfit corpus
 python3 tooling/gen_docs.py                # regenerate PERF.md / README.md
 python3 tooling/rule05_guard.py            # the pre-kickoff compliance check
 python3 tooling/difftest.py out.txt ref.txt  # why did the hash mismatch?
-sh tooling/vendor-toolchain.sh             # vendor rustc for --network=none
+python3 tooling/spec_intake.py --status    # the Oct 28 checklist
+python3 tooling/gen_dockerfiles.py         # regenerate the per-track Dockerfiles
+sh tooling/vendor-toolchain.sh             # vendor rustc + musl std for --network=none
 sh tooling/pgo-build.sh --track A          # offline profile-guided build
 sh tooling/install-hooks.sh                # the pre-commit gate
 ```
@@ -229,9 +302,11 @@ sh tooling/install-hooks.sh                # the pre-commit gate
 |---|---|
 | `tooling/rule05_guard.py` | Committing a solution before kickoff → disqualification from the whole event |
 | `tooling/difftest.py` | Losing 3 hours to a hash mismatch that is actually a trailing newline |
+| `tooling/spec_intake.py` | Pinning 36 frozen values by hand on Oct 28 and getting one wrong |
 | `verification/harness` (ledger) | Writing PERF.md from memory instead of from measurements |
 | `verification/harness` (lockdown) | A stub reaching the freeze because nobody checked |
 | `tooling/pgo-build.sh` | Leaving 10–20% of T on the table because the build is free |
+| `tooling/gen_dockerfiles.py` | A hand-edited per-track Dockerfile that no longer matches the build |
 | `tooling/ci.sh` | Discovering a broken gate 20 minutes before a commit you needed |
 
 ---

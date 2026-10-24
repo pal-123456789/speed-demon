@@ -48,6 +48,14 @@ fn main() {
     let cmd = args[1].clone();
     let opts = parse_opts(&args[2..]);
 
+    // `--help` must work on a SUBCOMMAND too. Before this, `verify --help`
+    // failed with "--track is required", which is the least helpful possible
+    // answer to somebody asking what the flags mean.
+    if opts.has("help") || args[2..].iter().any(|a| a == "-h") {
+        usage();
+        return;
+    }
+
     let result = match cmd.as_str() {
         "bench" => cmd_bench(&opts),
         "verify" => cmd_verify(&opts),
@@ -202,6 +210,20 @@ struct RunOutcome {
     output_bytes: u64,
     exit_code: i32,
     extra_files: Vec<String>,
+}
+
+/// Is a docker CLI on PATH? Used only to decide whether the containerised
+/// protocol is possible here; a present-but-unusable daemon is still an error
+/// when the container run is attempted, which is the correct place to report
+/// it because that is where the detail is.
+fn docker_present() -> bool {
+    std::process::Command::new("docker")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// The verbatim scoring command. `--rm` is deliberately NOT used: the peak
@@ -452,7 +474,17 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
     let image = opts.get_or("image", "speeddemon/solo:bench");
     let label = opts.get_or("label", "bench");
     let ledger_path = PathBuf::from(opts.get_or("ledger", DEFAULT_LEDGER));
-    let no_docker = opts.has("no-docker");
+    // --no-docker, or no docker on this host. A verification tool that can
+    // only run on one of its two hosts is a tool that silently gets skipped
+    // on the other; falling back to the direct run keeps the four gates
+    // running on a dev machine, and says so in the report so nobody mistakes
+    // a direct run for the containerised scoring protocol.
+    let docker_available = docker_present();
+    let no_docker = opts.has("no-docker") || !docker_available;
+    if !docker_available && !opts.has("no-docker") {
+        println!("  NOTE    : docker not found — falling back to a direct run");
+        println!("            (gates run, but timing is NOT the scoring protocol)");
+    }
     let threads: u32 = opts.get_or("threads", "12").parse().unwrap_or(12);
 
     println!("=== BENCH track {id} ({}) ===", track.dir);

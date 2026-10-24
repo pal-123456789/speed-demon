@@ -1,10 +1,15 @@
 .PHONY: help verify bench freeze-check fmt clippy kcalc test axes fixtures docs \
-        guard harness ci pgo prewarm plan hash clean
+        guard harness ci pgo prewarm plan hash clean build spec dockerfiles dispatch
 
 # The campaign is a Rust workspace, but the tooling is Python and the
 # verification is split between PowerShell (Windows dev) and a Rust harness
 # (the scoring box). The `harness` targets are the ones that matter on
 # HEL1, where there is no PowerShell and no Python.
+#
+# `pwsh` was hardcoded in the verify/bench/freeze-check targets. This host has
+# only Windows PowerShell 5.1, so those three targets simply did not run here.
+# They now pick whichever PowerShell exists, and fall back to the Rust harness
+# (the same checklist) when neither does.
 
 help:
 	@echo "Speed Demon — campaign targets"
@@ -29,9 +34,12 @@ help:
 	@echo ""
 	@echo "  TOOLING"
 	@echo "    make guard          — rule 05 pre-kickoff compliance check"
+	@echo "    make spec           — the Oct 28 SPEC.md intake checklist"
 	@echo "    make axes           — the S and D axes"
 	@echo "    make fixtures       — regenerate the anti-overfit fixture corpus"
 	@echo "    make docs           — regenerate the per-track PERF.md and README.md"
+	@echo "    make dockerfiles    — regenerate the per-track Dockerfiles"
+	@echo "    make dispatch       — dispatcher self-test"
 	@echo "    make kcalc          — the K-coefficient calculator"
 	@echo "    make pgo TRACK=A    — offline profile-guided build"
 
@@ -42,13 +50,28 @@ test:
 	cargo test --offline
 
 verify:
-	pwsh -File verification/verify.ps1 -All
+	@PS=$$(command -v pwsh || command -v powershell); \
+	if [ -n "$$PS" ]; then \
+	  "$$PS" -NoProfile -File verification/verify.ps1 -All; \
+	else \
+	  cargo run --release --offline -p sd-harness -- verify --track "$(or $(TRACK),A)"; \
+	fi
 
 bench:
-	pwsh -File verification/bench.ps1 -Track $(TRACK) -Runs 5
+	@PS=$$(command -v pwsh || command -v powershell); \
+	if [ -n "$$PS" ]; then \
+	  "$$PS" -NoProfile -File verification/bench.ps1 -Track $(TRACK) -Runs 5; \
+	else \
+	  cargo run --release --offline -p sd-harness -- bench --track $(TRACK) --runs 5; \
+	fi
 
 freeze-check:
-	pwsh -File verification/pre-freeze.ps1 -All
+	@PS=$$(command -v pwsh || command -v powershell); \
+	if [ -n "$$PS" ]; then \
+	  "$$PS" -NoProfile -File verification/pre-freeze.ps1 -All; \
+	else \
+	  cargo run --release --offline -p sd-harness -- lockdown; \
+	fi
 
 # Every gate, in the cheapest-fails-first order. This is the command to run
 # before every commit during the 72 hours.
@@ -69,6 +92,15 @@ hash:
 
 guard:
 	python3 tooling/rule05_guard.py
+
+spec:
+	python3 tooling/spec_intake.py --status
+
+dockerfiles:
+	python3 tooling/gen_dockerfiles.py
+
+dispatch:
+	sh tooling/test-dispatcher.sh
 
 axes:
 	python3 tooling/measure_axes.py --all
