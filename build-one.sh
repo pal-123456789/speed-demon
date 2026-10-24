@@ -117,15 +117,51 @@ echo "[build-one] target $TARGET, linker $LLD (static, no libc needed)"
 # flag. That check is here, on the scored path, so a PGO profile cannot be
 # generated and then silently left behind.
 #
+# `-C profile-use` takes the MERGED .profdata FILE, not the directory that
+# contains it. Passing the directory is not an error: rustc prints
+#   warning: /path/to/prof: is a directory
+# emits one warning, EXITS 0, and compiles without profile data. So the old
+# form silently produced an unprofiled binary on every single build while
+# printing "[build-one] PGO profile found" — the worst possible failure shape,
+# because the log says PGO was used and nothing downstream can tell it was not.
+#
+# TWO LOCATIONS, because the profile has to survive into the image:
+#   $APP_DIR/pgo/merged.profdata          shippable (NOT excluded by .dockerignore)
+#   $APP_DIR/target/pgo/prof/merged.profdata   build artefact (target/ IS excluded)
+# The shippable copy wins, because that is the only one present when the
+# organizer builds with `docker build --network=none .`.
+#
 # The profile must never change the ANSWER — tooling/pgo-build.sh verifies
 # byte-identical output against a non-PGO build before the profile is kept.
 PGO_FLAGS=""
-PROFILE_DIR="${SD_PGO_PROFILE_DIR:-$APP_DIR/target/pgo/prof}"
-if [ -d "$PROFILE_DIR" ] && ls "$PROFILE_DIR"/*.profdata >/dev/null 2>&1; then
-    PGO_FLAGS="-C profile-use=$PROFILE_DIR -C llvm-args=-inline-threshold=275"
-    echo "[build-one] PGO profile found: $PROFILE_DIR (optimising for it)"
+PROFILE_FILE=""
+for cand in \
+    "${SD_PGO_PROFILE:-}" \
+    "$APP_DIR/pgo/merged.profdata" \
+    "$APP_DIR/target/pgo/prof/merged.profdata"
+do
+    [ -n "$cand" ] || continue
+    if [ -f "$cand" ] && [ -s "$cand" ]; then
+        PROFILE_FILE="$cand"
+        break
+    fi
+done
+if [ -n "$PROFILE_FILE" ]; then
+    # Belt and braces: re-assert the invariant at the point of use. Anything
+    # that is not a readable, non-empty regular file must not be handed to
+    # -C profile-use, because rustc accepts a bad profile with a warning.
+    if [ ! -f "$PROFILE_FILE" ] || [ ! -s "$PROFILE_FILE" ]; then
+        echo "[build-one] FATAL: PGO profile is not a readable non-empty file: $PROFILE_FILE" >&2
+        exit 1
+    fi
+    PGO_FLAGS="-C profile-use=$PROFILE_FILE -C llvm-args=-inline-threshold=275"
+    echo "[build-one] PGO profile found: $PROFILE_FILE (optimising for it)"
 else
     echo "[build-one] no PGO profile — plain release build"
+    if [ -d "$APP_DIR/target/pgo/prof" ]; then
+        echo "[build-one]   note: target/pgo/prof exists but holds no merged.profdata;" >&2
+        echo "[build-one]   run: sh tooling/pgo-build.sh --track $TRACK" >&2
+    fi
 fi
 
 # ---- compile core (std-only, D=1) ---------------------------------------
@@ -153,7 +189,13 @@ fi
 # build fail with "invalid character `'-'` in crate name" — a bug found only
 # by actually running this script.
 echo "[build-one] compiling $BIN (track $TRACK, source tracks/$TRACK_DIR)"
-"$RUSTC" --edition 2021 --crate-name "speeddemon_${TRACK}" \
+# Capture stderr so a profile that rustc REFUSED cannot pass unnoticed. rustc
+# treats an unreadable profile as a warning and still exits 0, so the exit code
+# alone cannot distinguish "profiled" from "silently unprofiled" — which is
+# exactly how the directory bug survived. Any complaint about the profile is
+# now fatal on the scored path.
+COMPILE_LOG="$(mktemp 2>/dev/null || echo "/tmp/build-one.$$.log")"
+if ! "$RUSTC" --edition 2021 --crate-name "speeddemon_${TRACK}" \
     --extern speeddemon_core="$CORE_RLIB" \
     -L "$OUT_DIR" \
     -C opt-level=3 -C codegen-units=1 -C lto=thin -C panic=abort \
@@ -161,6 +203,20 @@ echo "[build-one] compiling $BIN (track $TRACK, source tracks/$TRACK_DIR)"
     $PGO_FLAGS \
     $LINK_ARGS \
     --target "$TARGET" \
-    -o "$OUT_DIR/$BIN" "$APP_DIR/tracks/$TRACK_DIR/src/main.rs"
+    -o "$OUT_DIR/$BIN" "$APP_DIR/tracks/$TRACK_DIR/src/main.rs" 2>"$COMPILE_LOG"
+then
+    cat "$COMPILE_LOG" >&2
+    echo "[build-one] FATAL: rustc failed for track $TRACK" >&2
+    exit 1
+fi
+cat "$COMPILE_LOG" >&2
+if [ -n "$PROFILE_FILE" ] && grep -qi "profile" "$COMPILE_LOG"; then
+    echo "[build-one] FATAL: PGO was requested but rustc did not accept the profile:" >&2
+    grep -i "profile" "$COMPILE_LOG" >&2
+    echo "[build-one] Refusing to ship an unprofiled binary that claims to be profiled." >&2
+    echo "[build-one] Re-generate it: sh tooling/pgo-build.sh --track $TRACK --clean" >&2
+    exit 1
+fi
+rm -f "$COMPILE_LOG"
 
 echo "[build-one] ok: $OUT_DIR/$BIN"

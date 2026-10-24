@@ -167,8 +167,11 @@ for t in $TRACKS; do
   #   -Cllvm-args=-inline-threshold=275  a larger inline budget
   #   -Ccodegen-units=1                   keep the layout stable
   #   -Cpanic=abort                       no unwinding tables (already in the profile)
+  #
+  # profile-use takes the .profdata FILE, not its directory: passing the
+  # directory makes rustc warn "is a directory" and compile without a profile.
   CARGO_TARGET_DIR="$PGO_DIR/use" \
-  RUSTFLAGS="-Cprofile-use=$PROF_DIR -Cllvm-args=-inline-threshold=275" \
+  RUSTFLAGS="-Cprofile-use=$PROF_DIR/merged.profdata -Cllvm-args=-inline-threshold=275" \
     cargo build --release --offline -p "$PKG" \
     || die "phase 3 build failed for track $t"
 
@@ -192,12 +195,21 @@ for t in $TRACKS; do
 done
 
 say "PGO complete"
+# The shippable copy. .dockerignore excludes target/ and *.profdata, so a
+# profile that stays here never reaches the image: build-one.sh looks for
+# pgo/merged.profdata (which is re-included by .dockerignore) precisely because
+# target/pgo/prof cannot survive into the scored context.
+mkdir -p "$APP_DIR/pgo" 2>/dev/null || true
+if [ -f "$PROF_DIR/merged.profdata" ]; then
+  cp "$PROF_DIR/merged.profdata" "$APP_DIR/pgo/merged.profdata" \
+    && echo "  shipped : $APP_DIR/pgo/merged.profdata (in the build context)"
+fi
 echo "  profile : $PROF_DIR/merged.profdata"
 echo "  scratch : $PGO_DIR/use/release/ (this script's own check build)"
 echo
 echo "  The SCORED build picks this profile up automatically: build-one.sh"
-echo "  checks for $PROF_DIR/merged.profdata and adds -Cprofile-use when it"
-echo "  is there. Nothing has to be copied into the image by hand."
+echo "  checks for pgo/merged.profdata and adds -Cprofile-use when it is"
+echo "  there. Nothing has to be copied into the image by hand."
 echo
 echo "  Rebuild the shipping binaries now, then re-run every gate:"
 echo "    sh build-all.sh"

@@ -16,8 +16,26 @@ set -eu
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 TRACK="${TRACK:-A}"
-TRACK="$(printf '%s' "$TRACK" | tr '[:lower:]' '[:upper:]' | tr -cd 'A-Z')"
-[ -n "$TRACK" ] || TRACK="A"
+
+# Uppercase ONLY — never coerce. The previous version filtered the value
+# through `tr -cd 'A-Z'`, so any TRACK containing no capital letters collapsed
+# to the empty string and was then defaulted to "A". Measured: TRACK=7, TRACK=1,
+# TRACK=0 and TRACK=- all ran track A and exited 0, i.e. the image answered a
+# different track's question than the one it was asked, silently and with a
+# success status. Only TRACK=Z failed, and only because 'Z' survives the
+# filter and misses the case statement.
+#
+# A wrong-track answer is worse than a crash: the harness would score track A's
+# output against track D's expected file, or worse, against no expected file at
+# all. Validation is therefore strict and happens before anything runs.
+TRACK="$(printf '%s' "$TRACK" | tr '[:lower:]' '[:upper:]')"
+case "$TRACK" in
+    A|B|C|D|E) ;;
+    *)
+        echo "[run] FATAL: unknown TRACK='$TRACK' (expected A..E)" >&2
+        exit 1
+        ;;
+esac
 
 case "$TRACK" in
     A) BIN="speeddemon-a" ;;
@@ -25,10 +43,6 @@ case "$TRACK" in
     C) BIN="speeddemon-c" ;;
     D) BIN="speeddemon-d" ;;
     E) BIN="speeddemon-e" ;;
-    *)
-        echo "[run] FATAL: unknown TRACK='$TRACK' (expected A..E)" >&2
-        exit 1
-        ;;
 esac
 
 BINPATH="$APP_DIR/bin/$BIN"

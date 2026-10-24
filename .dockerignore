@@ -32,6 +32,15 @@ verification/data/
 *.profdata
 *.profraw
 
+# ...EXCEPT the one profile the SCORED build consumes. build-one.sh compiles
+# with -C profile-use=pgo/merged.profdata, and a profile that is not in the
+# build context cannot be used. target/ is excluded above, so a profile left in
+# target/pgo/prof never reached the image and every scored build was silently
+# unprofiled — the log said "PGO profile found" while rustc compiled without it.
+# Later patterns win, so this re-includes it deliberately.
+!pgo/
+!pgo/*.profdata
+
 # Per-track documentation and metadata
 tracks/*/verification/
 tracks/*/PERF.md
