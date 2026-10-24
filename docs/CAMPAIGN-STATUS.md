@@ -63,20 +63,29 @@ every run.
 | **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
 | **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 5 × ~290 lines, decision-complete, no solution code |
-| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` — free T-axis win, output-equivalence checked |
-| One-command CI | **GREEN** | `sh tooling/ci.sh` — 10 gates, cheapest-fails-first |
+| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` — profile merges to `target/pgo/prof`, consumed by `build-one.sh`, output-equivalence checked |
+| One-command CI | **GREEN** | `sh tooling/ci.sh` — 17 gates, cheapest-fails-first, all green (`--fast` skips only the container runs) |
 | K calculator | **GREEN** | reproduces the published Nightshade example exactly (K 6.2569, speed 56.97, total 65.73) |
 | S/D axis measurement | **GREEN** | **D = 1.0000 on all five tracks** |
 | Anti-overfit fixture generator | **GREEN** | grammar-preserving data + 11 hand-crafted hostile CSV cases |
+| **SPEC.md intake** | **GREEN** | `tooling/spec_intake.py` — 36 DEFERRED values enumerated, K budget recomputed from pins, refuses "ready" while a blocker is unanswered |
 | Track implementations (A–E) | **STUB** | scaffold sentinel present — *correct* pre-kickoff state |
 
 ### The open FAILs, and why each is correct right now
 
+`sh tooling/ci.sh` (full mode) reports exactly one red gate: the pre-freeze
+lockdown, with 7 failing checks. All 7 are the correct state two days before
+the window opens, and every one of them clears by doing the work rather than
+by changing a check.
+
 | FAIL | Why it is correct now | When it clears |
 |---|---|---|
-| 5× "no scaffold sentinel in source" | The implementations do not exist yet. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
-| "working tree clean" | Uncommitted verification-script fixes | immediately, on the next commit |
+| 5× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 18:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
 | "public remote configured" | There is no public GitHub repo yet | before the freeze — push to a public repo under an OSI licence |
+
+The "working tree clean" check also fails mid-run, by design: the track gates
+append measurements to `verification/ledger.jsonl` as they run. Committing
+the ledger clears it, and the ledger is excluded from the check otherwise.
 
 **Two SKIPs, both informational:** "sample SHA-256 green" cannot be checked
 before the Oct 30 06:00 UTC sample ships, and the per-track reference source
