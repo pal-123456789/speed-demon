@@ -205,4 +205,134 @@ mod tests {
             );
         }
     }
+
+    // ── contract.toml is the single source of truth ──────────────────────
+    //
+    // The values below were DUPLICATED here and in verification/contract.toml,
+    // and duplicated values drift: the contract file gets updated on Oct 28
+    // and the Rust table silently keeps the old numbers, so the harness then
+    // measures against a contract that no longer exists. This test parses the
+    // TOML and asserts the Rust table still agrees, so the drift is caught at
+    // `cargo test` time instead of at the scoring box.
+
+    /// A deliberately tiny reader for the flat `key = value` sections the
+    /// contract file uses. A full TOML parser would be a dependency; the
+    /// file's shape is fixed and this repository writes it.
+    fn read_contract(
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+        let path = std::path::Path::new("../../verification/contract.toml");
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read {}: {e} — run cargo test from the harness crate dir",
+                path.display()
+            )
+        });
+        let mut sections = std::collections::BTreeMap::new();
+        let mut current = String::new();
+        sections.insert(current.clone(), std::collections::BTreeMap::new());
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                current = line[1..line.len() - 1].to_string();
+                sections.entry(current.clone()).or_default();
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let raw = v.trim();
+                // Strip an inline comment, but only outside quotes:
+                //   output_file = "corpus.sd"   # the scored artefact
+                // The naive `split('#')` corrupts values that contain a '#'.
+                let value = if let Some(rest) = raw.strip_prefix('"') {
+                    match rest.find('"') {
+                        Some(end) => rest[..end].to_string(),
+                        None => raw.to_string(),
+                    }
+                } else {
+                    raw.split('#').next().unwrap_or(raw).trim().to_string()
+                };
+                sections
+                    .entry(current.clone())
+                    .or_default()
+                    .insert(k.trim().to_string(), value);
+            }
+        }
+        sections
+    }
+
+    #[test]
+    fn rust_table_agrees_with_contract_toml() {
+        let doc = read_contract();
+        let table = tracks();
+
+        for id in ['A', 'B', 'C', 'D', 'E'] {
+            let sec = doc
+                .get(&id.to_string())
+                .unwrap_or_else(|| panic!("contract.toml has no [{id}] section"));
+            let tr = &table[&id];
+
+            let ref_time: f64 = sec["ref_time_s"]
+                .parse()
+                .unwrap_or_else(|e| panic!("[{id}] ref_time_s: {e}"));
+            assert!(
+                (ref_time - tr.ref_time_s).abs() < 0.01,
+                "[{id}] ref_time_s drifted: toml={} rust={}",
+                ref_time,
+                tr.ref_time_s
+            );
+
+            let timeout: f64 = sec["timeout_s"]
+                .parse()
+                .unwrap_or_else(|e| panic!("[{id}] timeout_s: {e}"));
+            assert!(
+                (timeout - tr.timeout_s).abs() < 0.5,
+                "[{id}] timeout_s drifted: toml={} rust={}",
+                timeout,
+                tr.timeout_s
+            );
+
+            // The output filename: the contract calls it output_file, the
+            // manifest too, and the lockdown compares the two. If they ever
+            // disagree the correctness gate fails with no obvious cause.
+            assert_eq!(
+                sec.get("output_file").map(|s| s.as_str()),
+                Some(tr.output),
+                "[{id}] output_file drifted between contract.toml and the Rust table"
+            );
+
+            // The input filename is named per track in the contract
+            // (input_file / corpus_file / records_file / graph_file).
+            let input_keys = ["input_file", "corpus_file", "records_file", "graph_file"];
+            let toml_input = input_keys.iter().find_map(|k| sec.get(*k));
+            if let Some(toml_input) = toml_input {
+                assert_eq!(
+                    toml_input, tr.input,
+                    "[{id}] input filename drifted between contract.toml and the Rust table"
+                );
+            }
+        }
+
+        // The global weights and the axis cap.
+        let g = &doc["global"];
+        let weight_pairs = [
+            ("weight_t", W_T),
+            ("weight_m", W_M),
+            ("weight_s", W_S),
+            ("weight_d", W_D),
+            ("weight_x", W_X),
+        ];
+        for (key, ours) in weight_pairs {
+            let theirs: f64 = g[key]
+                .parse()
+                .unwrap_or_else(|e| panic!("[global] {key}: {e}"));
+            assert!(
+                (theirs - ours).abs() < 1e-9,
+                "[global] {key} drifted: toml={theirs} rust={ours}"
+            );
+        }
+        let cap: f64 = g["axis_cap"].parse().unwrap();
+        assert!((cap - AXIS_CAP).abs() < 1e-9, "axis_cap drifted");
+    }
 }

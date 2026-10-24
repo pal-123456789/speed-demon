@@ -110,6 +110,24 @@ fi
 LINK_ARGS="-C target-feature=+crt-static -C linker=$LLD -C linker-flavor=ld.lld"
 echo "[build-one] target $TARGET, linker $LLD (static, no libc needed)"
 
+# ---- profile-guided optimisation ----------------------------------------
+# PGO is a free T-axis win, but only if it reaches the SCORED build. The
+# profile lives in tooling/pgo-build.sh's output directory; if it exists we
+# compile with it, and if it does not we compile the same way minus that one
+# flag. That check is here, on the scored path, so a PGO profile cannot be
+# generated and then silently left behind.
+#
+# The profile must never change the ANSWER — tooling/pgo-build.sh verifies
+# byte-identical output against a non-PGO build before the profile is kept.
+PGO_FLAGS=""
+PROFILE_DIR="${SD_PGO_PROFILE_DIR:-$APP_DIR/target/pgo/prof}"
+if [ -d "$PROFILE_DIR" ] && ls "$PROFILE_DIR"/*.profdata >/dev/null 2>&1; then
+    PGO_FLAGS="-C profile-use=$PROFILE_DIR -C llvm-args=-inline-threshold=275"
+    echo "[build-one] PGO profile found: $PROFILE_DIR (optimising for it)"
+else
+    echo "[build-one] no PGO profile — plain release build"
+fi
+
 # ---- compile core (std-only, D=1) ---------------------------------------
 # The core MUST be compiled for the same --target as the track. Without
 # --target here, rustc emits an rlib for the HOST triple and the track link
@@ -140,6 +158,7 @@ echo "[build-one] compiling $BIN (track $TRACK, source tracks/$TRACK_DIR)"
     -L "$OUT_DIR" \
     -C opt-level=3 -C codegen-units=1 -C lto=thin -C panic=abort \
     -C strip=symbols \
+    $PGO_FLAGS \
     $LINK_ARGS \
     --target "$TARGET" \
     -o "$OUT_DIR/$BIN" "$APP_DIR/tracks/$TRACK_DIR/src/main.rs"

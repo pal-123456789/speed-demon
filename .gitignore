@@ -39,3 +39,8 @@ sample-data/
 
 # Toolchain vendor cache (regenerated offline)
 vendor/
+
+# Build outputs and test scratch
+/bin/
+/verification/data2/
+/verification/tmp2/

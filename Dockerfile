@@ -17,9 +17,24 @@
 # FOUR RULES (all satisfied):
 #   1. read from /data (read-only mount)   ✔ binaries open /data only
 #   2. write EXACTLY ONE file to /out       ✔ each binary writes one file
-#   3. exit 0                              ✔ run.sh execs the binary
-#   4. build offline (--network=none)       ✔ build.sh uses rustc only,
-#                                            no apt/cargo/pip/curl
+#   3. exit 0                              ✔ /app/run execs the binary
+#   4. build offline (--network=none)       ✔ build-all.sh calls rustc
+#                                            directly; no apt, no cargo,
+#                                            no registry, no curl
+#
+# WHY THE LINK IS STATIC, AND WHY THAT IS NOT AN OPTION
+#   This builder stage ships no C compiler, and `--network=none` means it
+#   cannot install one. A stock x86_64-unknown-linux-gnu link needs `cc`, so
+#   it fails here — and one failed build zeroes ALL FIVE tracks, because the
+#   harness builds a single image. build-one.sh therefore targets
+#   x86_64-unknown-linux-musl and links with `rust-lld`, which ships inside
+#   the toolchain, producing a binary that needs no libc at all. The runtime
+#   stage is still debian:13-slim; a static binary does not care.
+#
+#   Two details in that link are easy to get wrong and both look like
+#   something else when they break: `--crate-name` rejects hyphens, and
+#   `-C linker-flavor=gnu-lld` is unstable while `ld.lld` is stable. Both
+#   are handled in build-one.sh and both are covered by tooling/ci.sh.
 #
 # Build stage keeps the toolchain; runtime stage is a clean debian:13-slim
 # so the scored container carries no build residue (smaller image, cleaner
@@ -44,8 +59,10 @@ FROM debian:13-slim AS builder
 COPY . /app
 WORKDIR /app
 
-# Build all five track binaries into /app/bin (core is compiled once).
-RUN chmod +x /app/build-all.sh /app/run \
+# Build all five track binaries into /app/bin. build-all.sh loops over
+# build-one.sh, which is the same implementation the per-track standalone
+# images use — one build path, so they cannot drift.
+RUN chmod +x /app/build-all.sh /app/build-one.sh /app/run \
  && /app/build-all.sh
 
 

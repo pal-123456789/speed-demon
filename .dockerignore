@@ -13,6 +13,15 @@ target/
 .git/
 .gitignore
 
+# Host build output. build-all.sh rebuilds these inside the image, so
+# shipping the developer's stale copies would put binaries of unknown
+# provenance into the scored context and could hide a broken build.
+bin/
+
+# Test scratch left behind by local runs
+verification/data2/
+verification/tmp2/
+
 # Verification infrastructure — never part of the submission
 verification/
 tooling/

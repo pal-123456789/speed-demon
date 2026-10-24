@@ -7,6 +7,27 @@
 > prints it. This plan already has every inflated/understated figure Astra produced corrected
 > (see §2, the Corrections Ledger).
 
+> **Supersession notice — read before executing any track block.**
+> `docs/specs/` was written after this plan and carries the per-track strategy of record.
+> Where the two differ, **the spec wins**, and the differences are deliberate:
+>
+> 1. **Track D — Contraction Hierarchies are REJECTED**, not "time-boxed with hard abort
+>    gates" as §5 of this plan has it. The amortization arithmetic kills it: 60–120 s of
+>    preprocessing *inside* the timed run against a 2.9 s total budget, needing a
+>    ~30 ms/query saving over only 2,000 queries — about two orders of magnitude off.
+>    The plan's "time-boxed" framing would burn the first hours of the Deep D block on an
+>    experiment whose break-even cannot be reached. The chosen structure is CSR + radix
+>    heap + bidirectional + 6–8 ALT landmarks with runtime-adaptive batching.
+> 2. **Track E is speed-first, not ratio-first.** The M axis is `our_ratio / 2.41`, and
+>    across the entire realistic band (2.6×–4.0×) it spans only ≈2.2 points while T spans
+>    ≈13. Target ratio 3.1–3.4; never chase the last 5%.
+> 3. **The K anchors in this plan's ladder tables match the specs** (A Safe 4.87 / Commit
+>    6.27) — those were reconciled already. The Deep D "Target K 7" reads as the Stretch
+>    (6.69) → Exceptional (7.51) band in the spec.
+>
+> Nothing else in this plan is superseded. The schedule, the triage, the gate order, the
+> stop rules, and the scoring math all stand.
+
 Event: **SpeedDemon** (Hackathon Raptors) — 72h machine-judged performance championship.
 Window: **Oct 30 18:00 UTC → Nov 2 18:00 UTC 2026** = **Oct 30 23:30 IST → Nov 2 23:30 IST**.
 Entry: **solo, all five tracks (A–E)**. Pool: $2,000. Language per track: **Rust, std-only, D=1**.

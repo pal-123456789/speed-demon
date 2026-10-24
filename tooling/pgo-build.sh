@@ -57,7 +57,12 @@ else
 fi
 
 PGO_DIR="target/pgo"
-PROF_DIR="$PGO_DIR/profiles"
+# build-one.sh looks in target/pgo/prof when it compiles the SCORED build, so
+# the merged profile has to land there. Before this path agreed with that
+# one, a generated profile was simply never used: the scored image runs
+# build-one.sh, which knew nothing about target/pgo/profiles.
+PROF_DIR="$PGO_DIR/prof"
+RAW_DIR="$PGO_DIR/profiles-raw"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 die() { printf '\033[31mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -118,6 +123,44 @@ for t in $TRACKS; do
     echo "  run: python tooling/gen-fixtures.py --track $t"
   fi
 
+  say "TRACK $t — phase 2b: merge the raw profile"
+  # -Cprofile-use requires ONE merged .profdata file. The instrumented run
+  # writes raw .profraw files, and handing those to -Cprofile-use does not
+  # work: rustc wants the merged index. Without this step the "optimised"
+  # build silently falls back to a plain build and PGO buys nothing, which
+  # looks exactly like "PGO did not help much" rather than "PGO never ran".
+  #
+  # llvm-profdata ships with the Rust toolchain's LLVM tools component; if it
+  # is missing, say so plainly instead of shipping a non-PGO binary labelled
+  # as optimised.
+  mkdir -p "$PROF_DIR"
+  PROFDATA_BIN="$(command -v llvm-profdata 2>/dev/null || true)"
+  if [ -z "$PROFDATA_BIN" ]; then
+    for cand in \
+      "$(dirname "$(command -v rustc)")/llvm-profdata" \
+      "$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
+    do
+      [ -x "$cand" ] && PROFDATA_BIN="$cand" && break
+    done
+  fi
+  RAW="$(ls "$PROF_DIR"/*.profraw 2>/dev/null | head -1 || true)"
+  if [ -n "$RAW" ] && [ -n "$PROFDATA_BIN" ]; then
+    # Clear stale merged output first: a leftover .profdata from an earlier
+    # track must never be picked up as this track's profile.
+    rm -f "$PROF_DIR"/merged.profdata
+    "$PROFDATA_BIN" merge -o "$PROF_DIR/merged.profdata" "$PROF_DIR"/*.profraw \
+      || die "llvm-profdata merge failed for track $t"
+    echo "  merged $(ls "$PROF_DIR"/*.profraw | wc -l | tr -d ' ') raw profile(s) -> merged.profdata"
+    rm -f "$PROF_DIR"/*.profraw
+  elif [ -z "$RAW" ]; then
+    echo "  WARNING: no .profraw produced — the training run wrote nothing."
+    echo "  This track's PGO build will be a plain build. Not a build error,"
+    echo "  but a speed opportunity silently lost."
+  else
+    echo "  WARNING: llvm-profdata not found — PGO will not take effect."
+    echo "  Install it (rustup component add llvm-tools-preview) and re-run."
+  fi
+
   say "TRACK $t — phase 3: optimised build"
   # -Cprofile-use gives the compiler the branch frequencies. The extra
   # flags are the well-known companions:
@@ -149,12 +192,17 @@ for t in $TRACKS; do
 done
 
 say "PGO complete"
-echo "  profiles : $PROF_DIR"
-echo "  binaries : $PGO_DIR/use/release/"
+echo "  profile : $PROF_DIR/merged.profdata"
+echo "  scratch : $PGO_DIR/use/release/ (this script's own check build)"
 echo
-echo "  NOTE: the PGO binary is a BUILD ARTEFACT. It is not committed."
-echo "  To ship it, copy the optimised binary into the image, or set"
-echo "  PGO_BIN_DIR in the Dockerfile build stage."
+echo "  The SCORED build picks this profile up automatically: build-one.sh"
+echo "  checks for $PROF_DIR/merged.profdata and adds -Cprofile-use when it"
+echo "  is there. Nothing has to be copied into the image by hand."
 echo
-echo "  ALWAYS re-run the correctness gate after a PGO build:"
+echo "  Rebuild the shipping binaries now, then re-run every gate:"
+echo "    sh build-all.sh"
+echo "    sh tooling/ci.sh --tracks $TRACKS"
+echo
+echo "  If you would rather NOT ship PGO, delete the profile:"
+echo "    rm -rf $PROF_DIR"
 echo "    sh tooling/ci.sh --tracks $TRACKS"

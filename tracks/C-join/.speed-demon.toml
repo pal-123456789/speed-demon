@@ -1,8 +1,8 @@
-﻿# Machine-readable track descriptor. The harness uses this to queue the
+# Machine-readable track descriptor. The harness uses this to queue the
 # submission without a human in the loop.
 #
 # declared_dependencies MUST match reality: this file feeds the D axis and
-# the D-axis honesty check in verification/d_axis.py. We ship D = 1
+# the D-axis honesty check in tooling/measure_axes.py. We ship D = 1
 # (std-only Rust, no vendored runtime crates).
 track = "C"
 team = "solo"

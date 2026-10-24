@@ -108,13 +108,48 @@ else
   fail "unit tests failed"
 fi
 
-# ── 4. offline build ──────────────────────────────────────────────────────
+# ── 5. offline build ──────────────────────────────────────────────────────
 step "OFFLINE BUILD (--offline, no network)"
 if cargo build --release --offline >/tmp/sd-build.txt 2>&1; then
   ok "release build succeeded offline"
 else
   tail -40 /tmp/sd-build.txt
   fail "offline build failed"
+fi
+
+# The SCORED image does NOT use cargo: it runs build-all.sh, which calls
+# rustc directly and statically links through the toolchain's own rust-lld.
+# That path has failed three separate ways (hyphenated crate name, an
+# uninstalled target, an unstable linker flavor) and cargo never touches it,
+# so it gets its own gate.
+step "SCORED BUILD PATH (build-all.sh: rustc direct, static musl)"
+if sh ./build-all.sh >/tmp/sd-scorebuild.txt 2>&1; then
+  BINS="$(ls bin/speeddemon-? 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$BINS" = "5" ]; then
+    ok "all 5 binaries built and statically linked"
+    grep -m1 'target .*linker' /tmp/sd-scorebuild.txt | sed 's/^/  /'
+  else
+    fail "expected 5 binaries, found $BINS"
+  fi
+else
+  tail -25 /tmp/sd-scorebuild.txt
+  fail "the scored build path is broken — the image would fail to build"
+fi
+
+step "RUN DISPATCHER (TRACK routing, loud failures)"
+if sh tooling/test-dispatcher.sh >/tmp/sd-dispatch.txt 2>&1; then
+  ok "dispatcher self-test passed"
+else
+  cat /tmp/sd-dispatch.txt
+  fail "run dispatcher misroutes or fails silently"
+fi
+
+step "PER-TRACK DOCKERFILES (generated, cannot drift)"
+if "$PY" tooling/gen_dockerfiles.py --check >/tmp/sd-docker.txt 2>&1; then
+  ok "all 5 per-track Dockerfiles match the template"
+else
+  cat /tmp/sd-docker.txt
+  fail "a per-track Dockerfile was hand-edited — run: python tooling/gen_dockerfiles.py"
 fi
 
 # ── 5+6. the S and D axes ─────────────────────────────────────────────────
@@ -154,13 +189,30 @@ for t in $(echo "$TRACKS" | tr ',' ' '); do
   fi
 done
 
-# ── 8. sentinels ──────────────────────────────────────────────────────────
-step "SCAFFOLD SENTINELS (a stub must never ship)"
-SENT=$(grep -rl "SCAFFOLD_NOT_IMPLEMENTED" tracks/*/src 2>/dev/null | wc -l | tr -d ' ')
-if [ "$SENT" = "0" ]; then
-  ok "no scaffold sentinel in the tree"
+# ── 9. sentinels ──────────────────────────────────────────────────────────
+# The sentinel gate INVERTS at kickoff, so it must not be a bare grep:
+#   before Oct 30 18:00 UTC, rule 05 forbids solution code, so every track
+#   MUST still carry #SCAFFOLD_NOT_IMPLEMENTED — a missing sentinel means
+#   unauthorised solution code and the guard already failed in step 1.
+#   after kickoff, a sentinel means a stub could ship and score zero.
+# A gate that fails for the wrong reason in one of the two modes trains you
+# to ignore it, so the mode comes from the same clock the rule-05 guard uses.
+step "SCAFFOLD SENTINELS (mode-aware)"
+NOW_EPOCH="$(date -u +%s)"
+KICKOFF_EPOCH="$(date -u -d '2026-10-30T18:00:00Z' +%s 2>/dev/null || echo 0)"
+SENT_FILES="$(grep -rl 'SCAFFOLD_NOT_IMPLEMENTED' tracks/*/src 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$KICKOFF_EPOCH" != "0" ] && [ "$NOW_EPOCH" -lt "$KICKOFF_EPOCH" ]; then
+  if [ "$SENT_FILES" = "5" ]; then
+    ok "pre-kickoff: all 5 tracks are still scaffolds (rule 05 holds)"
+  else
+    fail "pre-kickoff: $SENT_FILES/5 tracks carry a sentinel — a track lost its stub before the window opened"
+  fi
 else
-  fail "$SENT track(s) still contain a scaffold sentinel"
+  if [ "$SENT_FILES" = "0" ]; then
+    ok "in-window: no scaffold sentinel in the tree"
+  else
+    fail "$SENT_FILES track(s) still contain a scaffold sentinel — that track would score zero"
+  fi
 fi
 
 # ── 9. lockdown ───────────────────────────────────────────────────────────
