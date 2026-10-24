@@ -44,3 +44,9 @@ vendor/
 /bin/
 /verification/data2/
 /verification/tmp2/
+
+# Python bytecode: build residue, and a stale .pyc will shadow a real source change
+__pycache__/
+*.pyc
+*.pyo
+

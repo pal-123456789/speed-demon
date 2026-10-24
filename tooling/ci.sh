@@ -163,6 +163,36 @@ else
   fail "a script lost its executable bit — git update-index --chmod=+x <file>"
 fi
 
+# Every other gate tests a piece. This one tests the ASSEMBLY: one dispatcher,
+# TRACK chosen at run time, /data read-only, /out writable, exactly one file
+# out. A piece can be green while the assembly is broken.
+#
+# On Windows the track binaries are PE files and cannot be executed by the
+# dispatcher, so the test only runs where they are ELF. Try WSL, which is a
+# real Linux kernel — the strongest available substitute for the scoring box.
+step "END-TO-END SANDBOX (dispatcher + all 5 tracks, real Linux)"
+if [ -x bin/speeddemon-a ]; then
+  if sh tooling/e2e-sandbox.sh >/tmp/sd-e2e.txt 2>&1; then
+    ok "all 5 tracks: dispatch, static link, 1 file out, determinism, failure modes"
+  else
+    grep -E 'FAIL|passed,' /tmp/sd-e2e.txt | sed 's/^/  /'
+    fail "end-to-end sandbox test failed"
+  fi
+elif command -v wsl.exe >/dev/null 2>&1 || command -v wsl >/dev/null 2>&1; then
+  WSL_BIN="$(command -v wsl.exe || command -v wsl)"
+  # Translate the repo path to its /mnt/<drive>/... form for the WSL side.
+  WSL_ROOT="$("$WSL_BIN" -e sh -c 'wslpath -a "$1" 2>/dev/null' _ "$PWD" 2>/dev/null | tr -d '\r')"
+  if [ -n "${WSL_ROOT:-}" ] &&
+     "$WSL_BIN" -e sh -c "cd '$WSL_ROOT' && sh tooling/e2e-sandbox.sh" >/tmp/sd-e2e.txt 2>&1; then
+    ok "all 5 tracks via WSL: dispatch, static link, 1 file out, determinism"
+  else
+    grep -E 'FAIL|passed,|FATAL' /tmp/sd-e2e.txt 2>/dev/null | sed 's/^/  /'
+    fail "end-to-end sandbox test failed under WSL"
+  fi
+else
+  ok "end-to-end sandbox skipped (no ELF binaries and no WSL on this host)"
+fi
+
 # ── 5+6. the S and D axes ─────────────────────────────────────────────────
 # One pass produces both. There was a `--s-only` flag here once that the
 # tool never implemented, so the S axis printed nothing at all and the step

@@ -1,4 +1,4 @@
-﻿//! HEL1-safe buffered reader — prefers streaming over mmap.
+//! HEL1-safe buffered reader — prefers streaming over mmap.
 //!
 //! Why not mmap: on HEL1 `mmap`'d pages count toward cgroup `memory.peak`
 //! and can push the M axis artificially. A `BufReader` with a 1 MiB buffer
@@ -73,7 +73,19 @@ impl StreamingReader {
 /// the naive `size/num_chunks` cut to the next boundary, guaranteeing no
 /// worker sees a partial row.
 ///
-/// Returns `num_chunks+1` offsets with `offsets[0]=0` and `offsets[last]=size`.
+/// Returns **at most** `num_chunks+1` offsets, strictly increasing, with
+/// `offsets[0]=0` and `offsets[last]=size`. It returns fewer than
+/// `num_chunks+1` when the buffer is too small to hold that many non-empty
+/// chunks, or when the boundary predicate is so sparse that later cuts would
+/// collapse onto the end. Zero-length chunks are never emitted.
+///
+/// Performance note: each cut search starts from the previous cut, not from
+/// the naive stride position, so the total predicate work is O(size) rather
+/// than O(size × num_chunks). The earlier version rescanned toward EOF from
+/// every cut, which was quadratic when the predicate was sparse (measured
+/// 550,000 calls for a 100 KB buffer at 12 chunks, and ~1.8 billion in the
+/// worst case for a 312 MiB Track A input) — and because `par_chunks` calls
+/// this on the main thread before spawning, that cost was fully serial.
 pub fn chunk_boundaries<F>(size: usize, num_chunks: usize, mut is_boundary: F) -> Vec<usize>
 where
     F: FnMut(usize) -> bool,
@@ -84,15 +96,26 @@ where
     let mut offsets = Vec::with_capacity(num_chunks + 1);
     offsets.push(0);
     let stride = size / num_chunks;
+
     for i in 1..num_chunks {
-        let mut cut = i * stride;
+        // Never search before the previous cut: that is what keeps the total
+        // work linear. `.max(last)` also guarantees strict monotonicity.
+        let last = *offsets.last().unwrap();
+        let mut cut = (i * stride).max(last);
         while cut < size && !is_boundary(cut) {
             cut += 1;
         }
+        // Ran into the end (or landed on it): the remaining chunks are empty,
+        // so stop. The trailing `size` below closes the last real chunk.
         if cut >= size {
             break;
         }
-        offsets.push(cut);
+        // Only record a genuinely new cut. When `num_chunks > size` the stride
+        // is 0 and `cut` pins to the previous offset; pushing it again would
+        // emit a zero-length chunk and break the strict-monotonicity promise.
+        if cut > last {
+            offsets.push(cut);
+        }
     }
     offsets.push(size);
     offsets

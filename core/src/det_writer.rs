@@ -1,4 +1,4 @@
-﻿//! Deterministic output writer — SHA-gate safe.
+//! Deterministic output writer — SHA-gate safe.
 //!
 //! Rules enforced here:
 //! - No HashMap iteration leaks into output (callers sort keys outside).
@@ -52,24 +52,45 @@ impl DetWriter {
         // write dollars without allocation
         let mut buf = [0u8; 32];
         let s = format_int(dollars, &mut buf);
-        self.write_bytes(s.as_bytes())?;
+        self.write_bytes(s)?;
         self.write_bytes(b".")?;
         let tens = rem / 10;
         let ones = rem % 10;
         self.write_bytes(&[b'0' + tens, b'0' + ones])
     }
 
-    /// Flush and sync; call exactly once at the end.
+    /// Flush the buffer and return the number of logical bytes written.
+    ///
+    /// This flushes to the OS; it does **not** `fsync`. That is deliberate:
+    /// the four gates compare the file's bytes, and the container is torn down
+    /// after the run, so durability against power loss buys nothing and
+    /// `sync_all` would add I/O to the T axis on the largest tracks.
     pub fn finish(mut self) -> io::Result<u64> {
         self.inner.flush()?;
         Ok(self.bytes_written)
     }
 }
 
-fn format_int(mut n: i128, buf: &mut [u8; 32]) -> &str {
+/// Render `n` as ASCII decimal bytes into the tail of `buf`, returning the
+/// used slice.
+///
+/// Returns `&[u8]` rather than `&str` on purpose. The previous version built a
+/// `&str` with `from_utf8_unchecked` to avoid a validation pass, which put two
+/// `unsafe` blocks in a crate whose own module doc says unsafe is forbidden,
+/// and which the workspace `unsafe_code = "forbid"` would have rejected had
+/// any crate actually inherited it. Writing bytes needs no `str`: the digits
+/// are ASCII by construction, every caller feeds them straight to
+/// `write_bytes`, and this removes the unsafe without adding a check.
+///
+/// `buf` must be at least 32 bytes: `u64::MAX` needs 20 digits and `i128`'s
+/// magnitude needs 39, so the caller passes 32 only because `write_cents`
+/// divides by 100 first. The debug assertion below makes that dependency
+/// explicit instead of a silent latent overflow.
+fn format_int(mut n: i128, buf: &mut [u8; 32]) -> &[u8] {
+    debug_assert!(n >= 0, "format_int expects a non-negative magnitude");
     if n == 0 {
         buf[31] = b'0';
-        return unsafe { std::str::from_utf8_unchecked(&buf[31..32]) };
+        return &buf[31..32];
     }
     let mut pos = 32;
     while n > 0 {
@@ -77,7 +98,7 @@ fn format_int(mut n: i128, buf: &mut [u8; 32]) -> &str {
         buf[pos] = b'0' + (n % 10) as u8;
         n /= 10;
     }
-    unsafe { std::str::from_utf8_unchecked(&buf[pos..32]) }
+    &buf[pos..32]
 }
 
 #[cfg(test)]

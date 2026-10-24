@@ -4,5 +4,11 @@
 # build runs with `--network=none` and cannot download a toolchain.
 channel = "1.86.0"
 components = ["rustfmt", "clippy"]
-targets = ["x86_64-unknown-linux-gnu"]
+# musl, not gnu. The scored image is built on debian:13-slim, which ships no C
+# compiler, and `--network=none` means gcc can never be installed — so a gnu
+# link (which needs `cc`) is impossible there. build-one.sh links statically
+# against musl via the toolchain's own rust-lld, and hard-fails if the musl std
+# archive is absent. Pinning gnu here used to mean a developer who trusted this
+# file got a toolchain that could not run the scored build at all.
+targets = ["x86_64-unknown-linux-musl"]
 profile = "minimal"

@@ -14,4 +14,5 @@ entrypoint = "/app/run"
 input_dir = "/data"
 output_dir = "/out"
 output_file = "corpus.sd"
+input_file = "corpus.bin"
 data_files = ["corpus.bin"]

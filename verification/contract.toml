@@ -157,11 +157,23 @@ m_axis = "compressed_size"
 # Compression time is weighted at 1/4 of decompression time. Pin the exact
 # blend: is T = 0.8*decomp + 0.2*comp, or 4*decomp+comp normalised?
 time_blend = "DEFERRED"
-# Segment geometry: published offsets are 1 MiB aligned and the four byte
-# counts are public. Pin whether the coder may assume those offsets or must
-# detect them.
+# Segment geometry: the four byte counts and their offsets are public. Pin
+# whether the coder may assume those offsets or must detect them.
+#
+# These MUST match docs/specs/track-e-compress.md lines 22-25, which publish
+# sizes 31,457,280 / 27,262,976 / 23,068,672 / 23,068,672 (30/26/22/22 MiB).
+# The previous list [0, 31457280, 58982400, 82031168, 104857600] was wrong by
+# 256 KiB at the json boundary and 236,000 B at the blob boundary, and two of
+# its offsets were not whole MiB — contradicting the "1 MiB aligned" claim
+# directly above and the spec's own table. A coder built from the wrong numbers
+# would split the json segment late and the blob segment early, then produce a
+# container whose segment table was not the published geometry.
 segments_published = true
-segment_offsets = [0, 31457280, 58982400, 82031168, 104857600]
+segment_offsets = [0, 31457280, 58720256, 81788928, 104857600]
+# The four byte counts, in file order. The harness recomputes segment_offsets
+# as their running sum and asserts the total is exactly 100 MiB with every
+# boundary 1 MiB aligned, so the two lists cannot drift apart again.
+segment_sizes = [31457280, 27262976, 23068672, 23068672]
 # The container wrapper: does the harness expect a specific magic/header,
 # or any file whose decode(encode(x)) == x? The SHA gate applies to THIS
 # file, so the exact bytes matter enormously.

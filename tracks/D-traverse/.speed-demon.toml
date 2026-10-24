@@ -14,4 +14,5 @@ entrypoint = "/app/run"
 input_dir = "/data"
 output_dir = "/out"
 output_file = "traverse.txt"
+input_file = "graph.txt"
 data_files = ["graph.txt"]

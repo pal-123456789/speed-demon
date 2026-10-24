@@ -14,4 +14,5 @@ entrypoint = "/app/run"
 input_dir = "/data"
 output_dir = "/out"
 output_file = "ingest.txt"
+input_file = "access.log"
 data_files = ["access.log"]

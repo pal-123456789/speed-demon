@@ -420,7 +420,7 @@ is a failed run, not a slow one.""",
                 "binary blob. Scored on ratio and decompression throughput together. "
                 "Compression time is measured but weighted at a quarter of decompression time.",
         "ref_time": "29.80 s",
-        "ref_mem": "compressed size is the M axis",
+        "ref_mem": "2.41x ratio (43.5 MB / 100 MiB)",
         "ref_src": "(pin from the Oct 28 spec)",
         "timeout": "298 s",
         "axis_note": "On this track the M slot holds COMPRESSED SIZE, and the ratio that feeds "
@@ -443,12 +443,14 @@ almost everything about the design:
   four chances to be slow; one canonical decoder with a per-segment
   transform in front of it means the hot path is written and tuned once.
 
-The corpus is four published, 1 MiB-aligned segments that each reward a
-different model: English prose, log lines in the Track A format, nested JSON
-with repetitive keys, and float32 sensor frames. Each gets a reversible
-transform in front of the shared entropy coder, and each keeps a raw-block
-fallback so a segment that the transform does not help is stored as-is rather
-than compressed badly.""",
+The corpus is four published segments — byte-exact sizes and offsets are in
+`verification/contract.toml` — each rewarding a different model: English prose,
+log lines in the Track A format, nested JSON with repetitive keys, and float32
+sensor frames. Each gets a reversible transform in front of the shared entropy
+coder, and each keeps a raw-block fallback so a segment that the transform does
+not help is stored as-is rather than compressed badly. Detect the boundaries
+from the table rather than assuming a fixed alignment: the published offsets are
+whole-MiB only for the first two.""",
         "layout": """* **Shared rANS decoder.** One canonical implementation for every segment.
   rANS is chosen over a range or arithmetic coder because its decoder is a
   table lookup and a refill — no bit-by-bit arithmetic, and trivially
@@ -542,7 +544,7 @@ PERF_TEMPLATE = """# PERF.md — Track {track} ({name})
 | M · {m_label} | {ref_mem} | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | {ref_src} | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | 10.40x | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
+| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
@@ -635,14 +637,21 @@ one measurement that surprised you)_
 ## 8. Reproducing these numbers
 
 ```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
 # 5 runs, discard the highest and lowest, mean of the middle three
-pwsh -File verification/bench.ps1 -Track {track} -Runs 5
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\\bench.ps1 -Track {track} -Runs 5
 
 # the four gates: correctness, speed floor, timeout, sandbox
-pwsh -File verification/verify.ps1 -Track {track}
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\\verify.ps1 -Track {track}
 
 # the full lockdown checklist
-pwsh -File verification/pre-freeze.ps1 -Track {track}
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\\pre-freeze.ps1 -Track {track}
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline -p sd-harness -- bench --track {track} --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.
@@ -747,15 +756,28 @@ def read_ledger(path=LEDGER):
     if not path.is_file():
         return []
     out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    malformed = []
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
         if not line or not line.startswith("{"):
             continue
         try:
             rec = json.loads(line)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # Do NOT skip silently. The ledger is the evidence behind every
+            # number in PERF.md; a line that will not parse is either a bug in
+            # the writer or hand-edited data, and both must be visible. The
+            # earlier `continue` meant a corrupt ledger produced a SHORTER
+            # report with no indication that anything was missing.
+            malformed.append((lineno, str(e)))
             continue
         out.append(rec)
+    if malformed:
+        raise SystemExit(
+            "gen_docs: {} malformed line(s) in {}\n".format(len(malformed), path)
+            + "".join("  line {}: {}\n".format(n, err) for n, err in malformed)
+            + "Refusing to generate docs from a partially readable ledger."
+        )
     return out
 
 
@@ -769,14 +791,40 @@ def _trimmed_mean(values):
     return sum(vals) / len(vals)
 
 
+def _is_scaffold_record(rec):
+    """True if this run measured the *scaffold*, not an implementation.
+
+    A pre-kickoff scaffold reads one file and writes a ~54-byte sentinel, so its
+    `wall_s` is pure process startup. Publishing that in the MEASURED ladder
+    would claim, e.g., "1,689x faster than the reference" on the strength of a
+    do-nothing binary — the single most damaging thing this generator could emit
+    into a judge-facing document, so the guard lives where records become rows.
+
+    The harness stamps `scaffold: true` at write time (it reads the output file
+    and looks for the sentinel), which is authoritative. Records written before
+    that field existed are caught by a size heuristic: a real implementation's
+    output is never under 200 bytes.
+    """
+    if rec.get("scaffold") is True:
+        return True
+    n = rec.get("output_bytes")
+    if isinstance(n, int) and 0 <= n <= 200:
+        return True
+    return False
+
+
 def build_measured_ladder(track, records):
     """The MEASURED ladder for one track, grouped by experiment label.
 
     Each label is one rung of the ladder. Within a label the runs are
     trimmed-meanmed exactly the way the organizers trim theirs, so the
     number in PERF.md is the same statistic the score uses.
+
+    Records that measured a scaffold stub are excluded (see
+    `_is_scaffold_record`); if that leaves nothing, the caller emits the
+    "no measurements yet" text instead of a misleading row.
     """
-    rows = records
+    rows = [r for r in records if not _is_scaffold_record(r)]
     if not rows:
         return None
 
@@ -801,7 +849,13 @@ def build_measured_ladder(track, records):
         recs = by_label[label]
         t = _trimmed_mean([float(r.get("wall_s", 0.0)) for r in recs])
         peaks = [float(r["peak_mib"]) for r in recs if r.get("peak_mib") is not None]
-        m = (max(peaks) / (1024.0 * 1024.0)) if peaks else None
+        # `peak_mib` is ALREADY in mebibytes: the harness divides the raw
+        # cgroup `memory.peak` byte count by 1024*1024 before writing the
+        # record, and the field is literally named `peak_mib`. Dividing again
+        # here made every measured M cell render as 0.0 — a 210 MiB peak
+        # printed as "0.0" — which would have silently zeroed the M column of
+        # every PERF.md the moment real cgroup data landed.
+        m = max(peaks) if peaks else None
         if base_t is None:
             base_t = t
             base_m = m

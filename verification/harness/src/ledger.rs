@@ -44,6 +44,16 @@ pub struct RunRecord {
     pub label: String,
     /// Threads used, if the track parameterises them.
     pub threads: u32,
+    /// True when the run measured the pre-kickoff *scaffold* rather than a real
+    /// implementation — i.e. the output file still carries the
+    /// `#SCAFFOLD_NOT_IMPLEMENTED` sentinel.
+    ///
+    /// This is recorded at write time, where the evidence is authoritative,
+    /// rather than inferred later by the doc generator: a scaffold reads one
+    /// file and writes ~54 bytes, so its wall time is pure process start-up and
+    /// publishing it would claim a thousandfold speed-up over the reference on
+    /// the strength of a binary that does nothing.
+    pub scaffold: bool,
 }
 
 impl RunRecord {
@@ -60,8 +70,15 @@ impl RunRecord {
     }
 
     fn to_json(&self) -> String {
+        // Every string field must be escaped. The previous version interpolated
+        // `label` and `peak_source` raw, so a label containing a backslash (a
+        // Windows path, which is exactly what a `--ledger` test produces) or a
+        // quote produced INVALID JSONL. Nothing failed at write time: the
+        // corruption was only visible later, as a `serde`-style parse error in
+        // whatever read the ledger back — and `gen_docs.py` silently skipped
+        // unparseable lines, so measured rows quietly disappeared from PERF.md.
         let opt_str = |v: &Option<String>| match v {
-            Some(s) => format!("\"{s}\""),
+            Some(s) => json_str(s),
             None => "null".to_string(),
         };
         let opt_num = |v: &Option<f64>| match v {
@@ -69,25 +86,49 @@ impl RunRecord {
             None => "null".to_string(),
         };
         format!(
-            "{{\"track\":\"{}\",\"commit\":\"{}\",\"timestamp\":{},\"run\":{},\
-             \"wall_s\":{:.4},\"peak_mib\":{},\"peak_source\":\"{}\",\
-             \"output_sha256\":\"{}\",\"expected_sha256\":{},\"output_bytes\":{},\
-             \"exit_code\":{},\"label\":\"{}\",\"threads\":{}}}",
-            self.track,
-            self.commit,
+            "{{\"track\":{},\"commit\":{},\"timestamp\":{},\"run\":{},\
+             \"wall_s\":{:.4},\"peak_mib\":{},\"peak_source\":{},\
+             \"output_sha256\":{},\"expected_sha256\":{},\"output_bytes\":{},\
+             \"exit_code\":{},\"label\":{},\"threads\":{},\"scaffold\":{}}}",
+            json_str(&self.track.to_string()),
+            json_str(&self.commit),
             self.timestamp,
             self.run,
             self.wall_s,
             opt_num(&self.peak_mib),
-            self.peak_source,
-            self.output_sha256,
+            json_str(&self.peak_source),
+            json_str(&self.output_sha256),
             opt_str(&self.expected_sha256),
             self.output_bytes,
             self.exit_code,
-            self.label,
+            json_str(&self.label),
             self.threads,
+            self.scaffold,
         )
     }
+}
+
+/// Encode `s` as a JSON string literal, including the surrounding quotes.
+///
+/// Escapes what RFC 8259 requires: `"`, `\`, and the C0 control characters.
+/// Non-ASCII is passed through as UTF-8, which is valid JSON and keeps the
+/// ledger readable (paths and labels are the common case).
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Append a record to the ledger, creating it if needed.
@@ -151,6 +192,10 @@ fn parse_line(line: &str) -> Option<RunRecord> {
         exit_code: field_i32("exit_code")?,
         label: field("label")?,
         threads: field_u32("threads")?,
+        // Absent in records written before this field existed. Those were all
+        // scaffold runs (the only thing that could run pre-kickoff), but we do
+        // not assume it: the doc generator has its own size heuristic.
+        scaffold: field("scaffold").map(|v| v == "true").unwrap_or(false),
     })
 }
 
@@ -173,6 +218,7 @@ mod tests {
             exit_code: 0,
             label: "baseline".into(),
             threads: 12,
+            scaffold: false,
         }
     }
 

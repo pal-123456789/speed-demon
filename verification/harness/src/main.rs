@@ -177,6 +177,33 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether the run just measured the pre-kickoff scaffold.
+///
+/// Every scaffold writes a first line of `#SCAFFOLD_NOT_IMPLEMENTED`, so the
+/// output file itself is the evidence — no configuration flag to forget. The
+/// check is on the first 64 bytes of the single file in the output directory,
+/// which is cheap relative to a run and cannot be fooled by a truncated read.
+fn output_is_scaffold(out_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(out_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let mut buf = [0u8; 64];
+        if let Ok(mut f) = std::fs::File::open(&p) {
+            if let Ok(n) = std::io::Read::read(&mut f, &mut buf) {
+                if buf[..n].starts_with(b"#SCAFFOLD_NOT_IMPLEMENTED") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// The pinned expected output hash, if the sample has shipped.
 fn expected_hash(track: &Track, root: &Path) -> Option<String> {
     let dir = root
@@ -525,6 +552,12 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
             run_container(track, &image, &data_dir, &out_dir)?
         };
 
+        // Record whether this measured the scaffold rather than a real binary.
+        // A scaffold reads one file and writes a ~54-byte sentinel, so its wall
+        // time is process start-up alone; without this flag the doc generator
+        // would publish it as a measured speed-up of 1000x+ over the reference.
+        let scaffold = output_is_scaffold(&out_dir);
+
         let rec = ledger::RunRecord {
             track: id,
             commit: git_commit(),
@@ -539,6 +572,7 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
             exit_code: outcome.exit_code,
             label: label.clone(),
             threads,
+            scaffold,
         };
         let _ = ledger::append(&ledger_path, &rec);
 

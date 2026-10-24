@@ -98,12 +98,41 @@ fi
 echo "[vendor] toolchain dir: $TOOLCHAIN_DIR"
 
 # ---- stage the entry points where build-one.sh expects them --------------
+#
+# The links MUST BE RELATIVE. `$TOOLCHAIN_DIR` is derived from `$ROOT`, which
+# is absolute, so `ln -sf "$TOOLCHAIN_DIR/bin/$f"` used to create an absolute
+# link pointing at the vendoring machine's directory. Docker `COPY` preserves
+# symlinks verbatim, so inside the image `/app/vendor/toolchain/bin/rustc`
+# pointed at e.g. `/home/you/repo/vendor/...`, which does not exist there:
+# `[ -x ]` returned TRUE on the host and FALSE in the container, and the build
+# died with the same "FATAL: no rustc found" as if vendor/ were missing. A
+# relative link resolves identically on the host and in the image.
+#
+# `ln -sfn` (not `ln -sf`): without -n, if the destination already exists as a
+# DIRECTORY, ln creates the link INSIDE it instead of replacing it.
+TOOLCHAIN_BASE="$(basename "$TOOLCHAIN_DIR")"
 mkdir -p "$DEST/bin"
 for f in rustc cargo rustup; do
     if [ -f "$TOOLCHAIN_DIR/bin/$f" ]; then
-        ln -sf "$TOOLCHAIN_DIR/bin/$f" "$DEST/bin/$f"
+        ln -sfn "../toolchains/$TOOLCHAIN_BASE/bin/$f" "$DEST/bin/$f"
     fi
 done
+
+# Prove the links are relative and still resolve after a simulated copy. An
+# absolute link is the one failure mode that is invisible on the host, so it is
+# checked here rather than trusted.
+for f in rustc cargo rustup; do
+    [ -e "$DEST/bin/$f" ] || continue
+    link="$(readlink "$DEST/bin/$f" 2>/dev/null || true)"
+    case "$link" in
+        /*)
+            echo "[vendor] FATAL: $DEST/bin/$f is an ABSOLUTE symlink -> $link" >&2
+            echo "[vendor]        it would dangle after 'COPY . /app'. Must be relative." >&2
+            exit 1
+            ;;
+    esac
+done
+echo "[vendor] entry points are relative symlinks (survive COPY into the image)"
 
 # ---- VERIFY: the three things the offline build actually needs -----------
 FAIL=0

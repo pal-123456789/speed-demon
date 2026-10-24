@@ -251,7 +251,17 @@ mod tests {
                         None => raw.to_string(),
                     }
                 } else {
-                    raw.split('#').next().unwrap_or(raw).trim().to_string()
+                    let bare = raw.split('#').next().unwrap_or(raw).trim();
+                    // TOML arrays (`key = [1, 2, 3]`) are read as the
+                    // comma-separated body so the callers can `split(',')`
+                    // them. Without this the first element keeps its leading
+                    // `[` and the segment-geometry assertions below panic with
+                    // `invalid digit found in string`.
+                    bare.strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(bare)
+                        .trim()
+                        .to_string()
                 };
                 sections
                     .entry(current.clone())
@@ -334,5 +344,69 @@ mod tests {
         }
         let cap: f64 = g["axis_cap"].parse().unwrap();
         assert!((cap - AXIS_CAP).abs() < 1e-9, "axis_cap drifted");
+
+        // ── Track E segment geometry ──────────────────────────────────────
+        // The offsets are a hard-coded list in the contract and were WRONG
+        // (json boundary 256 KiB late, blob boundary 236,000 B early, two
+        // entries not whole MiB). Nothing caught it: the agreement test above
+        // only compared ref_time, timeout, and filenames, so a coder built from
+        // the bad list would have silently used a non-published geometry.
+        // These assertions recompute the offsets from the published sizes and
+        // demand internal consistency, so the list cannot drift again.
+        let e = &doc["E"];
+        let offsets: Vec<u64> = e["segment_offsets"]
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse()
+                    .unwrap_or_else(|err| panic!("[E] segment_offsets entry {s:?}: {err}"))
+            })
+            .collect();
+        let sizes: Vec<u64> = e["segment_sizes"]
+            .split(',')
+            .map(|s| {
+                s.trim()
+                    .parse()
+                    .unwrap_or_else(|err| panic!("[E] segment_sizes entry {s:?}: {err}"))
+            })
+            .collect();
+
+        assert_eq!(
+            offsets.len(),
+            sizes.len() + 1,
+            "[E] segment_offsets must have one more entry than segment_sizes \
+             (n sizes delimit n+1 boundaries)"
+        );
+        assert_eq!(
+            offsets.first(),
+            Some(&0u64),
+            "[E] the first segment must start at 0"
+        );
+
+        // Rebuild the offsets from the sizes; they must reproduce exactly.
+        let mut derived = vec![0u64];
+        for sz in &sizes {
+            derived.push(derived.last().unwrap() + sz);
+        }
+        assert_eq!(
+            offsets, derived,
+            "[E] segment_offsets are not the running sum of segment_sizes — \
+             the published geometry has drifted"
+        );
+
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            *offsets.last().unwrap(),
+            100 * MIB,
+            "[E] the four segments must sum to exactly 100 MiB"
+        );
+        for o in &offsets {
+            assert_eq!(
+                o % MIB,
+                0,
+                "[E] offset {o} is not 1 MiB aligned; the spec publishes every \
+                 boundary as a whole MiB"
+            );
+        }
     }
 }

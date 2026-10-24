@@ -217,7 +217,11 @@ foreach ($t in $targets) {
         Check "exactly one file written to /out" ($outFiles.Count -eq 1) "count=$($outFiles.Count)"
 
         # 3. determinism
-        $uniq = $hashes | Select-Object -Unique
+        # `@()` forces an array: with one run, `Select-Object -Unique` yields a
+        # bare string, and `$uniq[0]` would be its first CHARACTER — so the
+        # hash comparison below would compare one char against 64 and fail (or,
+        # worse, "pass" on a one-character expected value).
+        $uniq = @($hashes | Select-Object -Unique)
         Check "byte-identical across 10 runs" ($uniq.Count -eq 1) "distinct=$($uniq.Count)"
 
         # 2. correctness
