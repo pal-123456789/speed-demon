@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::contract::Track;
+use crate::contract::{self, Track};
 use crate::ledger;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +82,49 @@ impl Lockdown {
 ///
 /// The file is a flat key/value manifest that we write ourselves, so a
 /// one-line key lookup is sufficient and keeps the harness dependency-free.
+/// Count the DIRECT dependencies a track's Cargo.toml declares.
+///
+/// The D-axis gate used to read `declared_dependencies` out of the track's
+/// hand-maintained `.speed-demon.toml` and believe it. That is the same
+/// defect this whole audit is about: a self-declared number treated as
+/// evidence. This counts what the manifest actually says, so the two can be
+/// compared.
+///
+/// Rules:
+/// * only the `[dependencies]` table counts — dev-dependencies and
+///   build-dependencies are not runtime dependencies;
+/// * a `path` dependency is this repository's own code. It is source under
+///   the S axis, not a third-party dependency under D, so it does not count.
+pub fn count_direct_dependencies(cargo_toml: &Path) -> Option<usize> {
+    let text = fs::read_to_string(cargo_toml).ok()?;
+    let mut in_deps = false;
+    let mut count = 0usize;
+    for line in text.lines() {
+        let s = line.trim();
+        if s.starts_with('#') {
+            continue;
+        }
+        if s.starts_with('[') {
+            in_deps = s == "[dependencies]";
+            continue;
+        }
+        if !in_deps || !s.contains('=') {
+            continue;
+        }
+        let (name, value) = s.split_once('=')?;
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        // A path dependency is our own code.
+        if value.contains("path") {
+            continue;
+        }
+        count += 1;
+    }
+    Some(count)
+}
+
 fn toml_value(path: &Path, key: &str) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     for line in text.lines() {
@@ -174,18 +217,39 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
             ld.fail("required dir: src/", "missing");
         }
 
-        // The D-axis honesty, from the track's own declaration.
+        // The D-axis honesty, from the track's own declaration — and now
+        // cross-checked against the manifest it claims to describe.
         let manifest = dir.join(".speed-demon.toml");
         let declared = toml_value(&manifest, "declared_dependencies")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(-1);
-        if declared == 0 {
-            ld.pass("D axis: declared_dependencies == 0", "declared=0");
-        } else {
-            ld.fail(
-                "D axis: declared_dependencies == 0",
-                &format!("declared={declared}"),
-            );
+        let actual = count_direct_dependencies(&dir.join("Cargo.toml"));
+        match actual {
+            Some(n) if n as i64 == declared => {
+                let factor = contract::d_ratio(n as u32);
+                ld.pass(
+                    "D axis: declared_dependencies == 0",
+                    &format!("declared={declared} (matches Cargo.toml), D factor {factor:.4}"),
+                );
+            }
+            Some(n) => {
+                // The declared number and the manifest disagree: one of them
+                // is wrong, and we cannot tell which, so the check fails.
+                ld.fail(
+                    "D axis: declared_dependencies == 0",
+                    &format!(
+                        "declared={declared} but Cargo.toml declares {n} direct \
+                         dependency(ies); D factor would be {:.4}",
+                        contract::d_ratio(n as u32)
+                    ),
+                );
+            }
+            None => {
+                ld.fail(
+                    "D axis: declared_dependencies == 0",
+                    "cannot read the track's Cargo.toml, so the declaration cannot be checked",
+                );
+            }
         }
         let vendored = toml_value(&manifest, "vendored_dependency_bytes")
             .and_then(|v| v.parse::<i64>().ok())
@@ -476,7 +540,11 @@ mod tests {
         let pin = expected.join("ingest.txt.sha256");
         fs::write(&pin, "TODO-fill-this-in\n").unwrap();
         assert_eq!(read_pinned_hash(&dir, "ingest.txt"), None);
-        fs::write(&pin, "  f34f78e97f1a00000000000000000000000000000000000000000000000000ab  ingest.txt\n").unwrap();
+        fs::write(
+            &pin,
+            "  f34f78e97f1a00000000000000000000000000000000000000000000000000ab  ingest.txt\n",
+        )
+        .unwrap();
         assert!(read_pinned_hash(&dir, "ingest.txt").is_some());
         let _ = fs::remove_dir_all(&root);
     }
@@ -496,7 +564,10 @@ mod tests {
             Some("ingest.txt"),
             "an inline comment must not become part of the value"
         );
-        assert_eq!(toml_value(&p, "declared_dependencies").as_deref(), Some("0"));
+        assert_eq!(
+            toml_value(&p, "declared_dependencies").as_deref(),
+            Some("0")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -26,7 +26,7 @@ Traverse a 5M-edge directed weighted graph and answer 2,000 source-target shorte
 | M · peak memory | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | 10.40x | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
+| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
@@ -45,9 +45,11 @@ M has to hold the graph *and* whatever preprocessing we build, inside an 8 GB ce
 
 ### 2a. What was measured
 
-> **No measurements yet.** This table is filled automatically from
-> `verification/ledger.jsonl` the moment the harness records a run.
-> A hand-written number in this section would be a guess.
+> **Generated from `verification/ledger.jsonl`** — every row below is a
+> measurement a machine produced, trimmed the same way the organizers
+> trim theirs (high and low discarded, mean of the middle three).
+> Commits represented: 241e64c, 2609713, 95389e5, f31c3e2.
+> **Do not edit this table by hand.** It is regenerated.
 
 _(no measurements recorded yet)_
 
@@ -72,7 +74,7 @@ column states the *expected* effect of the step.
 | 3 | Tuned priority queue + early termination on the meeting condition | _ | _ | _the constant factor_ | PLANNED |
 | 4 | Parallel CSR build | _ | _ | _the build is inside the timed run_ | PLANNED |
 | 5 | ALT landmarks, bounded sweep | _ | _ | _kept only if it beats plain bidirectional_ | PLANNED |
-| 6 | Contraction Hierarchies, time-boxed with abort gates | _ | _ | _kept only if it wins the 1x AND the 10x ratio_ | PLANNED |
+| 6 | ALT landmark count tuned to 6-8 with per-landmark offsets | _ | _ | _kept only if it wins the 1x AND the 10x ratio_ | PLANNED |
 
 ---
 
@@ -94,9 +96,8 @@ interesting part and judges are told to reward them."*
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| A CH build whose shortcut count exploded | _ | _ | blows the memory cap and loses the X axis at 10x scale |
-| Too many ALT landmarks | _ | _ | memory grows as 2*k*n*8 and the M axis gets worse faster than the queries get faster |
-| 12 workers on the query phase | _ | _ | contention on the shared heap; 6 was faster |
+| A Contraction-Hierarchy build | _ | _ | REJECTED on amortisation arithmetic: preprocessing inside the timed run costs more than the queries it saves at the 1x ratio, and no abort gate changes that |
+| Too many ALT landmarks | _ | _ | memory grows as k*n*4 with per-landmark offsets; past 8 the M axis gets worse faster than the queries get faster |
 | 32-bit distances | _ | _ | no proven bound on the maximum path weight — a wrong answer is worse than a slow one |
 | Preprocessing justified by sequential query timing | _ | _ | the queries are parallel; the budget is 12x smaller than it looks |
 
@@ -125,11 +126,17 @@ one measurement that surprised you)_
 ## 6. Memory
 
 CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
-landmark distances are `2 * k * n * 8` bytes — about 111 MB at 4 landmarks
-and 891 MB at 32. Per-worker scratch for a bidirectional search is about
-334 MB across 12 workers. All of that fits inside the 8 GB ceiling with
-room to spare, which is what makes the larger landmark sets worth measuring
-rather than dismissing.
+the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
+Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
+42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
+fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
+workers. All of that fits inside the 8 GB ceiling with room to spare, which is
+what makes the 6-8 landmark range worth sweeping rather than dismissing.
+
+(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
+891 MB at 32". That was the superseded design: `u64` distances, two copies, no
+landmark cap. The spec of record fixes `u32` with per-landmark offsets and
+k = 6 to 8, so the old arithmetic described a structure nobody is building.)
 
 The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
 rather than a slowdown, so a preprocessing variant that runs out of memory
@@ -156,14 +163,21 @@ is a failed run, not a slow one.
 ## 8. Reproducing these numbers
 
 ```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
 # 5 runs, discard the highest and lowest, mean of the middle three
-pwsh -File verification/bench.ps1 -Track D -Runs 5
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track D -Runs 5
 
 # the four gates: correctness, speed floor, timeout, sandbox
-pwsh -File verification/verify.ps1 -Track D
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track D
 
 # the full lockdown checklist
-pwsh -File verification/pre-freeze.ps1 -Track D
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track D
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline -p sd-harness -- bench --track D --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.

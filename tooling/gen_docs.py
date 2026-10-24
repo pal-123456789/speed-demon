@@ -108,7 +108,6 @@ the M axis with data we never need resident.""",
         "failed": [
             ("SIMD timestamp parse", "branchy setup cost per line outweighed the vector win"),
             ("Lock-free shared intern table", "contention beat the sharded version"),
-            ("12 workers instead of 6", "SMT + cache pressure widened the spread"),
             ("`mmap` instead of a buffered read", "inflated `memory.peak` — M axis got worse"),
             ("t-digest / KLL sketches", "approximate percentiles cannot hash-match"),
         ],
@@ -343,9 +342,12 @@ So the plan is a portfolio with a hard rollback:
 2. **ALT** (A* with landmark distances) is a bounded experiment: sweep the
    landmark count and keep it only if it beats plain bidirectional inside
    the time budget.
-3. **Contraction Hierarchies** is time-boxed behind abort gates — a
-   shortcut cap, a memory cap, a preprocessing break-even budget, and a
-   single-mismatch abort that removes the whole approach.
+3. **Contraction Hierarchies are REJECTED**, on arithmetic rather than on
+   nerve: the preprocessing has to be paid inside the timed run, and at the 1x
+   ratio the shortcut build alone exceeds the whole query budget it is meant to
+   accelerate. No abort gate makes that arithmetic work, so CH is not on the
+   ladder at all. The chosen structure is CSR + a radix heap + bidirectional
+   search + 6-8 ALT landmarks.
 
 The reverse graph is a *traversal structure*, not a claimed edge: it is
 built from the edge list because the format lists reverse edges separately
@@ -364,11 +366,17 @@ directed graph.""",
   rather than a wrong answer. `u32` distances are not used without a proven
   bound on the maximum shortest-path weight.""",
         "memory": """CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
-landmark distances are `2 * k * n * 8` bytes — about 111 MB at 4 landmarks
-and 891 MB at 32. Per-worker scratch for a bidirectional search is about
-334 MB across 12 workers. All of that fits inside the 8 GB ceiling with
-room to spare, which is what makes the larger landmark sets worth measuring
-rather than dismissing.
+the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
+Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
+42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
+fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
+workers. All of that fits inside the 8 GB ceiling with room to spare, which is
+what makes the 6-8 landmark range worth sweeping rather than dismissing.
+
+(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
+891 MB at 32". That was the superseded design: `u64` distances, two copies, no
+landmark cap. The spec of record fixes `u32` with per-landmark offsets and
+k = 6 to 8, so the old arithmetic described a structure nobody is building.)
 
 The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
 rather than a slowdown, so a preprocessing variant that runs out of memory
@@ -387,12 +395,11 @@ is a failed run, not a slow one.""",
             ("3", "Tuned priority queue + early termination on the meeting condition", "the constant factor"),
             ("4", "Parallel CSR build", "the build is inside the timed run"),
             ("5", "ALT landmarks, bounded sweep", "kept only if it beats plain bidirectional"),
-            ("6", "Contraction Hierarchies, time-boxed with abort gates", "kept only if it wins the 1x AND the 10x ratio"),
+            ("6", "ALT landmark count tuned to 6-8 with per-landmark offsets", "kept only if it wins the 1x AND the 10x ratio"),
         ],
         "failed": [
-            ("A CH build whose shortcut count exploded", "blows the memory cap and loses the X axis at 10x scale"),
-            ("Too many ALT landmarks", "memory grows as 2*k*n*8 and the M axis gets worse faster than the queries get faster"),
-            ("12 workers on the query phase", "contention on the shared heap; 6 was faster"),
+            ("A Contraction-Hierarchy build", "REJECTED on amortisation arithmetic: preprocessing inside the timed run costs more than the queries it saves at the 1x ratio, and no abort gate changes that"),
+            ("Too many ALT landmarks", "memory grows as k*n*4 with per-landmark offsets; past 8 the M axis gets worse faster than the queries get faster"),
             ("32-bit distances", "no proven bound on the maximum path weight — a wrong answer is worse than a slow one"),
             ("Preprocessing justified by sequential query timing", "the queries are parallel; the budget is 12x smaller than it looks"),
         ],
@@ -451,10 +458,17 @@ coder, and each keeps a raw-block fallback so a segment that the transform does
 not help is stored as-is rather than compressed badly. Detect the boundaries
 from the table rather than assuming a fixed alignment: the published offsets are
 whole-MiB only for the first two.""",
-        "layout": """* **Shared rANS decoder.** One canonical implementation for every segment.
-  rANS is chosen over a range or arithmetic coder because its decoder is a
-  table lookup and a refill — no bit-by-bit arithmetic, and trivially
-  parallel across blocks.
+        "layout": """* **Shared binary range coder**, with an adaptive 12-bit probability model per
+  context — one canonical implementation for every segment, as
+  `docs/specs/track-e-compress.md` decides. A range coder is chosen over rANS
+  and over a bit-by-bit arithmetic coder: the decoder is a multiply, a compare
+  and a renormalisation refill, with no table to keep resident, and it is
+  trivially parallel across blocks.
+
+  (This bullet said "shared rANS decoder" until now. rANS was the older plan;
+  the spec of record rejects ANS on the K objective, and `docs/MASTER-PLAN.md`
+  states that where a track document and the spec disagree, the spec wins. The
+  generator was one of four documents still selling the superseded design.)
 * **prose** — a bounded LZ match finder feeding an order-1/2 context model.
   The encoder pays for the search; the decoder just replays it.
 * **logs** — the Track A line format, so the field structure is reused:
@@ -890,10 +904,42 @@ def build_measured_intro(track, records):
     )
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    """Generate the per-track PERF.md and README.md from the ledger.
+
+    Modes:
+      (no args)    write the ten files
+      --check      compare the generated text with what is on disk; write
+                   nothing, exit 1 if any file is stale
+      --dry-run    print which files would change; write nothing, exit 0
+
+    `--check` exists because this generator used to ignore argv entirely: the
+    documented "run it to regenerate the docs" was fine, but `--help` (or any
+    flag at all) silently rewrote ten tracked files, non-atomically, and could
+    replace a MEASURED table with "_(no measurements recorded yet)_". A
+    generator that mutates the tree when asked a question is not a tool you
+    can put in CI. `--check` is now the CI mode, and it is the only way to
+    prove the committed docs are the generator's output.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    check = "--check" in argv
+    dry = "--dry-run" in argv or check
+    unknown = [a for a in argv if a not in ("--check", "--dry-run", "--help", "-h")]
+    if unknown or "--help" in argv or "-h" in argv:
+        print(
+            "usage: gen_docs.py [--check | --dry-run]\n"
+            "  (no args)  write tracks/*/PERF.md and tracks/*/README.md\n"
+            "  --check    exit 1 if the committed docs are stale; writes nothing\n"
+            "  --dry-run  report what would change; writes nothing",
+            file=sys.stderr,
+        )
+        return 2 if unknown else 0
+
+    stale = []
+    written = []
+
     for track, cfg in TRACKS.items():
         tdir = ROOT / "tracks" / cfg["dir"]
-        tdir.mkdir(parents=True, exist_ok=True)
 
         m_label = "compressed size" if track == "E" else "peak memory"
 
@@ -918,7 +964,6 @@ def main() -> int:
             memory=cfg["memory"],
             next24=cfg["next24"],
         )
-        (tdir / "PERF.md").write_text(perf, encoding="utf-8")
 
         readme = README_TEMPLATE.format(
             track=track,
@@ -930,9 +975,41 @@ def main() -> int:
             determinism=cfg["determinism"],
             next24=cfg["next24"],
         )
-        (tdir / "README.md").write_text(readme, encoding="utf-8")
 
-        print(f"  {track}: {tdir/'PERF.md'}  {tdir/'README.md'}")
+        for rel, text in (("PERF.md", perf), ("README.md", readme)):
+            dest = tdir / rel
+            current = dest.read_text(encoding="utf-8") if dest.is_file() else None
+            if current == text:
+                continue
+            stale.append((track, dest))
+            if dry:
+                print(f"  STALE  {dest}")
+                continue
+            # Atomic: write a sibling then rename, so an interrupted run cannot
+            # leave a truncated PERF.md (the previous direct write_text could).
+            tdir.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, dest)
+            written.append(dest)
+            print(f"  wrote  {dest}")
+
+    if check:
+        if stale:
+            print(
+                f"\ngen_docs --check: {len(stale)} file(s) are not what the generator produces.\n"
+                "Run: python tooling/gen_docs.py",
+                file=sys.stderr,
+            )
+            return 1
+        print("gen_docs --check: all generated docs are up to date")
+        return 0
+
+    if dry:
+        return 0
+
+    if not written and not stale:
+        print("gen_docs: nothing to do")
     return 0
 
 

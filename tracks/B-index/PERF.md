@@ -26,7 +26,7 @@ Build an inverted index over a 250 MB text corpus, then answer 50,000 boolean an
 | M · peak memory | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | 10.40x | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
+| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
@@ -45,9 +45,11 @@ M is the weakest axis on this track: positional postings dominate the footprint,
 
 ### 2a. What was measured
 
-> **No measurements yet.** This table is filled automatically from
-> `verification/ledger.jsonl` the moment the harness records a run.
-> A hand-written number in this section would be a guess.
+> **Generated from `verification/ledger.jsonl`** — every row below is a
+> measurement a machine produced, trimmed the same way the organizers
+> trim theirs (high and low discarded, mean of the middle three).
+> Commits represented: 241e64c, 2609713, 95389e5, f31c3e2.
+> **Do not edit this table by hand.** It is regenerated.
 
 _(no measurements recorded yet)_
 
@@ -154,14 +156,21 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.
 ## 8. Reproducing these numbers
 
 ```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
 # 5 runs, discard the highest and lowest, mean of the middle three
-pwsh -File verification/bench.ps1 -Track B -Runs 5
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track B -Runs 5
 
 # the four gates: correctness, speed floor, timeout, sandbox
-pwsh -File verification/verify.ps1 -Track B
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track B
 
 # the full lockdown checklist
-pwsh -File verification/pre-freeze.ps1 -Track B
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track B
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline -p sd-harness -- bench --track B --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.

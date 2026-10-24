@@ -1,3 +1,12 @@
+# Base image is DIGEST-PINNED, as the rules require: "The final image must
+# build from a published, digest-pinned toolchain image, so code can't hide
+# in a custom base image." (docs/RULE-CHANGES-oct28.md §3)
+#
+# Tag 13-slim, multi-arch index digest resolved from the Docker Hub registry
+# API. A tag is mutable; this digest is not. To refresh it deliberately:
+#   docker buildx imagetools inspect debian:13-slim
+# and re-run tooling/pin-base-image.sh, which rewrites every Dockerfile at
+# once so the six copies cannot drift.
 # Speed Demon — scoring image. ALL FIVE TRACKS IN ONE IMAGE.
 #
 # The scoring harness builds ONE image and selects the track at RUN time:
@@ -40,8 +49,7 @@
 # so the scored container carries no build residue (smaller image, cleaner
 # filesystem diff, nothing to explain to the judges).
 
-FROM debian:13-slim AS builder
-
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad AS builder
 # The Rust toolchain is vendored into the build context BEFORE the hack
 # (tooling/vendor-toolchain.sh) because the build runs with --network=none.
 # If it is absent the build fails loudly rather than silently trying the
@@ -66,8 +74,7 @@ RUN chmod +x /app/build-all.sh /app/build-one.sh /app/run \
  && /app/build-all.sh
 
 
-FROM debian:13-slim
-
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 # Runtime: only the dispatcher + the five binaries. No toolchain, no source.
 COPY --from=builder /app/run /app/run
 COPY --from=builder /app/bin /app/bin

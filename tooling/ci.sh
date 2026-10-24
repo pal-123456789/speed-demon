@@ -56,6 +56,7 @@ while [ $# -gt 0 ]; do
 done
 
 FAILED=0
+SKIPPED=0
 STEP=0
 
 step() {
@@ -70,6 +71,14 @@ fail() {
 
 ok() {
   printf '  \033[32mPASS\033[0m %s\n' "$1"
+}
+
+# A skip is NOT a pass. Skips are counted separately and reported at the end,
+# because a green banner over a skipped gate is exactly the failure mode this
+# script was audited for.
+skip() {
+  printf '  \033[33mSKIP\033[0m %s\n' "$1"
+  SKIPPED=$((SKIPPED + 1))
 }
 
 # ── 0. rule 05 compliance ─────────────────────────────────────────────────
@@ -102,7 +111,19 @@ fi
 # ── 3. tests ──────────────────────────────────────────────────────────────
 step "UNIT TESTS"
 if cargo test --offline >/tmp/sd-test.txt 2>&1; then
-  ok "$(grep -c 'test result: ok' /tmp/sd-test.txt) test binaries passed"
+  # cargo test can exit 0 while reporting no passing test at all (a changed
+  # output format, a filtered run). Counting "test result: ok" lines and
+  # printing the count without checking it produced "PASS 0 test binaries
+  # passed" — a green tick over zero evidence.
+  NTESTS="$(grep -c 'test result: ok' /tmp/sd-test.txt || true)"
+  NPASSED="$(grep -oE 'test result: ok\. [0-9]+ passed' /tmp/sd-test.txt |
+    awk '{s += $4} END {print s + 0}')"
+  if [ "${NPASSED:-0}" -gt 0 ]; then
+    ok "$NPASSED tests passed across $NTESTS binaries"
+  else
+    cat /tmp/sd-test.txt
+    fail "cargo test exited 0 but reported NO passing tests — the output format changed or the run was empty"
+  fi
 else
   tail -40 /tmp/sd-test.txt
   fail "unit tests failed"
@@ -152,6 +173,40 @@ else
   fail "a per-track Dockerfile was hand-edited — run: python tooling/gen_dockerfiles.py"
 fi
 
+# The rules announced before the Oct 28 freeze require the final image to
+# "build from a published, digest-pinned toolchain image, so code can't hide
+# in a custom base image", cap builds at 10 minutes and images at 2 GB, and
+# forbid shipping cached outputs. None of that was enforced anywhere.
+step "IMAGE CONTRACT (digest-pinned base, no cached outputs, size/time caps)"
+if "$PY" tooling/check_base_pinned.py >/tmp/sd-imgcontract.txt 2>&1; then
+  ok "every base image is digest-pinned; no cached outputs in the context"
+else
+  grep 'FAIL' /tmp/sd-imgcontract.txt | sed 's/^/  /'
+  fail "the image contract is violated (docs/RULE-CHANGES-oct28.md §3-4)"
+fi
+
+# A .ps1 without a UTF-8 BOM is unparseable by Windows PowerShell 5.1, and
+# the em-dash that broke it (0x94) silently ends a string instead of raising —
+# so the breakage shows up as a wrong answer, not a parse error.
+step "POWERSHELL ENCODING (UTF-8 BOM, PS 5.1 parseable)"
+if "$PY" tooling/check_ps1_bom.py >/tmp/sd-bom.txt 2>&1; then
+  ok "every .ps1 has a UTF-8 BOM and parses under PowerShell 5.1"
+else
+  grep -v '^ok' /tmp/sd-bom.txt | head -20 | sed 's/^/  /'
+  fail "a .ps1 would fail to parse under Windows PowerShell 5.1"
+fi
+
+# The PGO profile must reach the compiler as a FILE. `-C profile-use=<dir>`
+# is only a warning ("is a directory") and rustc still exits 0, so the build
+# looked like it used a profile when it used none.
+step "PGO WIRING (the profile reaches rustc as a file)"
+if sh tooling/check_pgo_wiring.sh >/tmp/sd-pgowiring.txt 2>&1; then
+  ok "the merged profile is copied into the image context and passed as a file"
+else
+  grep -E 'FAIL|missing|not ' /tmp/sd-pgowiring.txt | head -20 | sed 's/^/  /'
+  fail "the PGO profile cannot reach rustc — PGO would silently do nothing"
+fi
+
 # A non-executable pre-commit hook is silently ignored by git on Linux, and a
 # non-executable build.sh fails only when someone finally runs it. Neither
 # shows up as a diff, so the mode has to be checked deliberately.
@@ -190,23 +245,30 @@ elif command -v wsl.exe >/dev/null 2>&1 || command -v wsl >/dev/null 2>&1; then
     fail "end-to-end sandbox test failed under WSL"
   fi
 else
-  ok "end-to-end sandbox skipped (no ELF binaries and no WSL on this host)"
+  skip "end-to-end sandbox skipped (no ELF binaries and no WSL on this host)"
 fi
 
 # ── 5+6. the S and D axes ─────────────────────────────────────────────────
 # One pass produces both. There was a `--s-only` flag here once that the
 # tool never implemented, so the S axis printed nothing at all and the step
 # looked like it had passed — a silent gate is worse than a failing one.
-step "S AND D AXES (source size, dependency honesty)"
-if "$PY" tooling/measure_axes.py --all >/tmp/sd-axes.txt 2>&1; then
-  grep -E "Track [A-E]: D" /tmp/sd-axes.txt | sed 's/^/  /'
-  ok "D = 1.0000 on every track"
+#
+# The old check grepped for a summary line the tool does not print, then
+# printed PASS regardless of what the grep found. Now the JSON is asserted:
+# every track must really be D = 1.0 with zero declared dependencies.
+step "S AND D AXES (code lines, dependency honesty)"
+if "$PY" tooling/measure_axes.py --all --json >/tmp/sd-axes.json 2>/tmp/sd-axes.txt; then
+  if "$PY" tooling/check_axes.py /tmp/sd-axes.json >>/tmp/sd-axes.txt 2>&1; then
+    grep -E "^(D|S) " /tmp/sd-axes.txt | sed 's/^/  /' || true
+    ok "every track: D = 1.0000, zero declared dependencies"
+  else
+    cat /tmp/sd-axes.txt
+    fail "the S/D axes do not match the rules in docs/RULE-CHANGES-oct28.md"
+  fi
 else
   cat /tmp/sd-axes.txt
-  fail "D axis is not 1.0 — a non-stdlib dependency costs ~10-17% of K"
+  fail "measure_axes.py failed"
 fi
-step "S AXIS DETAIL (normalised source bytes per track)"
-grep -E "normalised bytes|the S axis" /tmp/sd-axes.txt | sed 's/^/  /' || true
 
 # ── 7. per-track gates ────────────────────────────────────────────────────
 step "TRACK GATES (determinism, sandbox, timeout)"
@@ -217,7 +279,7 @@ fi
 for t in $(echo "$TRACKS" | tr ',' ' '); do
   tt="$(echo "$t" | tr '[:lower:]' '[:upper:]')"
   if [ "$FAST" = "1" ]; then
-    ok "track $tt skipped (--fast)"
+    skip "track $tt gates skipped (--fast)"
   else
     # The Rust harness is the canonical gate runner: the same code runs on
     # the scoring box, where PowerShell does not exist.
@@ -259,7 +321,7 @@ fi
 # ── 9. lockdown ───────────────────────────────────────────────────────────
 step "PRE-FREEZE LOCKDOWN"
 if [ "$FAST" = "1" ]; then
-  ok "lockdown skipped (--fast)"
+  skip "lockdown skipped (--fast)"
 else
   if "$HARNESS" lockdown >/tmp/sd-freeze.txt 2>&1; then
     ok "lockdown passed"
@@ -270,10 +332,16 @@ else
 fi
 
 printf '\n%s\n' "============================================================"
-if [ "$FAILED" = "0" ]; then
+if [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
   printf '\033[32mCI: ALL GATES GREEN\033[0m\n'
+  exit 0
+elif [ "$FAILED" = "0" ]; then
+  # A skip is not a pass. Saying "ALL GATES GREEN" over a skipped gate is the
+  # exact defect this script was audited for, so the banner says what happened.
+  printf '\033[33mCI: %d GATE(S) SKIPPED, none failed\033[0m\n' "$SKIPPED"
   exit 0
 else
   printf '\033[31mCI: %d GATE(S) FAILED\033[0m\n' "$FAILED"
+  [ "$SKIPPED" != "0" ] && printf '\033[33mCI: %d GATE(S) ALSO SKIPPED\033[0m\n' "$SKIPPED"
   exit 1
 fi

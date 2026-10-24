@@ -143,7 +143,10 @@ typing:
   offline rustc*, `.speed-demon.toml`, SHA-gate hook, cgroup-v2 `memory.peak` reader) — ready to
   type at H0, not committed early.
 - **Oct 30 06:00 UTC (sample + hashes):** load the expected sample hashes into
-  `verification/expected/*.sha256`. Sanity-read the sample bytes (grammar only — never tune to them).
+  `tracks/<track>/verification/expected/<output>.sha256` — per track, which is
+  where `verify.ps1` and `pre-freeze.ps1` actually read them (there is no
+  repo-level `verification/expected/`). Sanity-read the sample bytes (grammar
+  only — never tune to them).
 
 ---
 
@@ -165,7 +168,7 @@ land in local early-morning. Total = 57 h hands-on + 15 h sleep = **72 h, no idl
 | Commit/meal | H17–H18 | 16:30–17:30 | Commit all baselines; PERF.md step-0 rows. |
 | **Deep A** | H18–H28 | 17:30–03:30 | A optimization ladder: custom byte scanner, dense endpoint/hour IDs, SoA, thread-local aggregation, two-level radix percentiles, arena. **Target K 7–8.** |
 | **Sleep 2** | H28–H33 | 03:30–08:30 | 5 h. |
-| **Deep D** | H33–H43 | 08:30–18:30 | D ladder: tuned bidirectional Dijkstra, ALT landmarks (bounded experiment), CH time-boxed with hard abort gates, preprocessing break-even inside the timed run. **Target K 7.** |
+| **Deep D** | H33–H43 | 08:30–18:30 | D ladder: tuned bidirectional Dijkstra, ALT landmarks (bounded experiment, 6–8 with per-landmark offsets), preprocessing break-even inside the timed run. Contraction Hierarchies are **rejected** — see the notice at the top of this document — and are not on the ladder. **Target K 7.** |
 | **Deep C** | H43–H51 | 18:30–02:30 | C ladder: SIMD candidate-byte locator feeding the scalar state machine, fixed-point cents, parallel structural pre-scan, differential tester vs hostile corpus. **Target K 6–7.** Correctness first. |
 | **Sleep 3** | H51–H56 | 02:30–07:30 | 5 h. |
 | **Solid B** | H56–H61 | 07:30–12:30 | B: StreamVByte/PForDelta postings, smallest-first AND, rarest-anchor phrase, **build-side speedups (harmonic-blend fix)**. **Target K 6.** |

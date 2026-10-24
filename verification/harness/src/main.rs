@@ -236,7 +236,11 @@ fn expected_hash(track: &Track, root: &Path) -> Option<String> {
     ] {
         let p = dir.join(&name);
         if let Ok(raw) = std::fs::read_to_string(&p) {
-            let raw = raw.trim();
+            // Strip a UTF-8 BOM. `Out-File` and PowerShell's `>` redirection add
+            // one by default, and then the first 64 "hex" characters include it
+            // and the pin silently fails to parse — which, now that an unparsed
+            // pin is a gate failure, turns a correct pin into a red build.
+            let raw = raw.trim().trim_start_matches('\u{feff}').trim();
             if let Some(hex) = raw.split_whitespace().next() {
                 if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
                     return Some(hex.to_ascii_lowercase());
@@ -905,13 +909,33 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
         // near 1.9 — i.e. it advertised an M of 10x-22x on the one track where
         // that is arithmetically impossible.
         let rows: &[(f64, f64, f64, f64)] = match track.id {
-            'A' => &[(20.0, 10.0, 0.60, 1.00), (30.0, 15.0, 0.62, 1.05), (45.0, 22.0, 0.65, 1.10)],
-            'B' => &[(20.0, 8.0, 0.62, 1.00), (30.0, 12.0, 0.62, 1.05), (50.0, 20.0, 0.60, 1.20)],
-            'C' => &[(20.0, 8.0, 0.62, 1.00), (30.0, 12.0, 0.60, 1.05), (45.0, 18.0, 0.58, 1.10)],
-            'D' => &[(15.0, 6.0, 0.70, 1.00), (25.0, 8.0, 0.66, 1.05), (40.0, 12.0, 0.62, 1.10)],
+            'A' => &[
+                (20.0, 10.0, 0.60, 1.00),
+                (30.0, 15.0, 0.62, 1.05),
+                (45.0, 22.0, 0.65, 1.10),
+            ],
+            'B' => &[
+                (20.0, 8.0, 0.62, 1.00),
+                (30.0, 12.0, 0.62, 1.05),
+                (50.0, 20.0, 0.60, 1.20),
+            ],
+            'C' => &[
+                (20.0, 8.0, 0.62, 1.00),
+                (30.0, 12.0, 0.60, 1.05),
+                (45.0, 18.0, 0.58, 1.10),
+            ],
+            'D' => &[
+                (15.0, 6.0, 0.70, 1.00),
+                (25.0, 8.0, 0.66, 1.05),
+                (40.0, 12.0, 0.62, 1.10),
+            ],
             // Track E: the M ratio is (our ratio)/2.41, so 1.0-1.9 is the
             // whole realistic band.
-            'E' => &[(10.0, 1.02, 0.62, 1.00), (25.0, 1.28, 0.60, 1.05), (50.0, 1.87, 0.58, 1.10)],
+            'E' => &[
+                (10.0, 1.02, 0.62, 1.00),
+                (25.0, 1.28, 0.60, 1.05),
+                (50.0, 1.87, 0.58, 1.10),
+            ],
             _ => &[(1.0, 1.0, 1.0, 1.0)],
         };
         for (t, m, s, x) in rows {

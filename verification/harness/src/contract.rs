@@ -129,6 +129,24 @@ pub const W_X: f64 = 0.10;
 /// Every ratio is capped at 50x.
 pub const AXIS_CAP: f64 = 50.0;
 
+/// The S axis can only cost. Announced before the Oct 28 freeze: "Its factor
+/// is capped at 1.0, so it no longer rewards the tersest language."
+///
+/// See docs/RULE-CHANGES-oct28.md. Being smaller than the reference earns
+/// nothing; being larger still costs. Without this cap a hypothetical row with
+/// an S ratio above 1.0 would award points the scorer does not give.
+pub const S_FACTOR_CAP: f64 = 1.0;
+
+/// D counts DIRECT dependencies declared in the manifest: one dependency is a
+/// factor of 0.90. This replaces the superseded
+/// `D = 1 + (runtime deps) + (vendored bytes / 50000)`.
+pub const D_FACTOR_PER_DEP: f64 = 0.90;
+
+/// The D ratio implied by a manifest declaring `n` direct dependencies.
+pub fn d_ratio(n_deps: u32) -> f64 {
+    D_FACTOR_PER_DEP.powi(n_deps as i32)
+}
+
 /// speed_score = 100 * ln(K) / ln(25), clamped to [0, 100].
 pub fn speed_score(k: f64) -> f64 {
     if k <= 0.0 {
@@ -144,7 +162,11 @@ pub fn coefficient(t: f64, m: f64, s: f64, d: f64, x: f64) -> (f64, [f64; 5]) {
     let mut contrib = [0.0f64; 5];
     let mut k = 1.0f64;
     for i in 0..5 {
-        let capped = ratios[i].clamp(0.0, AXIS_CAP);
+        let mut capped = ratios[i].clamp(0.0, AXIS_CAP);
+        // Axis 2 is S. The rule change caps its FACTOR, not just its ratio.
+        if i == 2 {
+            capped = capped.min(S_FACTOR_CAP);
+        }
         contrib[i] = capped.powf(weights[i]);
         k *= contrib[i];
     }
@@ -180,9 +202,40 @@ mod tests {
 
     #[test]
     fn every_axis_is_capped_at_fifty() {
-        let (k, _) = coefficient(1e9, 1e9, 1e9, 1e9, 1e9);
-        // 50^1.0 == 50
-        assert!((k - 50.0).abs() < 1e-6, "K was {k}");
+        let (k, c) = coefficient(1e9, 1e9, 1e9, 1e9, 1e9);
+        // T, M, D and X saturate at 50; S saturates at 1.0 because its factor
+        // is capped (docs/RULE-CHANGES-oct28.md §1). So the ceiling is
+        // 50^(0.40+0.20+0.15+0.10) * 1.0^0.15, not 50^1.0.
+        let expect = 50f64.powf(W_T + W_M + W_D + W_X);
+        assert!((k - expect).abs() < 1e-9, "K was {k}, expected {expect}");
+        assert!((c[2] - 1.0).abs() < 1e-12, "S contribution was {}", c[2]);
+        assert!((c[0] - 50f64.powf(W_T)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn source_size_can_only_cost() {
+        // Announced before the Oct 28 freeze: "Its factor is capped at 1.0, so
+        // it no longer rewards the tersest language." A submission whose source
+        // is SMALLER than the reference (ratio > 1) must earn nothing on S.
+        let (k_small, c_small) = coefficient(1.0, 1.0, 4.0, 1.0, 1.0);
+        assert!((c_small[2] - 1.0).abs() < 1e-12, "S awarded {}", c_small[2]);
+        assert!((k_small - 1.0).abs() < 1e-12, "K awarded {k_small}");
+
+        // Being larger still costs, and the cap must not flatten that.
+        let (_, c_big) = coefficient(1.0, 1.0, 0.25, 1.0, 1.0);
+        assert!(c_big[2] < 0.95, "S penalty vanished: {}", c_big[2]);
+    }
+
+    #[test]
+    fn one_dependency_costs_ten_percent() {
+        // "one dependency gives a factor of 0.90"
+        assert!((d_ratio(0) - 1.0).abs() < 1e-12);
+        assert!((d_ratio(1) - 0.90).abs() < 1e-12);
+        assert!((d_ratio(2) - 0.81).abs() < 1e-12);
+        // This repo declares zero dependencies, so D = 1.0 either way — but the
+        // formula is now the real one, not the superseded
+        // `1 + deps + vendored/50000` which charged ~2.0 for one dependency.
+        assert!((d_ratio(0) - 1.0).abs() < 1e-12);
     }
 
     #[test]

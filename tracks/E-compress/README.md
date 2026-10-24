@@ -22,19 +22,28 @@ almost everything about the design:
   four chances to be slow; one canonical decoder with a per-segment
   transform in front of it means the hot path is written and tuned once.
 
-The corpus is four published, 1 MiB-aligned segments that each reward a
-different model: English prose, log lines in the Track A format, nested JSON
-with repetitive keys, and float32 sensor frames. Each gets a reversible
-transform in front of the shared entropy coder, and each keeps a raw-block
-fallback so a segment that the transform does not help is stored as-is rather
-than compressed badly.
+The corpus is four published segments — byte-exact sizes and offsets are in
+`verification/contract.toml` — each rewarding a different model: English prose,
+log lines in the Track A format, nested JSON with repetitive keys, and float32
+sensor frames. Each gets a reversible transform in front of the shared entropy
+coder, and each keeps a raw-block fallback so a segment that the transform does
+not help is stored as-is rather than compressed badly. Detect the boundaries
+from the table rather than assuming a fixed alignment: the published offsets are
+whole-MiB only for the first two.
 
 ## Data layout
 
-* **Shared rANS decoder.** One canonical implementation for every segment.
-  rANS is chosen over a range or arithmetic coder because its decoder is a
-  table lookup and a refill — no bit-by-bit arithmetic, and trivially
-  parallel across blocks.
+* **Shared binary range coder**, with an adaptive 12-bit probability model per
+  context — one canonical implementation for every segment, as
+  `docs/specs/track-e-compress.md` decides. A range coder is chosen over rANS
+  and over a bit-by-bit arithmetic coder: the decoder is a multiply, a compare
+  and a renormalisation refill, with no table to keep resident, and it is
+  trivially parallel across blocks.
+
+  (This bullet said "shared rANS decoder" until now. rANS was the older plan;
+  the spec of record rejects ANS on the K objective, and `docs/MASTER-PLAN.md`
+  states that where a track document and the spec disagree, the spec wins. The
+  generator was one of four documents still selling the superseded design.)
 * **prose** — a bounded LZ match finder feeding an order-1/2 context model.
   The encoder pays for the search; the decoder just replays it.
 * **logs** — the Track A line format, so the field structure is reused:

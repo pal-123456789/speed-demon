@@ -24,9 +24,12 @@ So the plan is a portfolio with a hard rollback:
 2. **ALT** (A* with landmark distances) is a bounded experiment: sweep the
    landmark count and keep it only if it beats plain bidirectional inside
    the time budget.
-3. **Contraction Hierarchies** is time-boxed behind abort gates — a
-   shortcut cap, a memory cap, a preprocessing break-even budget, and a
-   single-mismatch abort that removes the whole approach.
+3. **Contraction Hierarchies are REJECTED**, on arithmetic rather than on
+   nerve: the preprocessing has to be paid inside the timed run, and at the 1x
+   ratio the shortcut build alone exceeds the whole query budget it is meant to
+   accelerate. No abort gate makes that arithmetic work, so CH is not on the
+   ladder at all. The chosen structure is CSR + a radix heap + bidirectional
+   search + 6-8 ALT landmarks.
 
 The reverse graph is a *traversal structure*, not a claimed edge: it is
 built from the edge list because the format lists reverse edges separately
@@ -51,11 +54,17 @@ directed graph.
 ## Memory
 
 CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
-landmark distances are `2 * k * n * 8` bytes — about 111 MB at 4 landmarks
-and 891 MB at 32. Per-worker scratch for a bidirectional search is about
-334 MB across 12 workers. All of that fits inside the 8 GB ceiling with
-room to spare, which is what makes the larger landmark sets worth measuring
-rather than dismissing.
+the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
+Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
+42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
+fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
+workers. All of that fits inside the 8 GB ceiling with room to spare, which is
+what makes the 6-8 landmark range worth sweeping rather than dismissing.
+
+(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
+891 MB at 32". That was the superseded design: `u64` distances, two copies, no
+landmark cap. The spec of record fixes `u32` with per-landmark offsets and
+k = 6 to 8, so the old arithmetic described a structure nobody is building.)
 
 The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
 rather than a slowdown, so a preprocessing variant that runs out of memory

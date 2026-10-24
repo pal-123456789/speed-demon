@@ -35,6 +35,52 @@ weight_x = 0.10
 # speed score = 100 * ln(K)/ln(25), clamped to [0,100]
 k_anchor = 25
 
+# ── Rule changes announced before the Oct 28 freeze ────────────────────────
+# Provenance: the organizers' answers to five competitor questions, published
+# in the hackathon channel ahead of the Oct 28 freeze; the consolidated list
+# goes up under "Changes before freeze" on speeddemon.dev. The narrative and
+# the impact analysis are in docs/RULE-CHANGES-oct28.md. Where the event page
+# and this file disagree, the event page wins — but this is the record the
+# harness and the axis measurement code against.
+[rules_oct28]
+# S is now CODE LINES counted by scc after the language's formatter — not
+# bytes. The old `ref_source_bytes` values are kept for provenance and are no
+# longer the scored denominator.
+s_unit = "code_lines"
+s_counter = "scc"
+# "Its factor is capped at 1.0, so it no longer rewards the tersest language."
+# Being smaller than the reference can no longer earn anything: S only costs.
+s_factor_cap = 1.0
+# "one dependency gives a factor of 0.90" — D counts DIRECT dependencies
+# declared in the manifest. This replaces the old
+#   D = 1 + (runtime deps) + (vendored bytes / 50000)
+# which punished a single dependency far harder than the real rule does.
+d_factor_per_dep = 0.90
+d_counts = "direct_dependencies_in_manifest"
+# "S covers everything in your repo at the recorded commit, except registry
+# packages first published before Oct 1 by people outside your team. A library
+# you wrote counts as source wherever it lives."
+s_scope = "whole_repository"
+s_registry_exception_before = "2026-10-01"
+# "The final image must build from a published, digest-pinned toolchain image,
+# so code can't hide in a custom base image."
+base_image_must_be_digest_pinned = true
+# "Builds are capped at 10 minutes and images at 2 GB."
+build_time_cap_s = 600
+image_size_cap_mb = 2048
+# "`/data` is not mounted at build time, so train on input you generate with
+# the published generator inside the build. The image may not ship cached
+# outputs." Training runs (PGO, AOT caches, native-image) are explicitly
+# allowed — which is what tooling/pgo-build.sh already does.
+training_runs_allowed = true
+data_mounted_at_build = false
+image_may_ship_cached_outputs = false
+# Unchanged, restated so nobody "corrects" it later: T is end-to-end wall time
+# from exec to exit, so startup and JIT warmup count. M is the kernel's peak
+# counter for the run; untouched reservations do not count.
+t_is_end_to_end = true
+m_is_kernel_peak = true
+
 # ── Track A — Ingest ───────────────────────────────────────────────────────
 [A]
 status = "DEFERRED"

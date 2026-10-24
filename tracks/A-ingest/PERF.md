@@ -26,7 +26,7 @@ Aggregate 3.1M structured log lines (312 MB) into per-endpoint request counts, p
 | M · peak memory | 2,940 MB | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | 3,180 B | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | 10.40x | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
+| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
@@ -48,12 +48,10 @@ M is peak RSS (cgroup `memory.peak`). The reference's 2,940 MB comes mostly from
 > **Generated from `verification/ledger.jsonl`** — every row below is a
 > measurement a machine produced, trimmed the same way the organizers
 > trim theirs (high and low discarded, mean of the middle three).
-> Commits represented: 241e64c.
+> Commits represented: 241e64c, 2609713, 8bd3624, 9515425, 95389e5, 997e6cb, f31c3e2.
 > **Do not edit this table by hand.** It is regenerated.
 
-| # | Change | T (s) | M (MB) | vs. previous | Verdict |
-|---|---|---:|---:|---:|---|
-| 1 | baseline | 0.030 | _ | baseline | MEASURED (`241e64c`) |
+_(no measurements recorded yet)_
 
 ### 2b. What was planned
 
@@ -102,7 +100,6 @@ interesting part and judges are told to reward them."*
 |---|---|---|---|
 | SIMD timestamp parse | _ | _ | branchy setup cost per line outweighed the vector win |
 | Lock-free shared intern table | _ | _ | contention beat the sharded version |
-| 12 workers instead of 6 | _ | _ | SMT + cache pressure widened the spread |
 | `mmap` instead of a buffered read | _ | _ | inflated `memory.peak` — M axis got worse |
 | t-digest / KLL sketches | _ | _ | approximate percentiles cannot hash-match |
 
@@ -159,14 +156,21 @@ the M axis with data we never need resident.
 ## 8. Reproducing these numbers
 
 ```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
 # 5 runs, discard the highest and lowest, mean of the middle three
-pwsh -File verification/bench.ps1 -Track A -Runs 5
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track A -Runs 5
 
 # the four gates: correctness, speed floor, timeout, sandbox
-pwsh -File verification/verify.ps1 -Track A
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track A
 
 # the full lockdown checklist
-pwsh -File verification/pre-freeze.ps1 -Track A
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track A
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline -p sd-harness -- bench --track A --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.

@@ -23,10 +23,10 @@ Losslessly compress a fixed 100 MB mixed corpus — text, logs, JSON, and a bina
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
 | T · wall time | 29.80 s | _(fill)_ | _(fill)_ | 0.40 | _(fill)_ |
-| M · compressed size | compressed size is the M axis | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
+| M · compressed size | 2.41x ratio (43.5 MB / 100 MiB) | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | 10.40x | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
+| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
@@ -45,9 +45,11 @@ On this track the M slot holds COMPRESSED SIZE, and the ratio that feeds K is (o
 
 ### 2a. What was measured
 
-> **No measurements yet.** This table is filled automatically from
-> `verification/ledger.jsonl` the moment the harness records a run.
-> A hand-written number in this section would be a guess.
+> **Generated from `verification/ledger.jsonl`** — every row below is a
+> measurement a machine produced, trimmed the same way the organizers
+> trim theirs (high and low discarded, mean of the middle three).
+> Commits represented: 241e64c, 2609713, 95389e5, f31c3e2.
+> **Do not edit this table by hand.** It is regenerated.
 
 _(no measurements recorded yet)_
 
@@ -152,14 +154,21 @@ serialisation, so the output file is a deterministic function of the input.
 ## 8. Reproducing these numbers
 
 ```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
 # 5 runs, discard the highest and lowest, mean of the middle three
-pwsh -File verification/bench.ps1 -Track E -Runs 5
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track E -Runs 5
 
 # the four gates: correctness, speed floor, timeout, sandbox
-pwsh -File verification/verify.ps1 -Track E
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track E
 
 # the full lockdown checklist
-pwsh -File verification/pre-freeze.ps1 -Track E
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track E
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline -p sd-harness -- bench --track E --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.

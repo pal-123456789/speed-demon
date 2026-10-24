@@ -31,6 +31,10 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "tooling" / "templates" / "Dockerfile.track.tpl"
+# The single source of truth for the base image reference. The root
+# Dockerfile and the five generated ones must all use this exact value, so
+# they cannot drift apart; tooling/check_base_pinned.py enforces that.
+BASE_IMAGE_FILE = ROOT / "tooling" / "base-image.txt"
 
 TRACKS = [
     ("A", "A-ingest"),
@@ -41,8 +45,12 @@ TRACKS = [
 ]
 
 
-def render(template: str, track: str, directory: str) -> str:
-    return template.replace("{{TRACK}}", track).replace("{{DIR}}", directory)
+def render(template: str, track: str, directory: str, base_image: str) -> str:
+    return (
+        template.replace("{{TRACK}}", track)
+        .replace("{{DIR}}", directory)
+        .replace("{{BASE_IMAGE}}", base_image)
+    )
 
 
 def main() -> int:
@@ -54,12 +62,20 @@ def main() -> int:
     if not TEMPLATE.is_file():
         print(f"missing template: {TEMPLATE}", file=sys.stderr)
         return 2
+    if not BASE_IMAGE_FILE.is_file():
+        print(f"missing base image reference: {BASE_IMAGE_FILE}", file=sys.stderr)
+        return 2
+    base_image = BASE_IMAGE_FILE.read_text(encoding="utf-8").strip()
+    if "@sha256:" not in base_image:
+        print(f"{BASE_IMAGE_FILE} is not digest-pinned: {base_image!r}", file=sys.stderr)
+        print("the rules require a published, digest-pinned base image", file=sys.stderr)
+        return 2
     template = TEMPLATE.read_text(encoding="utf-8")
 
     stale = []
     for track, directory in TRACKS:
         path = ROOT / "tracks" / directory / "Dockerfile"
-        wanted = render(template, track, directory)
+        wanted = render(template, track, directory, base_image)
         current = path.read_text(encoding="utf-8") if path.is_file() else None
         if current == wanted:
             print(f"  up to date: {path.relative_to(ROOT)}")

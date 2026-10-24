@@ -2,20 +2,27 @@
 """
 Speed Demon — S-axis and D-axis measurement.
 
+CHANGED BEFORE THE OCT 28 FREEZE. The definitions below are the organizers'
+revised ones, published in the hackathon channel and consolidated in
+docs/RULE-CHANGES-oct28.md. Both axes are now penalties only: neither can score
+above 1.0, so nothing here can earn points by shrinking or restructuring.
+
 S  source size, weight 0.15
-   "Bytes of source after running your language's canonical formatter,
-    stripping comments, and normalising identifiers to fixed-width tokens."
-   The identifier step is what makes the axis fair: renaming every variable
-   to a single letter changes nothing, so readable code is free. This script
-   approximates the organizer's normalisation so you can see where you sit
-   BEFORE the freeze instead of after.
+   "counted in code lines (by scc, after your language's formatter), and it can
+    only cost you. Its factor is capped at 1.0, so it no longer rewards the
+    tersest language."
+   Measured REPO-WIDE: "S covers everything in your repo at the recorded
+   commit, except registry packages first published before Oct 1 by people
+   outside your team. A library you wrote counts as source wherever it lives."
+   The old definition — bytes after comment stripping and identifier
+   normalisation — is superseded and no longer approximates the scored value.
 
 D  dependency weight, weight 0.15
-   D = 1 + (non-stdlib runtime dependencies) + (vendored source bytes / 50000)
-   The reference has none, so D_ref = 1 and every dependency is a straight
-   cost. A zero-dependency submission starts this axis at 1.0 against
-   everyone else's 2.0 or 3.0 — worth roughly 10-17% on K before any other
-   work.
+   D = 0.90 ^ (direct dependencies declared in your manifest)
+   "one dependency gives a factor of 0.90". This replaces
+   `1 + deps + vendored_bytes/50000`, which charged ~2.0 for one dependency.
+   The reference has none, so D_ref = 1 and this repo still sits at 1.0 — but
+   the arithmetic is now the real one.
 
 Usage
 -----
@@ -28,6 +35,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 # Force UTF-8 on stdio. On Windows the default code page mangles every
@@ -52,6 +61,10 @@ TRACK_DIRS = {
 # 3,180 B). Other tracks' reference sizes are not published; they come from
 # the Oct 28 frozen spec.
 REF_SOURCE_BYTES = {"A": 3180}
+
+# The D formula from the Oct 28 rule change: one direct dependency is 0.90.
+# Must match `D_FACTOR_PER_DEP` in verification/harness/src/contract.rs.
+D_FACTOR_PER_DEP = 0.90
 
 # ── S axis ────────────────────────────────────────────────────────────────
 
@@ -157,42 +170,96 @@ def normalise_identifiers(src: str) -> str:
     return IDENT_RE.sub(repl, src)
 
 
+def _scc_code_lines(path: Path) -> int | None:
+    """Code lines for `path` as `scc` counts them, or None if scc is absent.
+
+    The organizers count S with `scc`, so guessing with our own tokenizer is a
+    trend indicator at best. When scc is installed we use it directly.
+    """
+    exe = shutil.which("scc")
+    if not exe or not path.exists():
+        return None
+    try:
+        out = subprocess.run(
+            [exe, "--format", "json", str(path)],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        data = json.loads(out.stdout)
+        return int(sum(lang.get("Code", 0) for lang in data))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _fallback_code_lines(text: str) -> int:
+    """A deterministic stand-in for scc's Code column: non-blank, non-comment.
+
+    Used only when scc is unavailable, and labelled as such in the report so a
+    number from this path is never mistaken for the scored quantity.
+    """
+    stripped = strip_comments(text)
+    return sum(1 for line in stripped.splitlines() if line.strip())
+
+
 def measure_source(track_dir: Path) -> dict:
-    """Approximate the S axis for one track directory."""
+    """Measure the S axis: CODE LINES, repo-wide, as `scc` counts them.
+
+    Changed before the Oct 28 freeze (docs/RULE-CHANGES-oct28.md §1):
+
+      * the unit is code lines, not bytes, and comments/blank lines do not
+        count, so the old comment-stripping and identifier-normalising
+        arithmetic no longer approximates the scored quantity;
+      * "S covers everything in your repo at the recorded commit", so the
+        repo-wide count is the scored numerator's denominator — not just the
+        track's own `src/`;
+      * the factor is capped at 1.0, so being small earns nothing.
+
+    The per-track count is still reported, because it is what a developer can
+    act on, but `repo_code_lines` is the number that feeds the axis.
+    """
     files = sorted((track_dir / "src").rglob("*.rs")) if (track_dir / "src").exists() else []
-    raw_bytes = 0
-    stripped_bytes = 0
-    normalised_bytes = 0
+    track_lines = 0
     per_file = []
+    used_scc = _scc_code_lines(track_dir / "src")
     for f in files:
-        raw = f.read_bytes()
-        text = raw.decode("utf-8", errors="replace")
-        stripped = strip_comments(text)
-        normalised = normalise_identifiers(stripped)
-        # The organiser runs a canonical formatter first; rustfmt output is
-        # close enough for a trend indicator, and the ratio (not the absolute)
-        # is what we are tracking.
-        raw_bytes += len(raw)
-        stripped_bytes += len(stripped.encode("utf-8"))
-        normalised_bytes += len(normalised.encode("utf-8"))
-        per_file.append({
-            "file": str(f.relative_to(ROOT)),
-            "raw": len(raw),
-            "no_comments": len(stripped.encode("utf-8")),
-            "normalised": len(normalised.encode("utf-8")),
-        })
+        text = f.read_bytes().decode("utf-8", errors="replace")
+        n = _fallback_code_lines(text)
+        track_lines += n
+        per_file.append({"file": str(f.relative_to(ROOT)), "code_lines": n})
+
+    # Repo-wide: what the rule actually counts.
+    repo_scc = _scc_code_lines(ROOT)
+    repo_lines = repo_scc if repo_scc is not None else _fallback_code_lines(
+        "\n".join(
+            p.read_bytes().decode("utf-8", errors="replace")
+            for p in sorted(ROOT.rglob("*.rs"))
+            if "target" not in p.parts and "vendor" not in p.parts
+        )
+    )
     return {
         "files": per_file,
-        "raw_bytes": raw_bytes,
-        "stripped_bytes": stripped_bytes,
-        "normalised_bytes": normalised_bytes,
+        "track_code_lines": track_lines,
+        "repo_code_lines": repo_lines,
+        "counter": "scc" if (used_scc is not None and repo_scc is not None) else "fallback(non-blank,non-comment)",
+        "scc_available": used_scc is not None,
     }
 
 
 # ── D axis ────────────────────────────────────────────────────────────────
 
 def measure_dependencies(track_dir: Path) -> dict:
-    """D = 1 + non-stdlib runtime deps + vendored source bytes / 50000."""
+    """D = 0.90 ^ (direct dependencies declared in the manifest).
+
+    Changed before the Oct 28 freeze (docs/RULE-CHANGES-oct28.md §2): "D counts
+    direct dependencies declared in your manifest, so ordinary libraries cost a
+    predictable amount: one dependency gives a factor of 0.90."
+
+    This replaces `D = 1 + deps + vendored_bytes / 50000`, which charged about
+    2.0 for a single dependency — more than twice the real penalty — and which
+    no longer describes how the axis is scored. Vendored bytes are still
+    reported for information, but they are not in the formula.
+    """
     cargo = track_dir / "Cargo.toml"
     deps = []
     vendored_bytes = 0
@@ -208,10 +275,12 @@ def measure_dependencies(track_dir: Path) -> dict:
                 continue
             if in_deps and "=" in s and not s.startswith("#"):
                 name = s.split("=")[0].strip()
+                # `speeddemon-core` is this repository's own code: it counts as
+                # SOURCE under S, not as a third-party dependency under D.
                 if name and name != "speeddemon-core":
                     deps.append(name)
 
-    # vendored third-party source (NOT our own crate's source)
+    # vendored third-party source (NOT our own crate's source) — reported only
     for vname in ("vendor", "third_party", "external"):
         vdir = track_dir / vname
         if vdir.exists():
@@ -220,7 +289,7 @@ def measure_dependencies(track_dir: Path) -> dict:
                 if f.is_file():
                     vendored_bytes += f.stat().st_size
 
-    d = 1.0 + len(deps) + (vendored_bytes / 50000.0)
+    d = D_FACTOR_PER_DEP ** len(deps)
     return {
         "declared_dependencies": len(deps),
         "dependencies": deps,
@@ -237,33 +306,44 @@ def report(track: str, as_json: bool) -> dict:
     s = measure_source(tdir)
     d = measure_dependencies(tdir)
     ref = REF_SOURCE_BYTES.get(track)
-    s_ratio = (ref / s["normalised_bytes"]) if (ref and s["normalised_bytes"]) else None
+    # S is repo-wide code lines now, so the ratio uses the repo-wide count.
+    # REF_SOURCE_BYTES still holds the superseded byte figure, so a ratio from
+    # it is NOT the scored ratio and must not be presented as one.
+    s_ratio = (ref / s["repo_code_lines"]) if (ref and s["repo_code_lines"]) else None
+    # "Its factor is capped at 1.0" — the axis can only cost.
+    s_factor = min(1.0, s_ratio ** 0.15) if s_ratio else None
 
     result = {
         "track": track,
         "S": s,
         "S_ratio_vs_reference": s_ratio,
+        "S_factor_capped": s_factor,
         "D": d,
+        "rules": "docs/RULE-CHANGES-oct28.md",
     }
     if not as_json:
         print(f"\n=== TRACK {track} ({TRACK_DIRS[track]}) ===")
-        print(f"  S  source size")
-        print(f"     raw bytes        : {s['raw_bytes']}")
-        print(f"     comments stripped: {s['stripped_bytes']}")
-        print(f"     identifiers norm.: {s['normalised_bytes']}   <- the S axis")
+        print(f"  S  source size — CODE LINES (scc), repo-wide")
+        print(f"     counter          : {s['counter']}")
+        print(f"     repo code lines  : {s['repo_code_lines']}   <- the S axis")
+        print(f"     this track only  : {s['track_code_lines']}")
+        print(f"     S factor capped at 1.0: being smaller earns nothing")
         if s_ratio is not None:
-            print(f"     vs reference {ref} B: ratio {s_ratio:.4f}x  "
-                  f"contributes {s_ratio**0.15:.4f} to K")
+            print(f"     vs superseded reference ({ref} B — bytes, not lines): "
+                  f"ratio {s_ratio:.4f}x  factor {s_factor:.4f}")
+            print("     NOTE: not the scored value; the reference must be "
+                  "re-derived in code lines")
         else:
-            print("     vs reference      : (reference size not published — "
+            print("     vs reference      : (reference code lines not published — "
                   "pin it from the Oct 28 spec)")
         for f in s["files"]:
-            print(f"       {f['file']:<40} raw={f['raw']:<7} norm={f['normalised']}")
+            print(f"       {f['file']:<40} code_lines={f['code_lines']}")
         print(f"  D  dependency weight")
-        print(f"     runtime deps     : {d['declared_dependencies']} {d['dependencies']}")
-        print(f"     vendored bytes   : {d['vendored_bytes']}")
+        print(f"     direct deps      : {d['declared_dependencies']} {d['dependencies']}")
+        print(f"     vendored bytes   : {d['vendored_bytes']}  (reported only — "
+              f"not in the formula since the Oct 28 change)")
         print(f"     D                : {d['D']:.4f}  "
-              f"(D_ref = 1.00, contributes {d['D']**-0.15:.4f} to K)")
+              f"(0.90^deps, capped at 1.00; contributes {min(1.0, d['D'])**0.15:.4f} to K)")
     return result
 
 

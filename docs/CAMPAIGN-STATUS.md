@@ -52,19 +52,19 @@ every run.
 |---|---|---|
 | Workspace (5 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
 | Core library (13 unit tests) | **GREEN** | 13/13 pass: arena, interner, chunking, pool, cents, float bits |
-| **`verification/harness`** — the scoring-box replica | **GREEN** | 13/13 tests: pure-Rust SHA-256 (known vectors), cgroup v2 peak reader, JSONL ledger, lockdown, contract table *and contract.toml agreement* |
-| `rustfmt` + `clippy -D warnings` | **GREEN** | pre-commit hook enforces both |
+| **`verification/harness`** — the scoring-box replica | **GREEN** | 16/16 tests: pure-Rust SHA-256 (known vectors), JSONL ledger, lockdown, contract table *and contract.toml agreement*. `cgroup.rs` has **no unit test** — it is exercised only by live container runs |
+| `rustfmt` + `clippy -D warnings` | **AMBER** | the hook enforces both **once installed**, and it is **not installed in this clone** — `tooling/hooks/pre-commit` exists but `.git/hooks/` holds only `*.sample`. Run `sh tooling/install-hooks.sh` before the freeze |
 | Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build-one.sh` builds all 5 statically for musl; `build-all.sh` loops over it; verified from a clean 54-file context |
-| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test 5/5 in CI |
-| 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows) — same checklist, two hosts |
+| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test 5/5 in CI. `TRACK` is validated, never coerced — an unrecognised value used to be filtered to the empty string and silently defaulted to track A |
+| 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows). The two differ: `verify.ps1` has a speed floor and no determinism gate. Inside the harness, an unpinned expected hash is now a **FAIL**, not a green tick |
 | 5-run trimmed-mean benchmark | **GREEN** | `harness bench` + `bench.ps1` |
-| Pre-freeze lockdown (81 checks) | **GREEN** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux) |
+| Pre-freeze lockdown (81 checks) | **AMBER — 12 failures** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux). All 12 are the correct pre-kickoff state; see §1a |
 | **Rule 05 compliance guard** | **GREEN** | `tooling/rule05_guard.py` — proved to block a planted violation |
-| **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered |
+| **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered. `python tooling/gen_docs.py --check` is the CI gate that proves the committed docs *are* the generator's output |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
 | **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 5 × ~290 lines, decision-complete, no solution code |
-| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` — profile merges to `target/pgo/prof`, consumed by `build-one.sh`, output-equivalence checked |
-| One-command CI | **GREEN** | `sh tooling/ci.sh` — 17 gates, cheapest-fails-first, all green (`--fast` skips only the container runs) |
+| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` merges to `pgo/merged.profdata` (shippable) and `build-one.sh` consumes **the file**; `tooling/check_pgo_wiring.sh` proves the profile can reach the image. Both halves were broken until now — see §1b |
+| One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — 15 gates, cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
 | K calculator | **GREEN** | reproduces the published Nightshade example exactly (K 6.2569, speed 56.97, total 65.73) |
 | S/D axis measurement | **GREEN** | **D = 1.0000 on all five tracks** |
 | Anti-overfit fixture generator | **GREEN** | grammar-preserving data + 11 hand-crafted hostile CSV cases |
@@ -73,23 +73,39 @@ every run.
 
 ### The open FAILs, and why each is correct right now
 
-`sh tooling/ci.sh` (full mode) reports exactly one red gate: the pre-freeze
-lockdown, with 7 failing checks. All 7 are the correct state two days before
-the window opens, and every one of them clears by doing the work rather than
-by changing a check.
+`harness lockdown` reports **12 failed checks**: 5 × "no scaffold sentinel in
+source", 5 × "sample SHA-256 green", "public remote configured", and the
+working tree. Every one of them clears by doing the work rather than by
+changing a check.
 
 | FAIL | Why it is correct now | When it clears |
 |---|---|---|
 | 5× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 18:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
-| "public remote configured" | There is no public GitHub repo yet | before the freeze — push to a public repo under an OSI licence |
+| 5× "sample SHA-256 green" | The expected hashes are pinned from the Oct 30 06:00 UTC sample. This used to be reported as SKIP, which let the lockdown certify a correctness gate it had proved it could not check — a placeholder file containing `TODO-fill-this-in` counted as a pin. It is now a FAIL until a real 64-hex pin exists | Oct 30, when the sample ships and the hashes are pinned |
+| "public remote configured" | There is no public GitHub repo yet. This now requires an https/ssh URL — it previously accepted any two `git remote -v` lines, so a `file://` path passed | before the freeze — push to a public repo under an OSI licence |
+| "working tree clean" | The tree is mid-audit; this is the real state, not a measurement artefact. It previously **vanished entirely on a host without git**, which is how a dirty tree with no remote could print "ALL CHECKS PASSED — safe to freeze" | the final commit before the freeze |
 
-The "working tree clean" check also fails mid-run, by design: the track gates
-append measurements to `verification/ledger.jsonl` as they run. Committing
-the ledger clears it, and the ledger is excluded from the check otherwise.
+There is **no** longer a "two informational SKIPs" row: the source-size skip it
+described never existed in `pre-freeze.ps1` (which had exactly one in-loop
+skip), and the SHA skip is now a failure, not a skip.
 
-**Two SKIPs, both informational:** "sample SHA-256 green" cannot be checked
-before the Oct 30 06:00 UTC sample ships, and the per-track reference source
-sizes for B–E are not published yet.
+### 1b. Two defects that each silently disabled a scoring axis
+
+Both are fixed, and both are now guarded, because neither is visible in any log
+or exit code:
+
+* **PGO never applied.** `build-one.sh` passed `-C profile-use=<directory>`.
+  rustc treats that as a warning — `warning: <dir>: is a directory` — and
+  **exits 0**, compiling with no profile, while the log printed
+  "[build-one] PGO profile found". Even with the flag corrected the profile was
+  unreachable: it lived in `target/pgo/prof`, and `.dockerignore` excludes both
+  `target/` and `*.profdata`. Guarded by `tooling/check_pgo_wiring.sh`, which
+  fails on the old form.
+* **The dispatcher answered the wrong track.** `run` filtered `$TRACK` through
+  `tr -cd 'A-Z'` and then defaulted the empty result to `A`. Measured with stub
+  binaries: `TRACK=7`, `TRACK=1`, `TRACK=0` and `TRACK=-` each ran **track A
+  and exited 0**. Only `Z` failed. A wrong-track answer scores as a silent zero
+  at best; it is now a validation error, exit 1.
 
 ---
 
@@ -142,7 +158,7 @@ every K budget in the plan becomes real.
 | B | **the build/query blend formula** (additive vs harmonic — a 24% swing), boolean operator precedence, tokenisation |
 | C | quoting rules for embedded newlines, mid-file BOM semantics, amount scale, aggregate key |
 | D | distance-only vs path output, unreachable spelling, max distance bound |
-| E | **Mref for the compressed size axis**, the time blend (0.8/0.2?), and the container format — because *the compressed file is the hashed artefact* |
+| E | **Mref for the compressed size axis**, the exact time blend (the spec fixes 0.25·C + 0.75·D as the weighting; the precise formula is still DEFERRED), and the container format — because *the compressed file is the hashed artefact* |
 
 ---
 
@@ -152,7 +168,7 @@ every K budget in the plan becomes real.
 
 ```bash
 cargo build --release --offline        # builds
-cargo test --offline                   # 13/13
+cargo test --offline -p speeddemon-core # 13/13 (the workspace is 29: 13 core + 16 harness)
 sh tooling/install-hooks.sh            # installs the pre-commit gate
 ```
 
@@ -222,7 +238,7 @@ Then record the final commit hash in every `PERF.md`.
 
 ## 3a. Oct 28 18:00 UTC — SPEC.md intake
 
-The organizers freeze the specs on Oct 28, two days before the window opens.
+The organizers freeze the specs on Oct 28; the window opens Oct 30 18:00 UTC.
 36 values in `verification/contract.toml` are marked `DEFERRED` until then;
 24 of them block a track outright (get one wrong and the submission writes a
 file nobody asked for). `tooling/spec_intake.py` is the checklist for that

@@ -14,7 +14,16 @@
 # The context must be the root because the image needs `core/`, `run` and
 # `build-one.sh`, which live there. Building from inside the track directory
 # cannot work, and the previous version of this file assumed it could.
-FROM debian:13-slim
+#
+# The base image is DIGEST-PINNED. The rules announced before the Oct 28
+# freeze require it: "The final image must build from a published,
+# digest-pinned toolchain image, so code can't hide in a custom base image."
+# (docs/RULE-CHANGES-oct28.md §3)
+#
+# The reference comes from tooling/base-image.txt, which is the single source
+# of truth — the root Dockerfile and these five must not drift apart, and
+# tooling/check_base_pinned.py enforces that they do not.
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 COPY . /app
 WORKDIR /app
