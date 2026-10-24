@@ -1,4 +1,4 @@
-//! Speed Demon â€” Track A (Ingest)
+//! Speed Demon — Track A (Ingest)
 //!
 //! SCAFFOLD: correctness-shaped I/O skeleton. The real implementation lands
 //! inside the 72-hour window (H0). The sentinel line written to the output is
@@ -9,7 +9,7 @@
 //!   1. read  from /data   (read-only mount)
 //!   2. write exactly ONE file to /out
 //!   3. exit 0
-//!   4. build offline (see build.sh â€” rustc only, no cargo, no network)
+//!   4. build offline (see build.sh — rustc only, no cargo, no network)
 
 use speeddemon_core::buf_reader::StreamingReader;
 use speeddemon_core::det_writer::DetWriter;

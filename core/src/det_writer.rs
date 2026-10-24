@@ -1,4 +1,4 @@
-﻿//! Deterministic output writer â€” SHA-gate safe.
+﻿//! Deterministic output writer — SHA-gate safe.
 //!
 //! Rules enforced here:
 //! - No HashMap iteration leaks into output (callers sort keys outside).
@@ -38,7 +38,7 @@ impl DetWriter {
     }
 
     /// Format an integer number of cents as `dollars.cents` with exactly 2
-    /// decimal places (Track C). Handles negative values. Integer-only â€”
+    /// decimal places (Track C). Handles negative values. Integer-only —
     /// no float ever touches the amount path.
     pub fn write_cents(&mut self, cents: i64) -> io::Result<()> {
         let neg = cents < 0;

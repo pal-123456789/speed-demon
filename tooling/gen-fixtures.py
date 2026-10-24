@@ -1,3 +1,4 @@
+import sys
 #!/usr/bin/env python3
 """
 Speed Demon — grammar-preserving fixture generator (the anti-overfit guard).
@@ -40,6 +41,13 @@ import random
 import struct
 import zlib
 from pathlib import Path
+# Force UTF-8 on stdio. On Windows the default code page mangles every
+# non-ASCII character this tool prints, which corrupts logs and makes
+# mojibake indistinguishable from real output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 STATUSES = [200, 201, 204, 301, 400, 404, 429, 500, 502, 503]

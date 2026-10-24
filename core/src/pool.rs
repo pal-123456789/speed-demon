@@ -1,7 +1,7 @@
-//! HEL1-pinned thread pool â€” exactly 12 threads on 6 P-cores (SMT).
+//! HEL1-pinned thread pool — exactly 12 threads on 6 P-cores (SMT).
 //!
 //! Determinism contract:
-//! 1. Work is partitioned by **index** before threads spawn â€” each worker owns
+//! 1. Work is partitioned by **index** before threads spawn — each worker owns
 //!    a contiguous `[start, end)` range. No stealing, no completion-order writes.
 //! 2. Results land in `results[i]` where `i` is the *input index*, never the
 //!    completion slot.
@@ -27,12 +27,12 @@ impl Pool {
         Self { num_threads }
     }
 
-    /// HEL1 default: 12 threads (6 P-core Ã— 2 SMT).
+    /// HEL1 default: 12 threads (6 P-core × 2 SMT).
     pub fn hel1() -> Self {
         Self::new(12)
     }
 
-    /// 6 workers (one per physical core, no SMT) â€” often faster due to
+    /// 6 workers (one per physical core, no SMT) — often faster due to
     /// reduced cache contention. Benchmark both.
     pub fn hel1_physical() -> Self {
         Self::new(6)

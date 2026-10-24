@@ -23,6 +23,27 @@ set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO" || exit 1
 
+# Some hosts ship `python3`, others only `python` (Windows, slim containers).
+# Hardcoding either name makes every gate fail on the other host, and a gate
+# that fails with "command not found" trains you to look away from red gates.
+PY=""
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        PY="$candidate"
+        break
+    fi
+done
+if [ -z "$PY" ]; then
+    echo "FATAL: no python interpreter found (need python3 or python)" >&2
+    exit 1
+fi
+
+# Force UTF-8 on the interpreter's stdio. On Windows the default code page
+# mangles every non-ASCII character the tools print, which corrupts CI logs
+# and makes real mojibake indistinguishable from log noise.
+export PYTHONIOENCODING="utf-8"
+export PYTHONUTF8="1"
+
 FAST=0
 TRACKS="A,B,C,D,E"
 while [ $# -gt 0 ]; do
@@ -53,7 +74,7 @@ ok() {
 
 # ── 0. rule 05 compliance ─────────────────────────────────────────────────
 step "RULE 05 COMPLIANCE (pre-kickoff guard)"
-if python3 tooling/rule05_guard.py >/tmp/sd-rule05.txt 2>&1; then
+if "$PY" tooling/rule05_guard.py >/tmp/sd-rule05.txt 2>&1; then
   ok "no track-solution code in the tree"
 else
   cat /tmp/sd-rule05.txt
@@ -96,19 +117,20 @@ else
   fail "offline build failed"
 fi
 
-# ── 5. D axis ─────────────────────────────────────────────────────────────
-step "D AXIS (dependency honesty)"
-if python3 tooling/measure_axes.py --all >/tmp/sd-d.txt 2>&1; then
-  grep -E "Track [A-E]: D" /tmp/sd-d.txt | sed 's/^/  /'
+# ── 5+6. the S and D axes ─────────────────────────────────────────────────
+# One pass produces both. There was a `--s-only` flag here once that the
+# tool never implemented, so the S axis printed nothing at all and the step
+# looked like it had passed — a silent gate is worse than a failing one.
+step "S AND D AXES (source size, dependency honesty)"
+if "$PY" tooling/measure_axes.py --all >/tmp/sd-axes.txt 2>&1; then
+  grep -E "Track [A-E]: D" /tmp/sd-axes.txt | sed 's/^/  /'
   ok "D = 1.0000 on every track"
 else
-  cat /tmp/sd-d.txt
+  cat /tmp/sd-axes.txt
   fail "D axis is not 1.0 — a non-stdlib dependency costs ~10-17% of K"
 fi
-
-# ── 6. S axis ─────────────────────────────────────────────────────────────
-step "S AXIS (source size per track)"
-python3 tooling/measure_axes.py --s-only 2>/dev/null | sed 's/^/  /' || true
+step "S AXIS DETAIL (normalised source bytes per track)"
+grep -E "normalised bytes|the S axis" /tmp/sd-axes.txt | sed 's/^/  /' || true
 
 # ── 7. per-track gates ────────────────────────────────────────────────────
 step "TRACK GATES (determinism, sandbox, timeout)"

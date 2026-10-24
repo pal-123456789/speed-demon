@@ -1,4 +1,4 @@
-﻿//! HEL1-safe buffered reader â€” prefers streaming over mmap.
+﻿//! HEL1-safe buffered reader — prefers streaming over mmap.
 //!
 //! Why not mmap: on HEL1 `mmap`'d pages count toward cgroup `memory.peak`
 //! and can push the M axis artificially. A `BufReader` with a 1 MiB buffer
