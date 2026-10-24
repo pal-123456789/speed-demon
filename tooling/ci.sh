@@ -152,6 +152,17 @@ else
   fail "a per-track Dockerfile was hand-edited — run: python tooling/gen_dockerfiles.py"
 fi
 
+# A non-executable pre-commit hook is silently ignored by git on Linux, and a
+# non-executable build.sh fails only when someone finally runs it. Neither
+# shows up as a diff, so the mode has to be checked deliberately.
+step "EXECUTABLE BITS (scripts and hook)"
+if sh tooling/check-exec-bits.sh . >/tmp/sd-exec.txt 2>&1; then
+  ok "every script and hook is executable in git"
+else
+  grep 'NO-X' /tmp/sd-exec.txt | sed 's/^/  /'
+  fail "a script lost its executable bit — git update-index --chmod=+x <file>"
+fi
+
 # ── 5+6. the S and D axes ─────────────────────────────────────────────────
 # One pass produces both. There was a `--s-only` flag here once that the
 # tool never implemented, so the S axis printed nothing at all and the step
