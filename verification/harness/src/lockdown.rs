@@ -91,7 +91,44 @@ fn toml_value(path: &Path, key: &str) -> Option<String> {
         }
         if let Some((k, v)) = line.split_once('=') {
             if k.trim() == key {
-                return Some(v.trim().trim_matches('"').to_string());
+                // Strip an inline comment OUTSIDE quotes, then unquote.
+                // `trim_matches('"')` on the raw value left the comment glued
+                // to the string, so a legal TOML file with
+                //   output_file = "ingest.txt"   # the scored artefact
+                // produced the "value" `ingest.txt"       # the scored artefact`
+                // and three spurious FAILs. `contract.rs` already parsed this
+                // correctly; the two readers now agree on the dialect.
+                let raw = v.trim();
+                let value = if let Some(rest) = raw.strip_prefix('"') {
+                    match rest.find('"') {
+                        Some(end) => rest[..end].to_string(),
+                        None => raw.to_string(),
+                    }
+                } else {
+                    raw.split('#').next().unwrap_or(raw).trim().to_string()
+                };
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// The pinned expected hash for a track, if the file holds a real one.
+///
+/// Mirrors `main::expected_hash`: 64 hex characters, optionally followed by
+/// the conventional `  <filename>` column. A file that exists but does not
+/// contain a hash is not a pin.
+fn read_pinned_hash(dir: &Path, output: &str) -> Option<String> {
+    let base = dir.join("verification").join("expected");
+    for name in [format!("{output}.sha256"), "sample.sha256".to_string()] {
+        let Ok(raw) = fs::read_to_string(base.join(&name)) else {
+            continue;
+        };
+        let raw = raw.trim().trim_start_matches('\u{feff}');
+        if let Some(hex) = raw.split_whitespace().next() {
+            if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(hex.to_ascii_lowercase());
             }
         }
     }
@@ -104,7 +141,16 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
 
     // ── per-track checks ────────────────────────────────────────────────
     for id in selected {
-        let track = &tracks[id];
+        // An unknown track letter must be a reported failure, not a panic:
+        // `lockdown --track Z` used to abort with "no entry found for key"
+        // (exit 101) and print no verdict at all.
+        let Some(track) = tracks.get(id) else {
+            ld.fail(
+                &format!("track {id} exists"),
+                "unknown track letter (expected A|B|C|D|E)",
+            );
+            continue;
+        };
         let dir = root.join("tracks").join(track.dir);
         ld.pass_track_header(track);
 
@@ -176,36 +222,36 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
         }
 
         // The sentinel check — the sharpest one.
-        let sentinel = find_sentinel(&dir.join("src"));
-        if sentinel.is_none() {
-            ld.pass("no scaffold sentinel in source", "");
-        } else {
-            ld.fail(
+        match find_sentinel(&dir.join("src")) {
+            Ok(None) => ld.pass("no scaffold sentinel in source", ""),
+            Ok(Some(found)) => ld.fail(
                 "no scaffold sentinel in source",
-                &format!("{} — a stub must never reach the freeze", sentinel.unwrap()),
-            );
+                &format!("{found} — a stub must never reach the freeze"),
+            ),
+            Err(why) => ld.fail(
+                "no scaffold sentinel in source",
+                &format!("{why} — the check did not run"),
+            ),
         }
 
         // The correctness gate can only be checked once the sample hash is
-        // pinned. Before that it is UNVERIFIABLE, and saying so is more
-        // useful than a green tick.
-        let hash_pinned = dir
-            .join("verification")
-            .join("expected")
-            .join(format!("{}.sha256", track.output))
-            .is_file()
-            || dir
-                .join("verification")
-                .join("expected")
-                .join("sample.sha256")
-                .is_file();
-        if hash_pinned {
-            ld.pass("sample SHA-256 pinned", "the correctness gate is checkable");
-        } else {
-            ld.skip(
+        // pinned. `is_file()` was not enough: a placeholder file containing
+        // "TODO-fill-this-in" certified a gate that `bench` proves is not
+        // checkable, so the lockdown said PASS while the gate was unverifiable.
+        // This now parses the pin exactly as `main::expected_hash` does, and a
+        // missing or unreadable pin FAILS rather than skipping: the lockdown's
+        // job is to refuse to certify, and "the correctness gate is not
+        // checkable" is not a state a frozen submission may be in.
+        match read_pinned_hash(&dir, track.output) {
+            Some(h) => ld.pass("sample SHA-256 pinned", &format!("{}...", &h[..12])),
+            None => ld.fail(
                 "sample SHA-256 green",
-                "NO EXPECTED HASH PINNED — the correctness gate cannot be verified",
-            );
+                &format!(
+                    "no valid hash in tracks/{}/verification/expected/{}.sha256 \
+                     (need 64 hex chars) — the correctness gate cannot be verified",
+                    track.dir, track.output
+                ),
+            ),
         }
     }
 
@@ -238,9 +284,13 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
     }
 
     // ── git state ───────────────────────────────────────────────────────
-    // The submission must be a public repository with an OSI licence at
-    // the freeze. These checks are skipped when git is unavailable, which
-    // is the case on a bare scoring box.
+    // The submission must be a public repository with an OSI licence at the
+    // freeze. When git is unavailable these three gates are recorded as
+    // FAILURES rather than as a single skip: the old code skipped once and
+    // never mentioned the dirty-tree or missing-remote checks at all, so on a
+    // host without git a dirty tree with no public remote reported
+    // "ALL CHECKS PASSED — safe to freeze". Not being able to check a gate is
+    // not evidence that the gate passes.
     if git_output(root, &["rev-parse", "--git-dir"]).is_some() {
         match git_output(root, &["rev-parse", "HEAD"]) {
             Some(head) if !head.is_empty() => {
@@ -271,21 +321,44 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
             );
         }
 
-        let remotes = git_output(root, &["remote", "-v"]).unwrap_or_default();
-        let count = remotes.lines().filter(|l| !l.trim().is_empty()).count();
-        if count >= 2 {
-            ld.pass("public remote configured", &format!("remotes={count}"));
-        } else {
-            ld.fail(
-                "public remote configured",
-                &format!("remotes={count} (expect fetch+push entries)"),
-            );
+        // A remote must exist AND be usable as a public push target. Counting
+        // `git remote -v` lines accepted any single remote whatever its URL
+        // (a `file://` path passed) and rejected a push-only remote that
+        // yields one line.
+        match git_output(root, &["remote", "-v"]) {
+            Some(remotes) if !remotes.trim().is_empty() => {
+                let names: Vec<&str> = remotes
+                    .lines()
+                    .filter_map(|l| l.split_whitespace().next())
+                    .collect();
+                let urls: Vec<&str> = remotes
+                    .lines()
+                    .filter_map(|l| l.split_whitespace().nth(1))
+                    .collect();
+                let public = urls.iter().find(|u| {
+                    u.starts_with("https://") || u.starts_with("git@") || u.starts_with("ssh://")
+                });
+                match public {
+                    Some(u) => ld.pass(
+                        "public remote configured",
+                        &format!("{} -> {u}", names.first().copied().unwrap_or("?")),
+                    ),
+                    None => ld.fail(
+                        "public remote configured",
+                        &format!("remotes={:?} — none is a public https/ssh URL", urls),
+                    ),
+                }
+            }
+            _ => ld.fail("public remote configured", "no remote configured"),
         }
     } else {
-        ld.skip(
+        for name in [
             "git repository with a recorded commit",
-            "git is not available here",
-        );
+            "working tree clean",
+            "public remote configured",
+        ] {
+            ld.fail(name, "git is not available here — this gate did not run");
+        }
     }
 
     ld
@@ -310,35 +383,50 @@ impl Lockdown {
 }
 
 /// Find the scaffold sentinel in a source tree, if present.
-pub fn find_sentinel(src: &Path) -> Option<String> {
+///
+/// Returns `Some(reason)` when the check cannot be answered — a missing or
+/// empty `src/` is a FAILURE, not a pass. The previous version returned `None`
+/// for both "no sentinel" and "nothing to scan", so a track directory with an
+/// empty `src/` was certified sentinel-free.
+pub fn find_sentinel(src: &Path) -> Result<Option<String>, String> {
     if !src.is_dir() {
-        return None;
+        return Err("no src/ directory to scan".to_string());
     }
+    let mut scanned = 0usize;
     let mut stack = vec![src.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let entries = match fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
         };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
             } else if p.is_file() {
-                if let Ok(text) = fs::read_to_string(&p) {
-                    if text.contains("SCAFFOLD_NOT_IMPLEMENTED") {
-                        return Some(
-                            p.strip_prefix(src.parent().unwrap_or(src))
-                                .unwrap_or(&p)
-                                .display()
-                                .to_string(),
-                        );
-                    }
+                scanned += 1;
+                let bytes = match fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
+                };
+                if bytes
+                    .windows(b"SCAFFOLD_NOT_IMPLEMENTED".len())
+                    .any(|w| w == b"SCAFFOLD_NOT_IMPLEMENTED")
+                {
+                    return Ok(Some(
+                        p.strip_prefix(src.parent().unwrap_or(src))
+                            .unwrap_or(&p)
+                            .display()
+                            .to_string(),
+                    ));
                 }
             }
         }
     }
-    None
+    if scanned == 0 {
+        return Err("src/ contains no files to scan".to_string());
+    }
+    Ok(None)
 }
 
 /// Report the ledger's most recent measurement for a track, if any.
@@ -361,9 +449,54 @@ mod tests {
             "fn main() {}\n// SCAFFOLD_NOT_IMPLEMENTED\n",
         )
         .unwrap();
-        assert!(find_sentinel(&dir).is_some());
+        assert!(matches!(find_sentinel(&dir), Ok(Some(_))));
         fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
-        assert!(find_sentinel(&dir).is_none());
+        assert!(matches!(find_sentinel(&dir), Ok(None)));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_or_missing_src_is_not_a_pass() {
+        // The check must be able to say "I could not look", which is not the
+        // same answer as "I looked and found nothing".
+        let dir = std::env::temp_dir().join(format!("sd-sentinel-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(find_sentinel(&dir).is_err(), "missing src/ must not pass");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(find_sentinel(&dir).is_err(), "empty src/ must not pass");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_placeholder_hash_is_not_a_pin() {
+        let root = std::env::temp_dir().join(format!("sd-pin-{}", std::process::id()));
+        let dir = root.join("A-ingest");
+        let expected = dir.join("verification").join("expected");
+        fs::create_dir_all(&expected).unwrap();
+        let pin = expected.join("ingest.txt.sha256");
+        fs::write(&pin, "TODO-fill-this-in\n").unwrap();
+        assert_eq!(read_pinned_hash(&dir, "ingest.txt"), None);
+        fs::write(&pin, "  f34f78e97f1a00000000000000000000000000000000000000000000000000ab  ingest.txt\n").unwrap();
+        assert!(read_pinned_hash(&dir, "ingest.txt").is_some());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inline_comments_do_not_leak_into_a_toml_value() {
+        let dir = std::env::temp_dir().join(format!("sd-toml2-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let p = dir.join("x.toml");
+        fs::write(
+            &p,
+            "output_file = \"ingest.txt\"   # the scored artefact\ndeclared_dependencies = 0  # none\n",
+        )
+        .unwrap();
+        assert_eq!(
+            toml_value(&p, "output_file").as_deref(),
+            Some("ingest.txt"),
+            "an inline comment must not become part of the value"
+        );
+        assert_eq!(toml_value(&p, "declared_dependencies").as_deref(), Some("0"));
         let _ = fs::remove_dir_all(&dir);
     }
 

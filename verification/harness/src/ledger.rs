@@ -113,7 +113,7 @@ impl RunRecord {
 /// Escapes what RFC 8259 requires: `"`, `\`, and the C0 control characters.
 /// Non-ASCII is passed through as UTF-8, which is valid JSON and keeps the
 /// ledger readable (paths and labels are the common case).
-fn json_str(s: &str) -> String {
+pub fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -141,62 +141,174 @@ pub fn append(path: &Path, rec: &RunRecord) -> std::io::Result<()> {
 }
 
 /// Read every record from the ledger.
+///
+/// Unreadable rows are an ERROR, not a silent omission. The previous version
+/// skipped them (`if let Some(r) = parse_line(line)`), so a row written by any
+/// other tool — or a half-written final line after an interrupted append —
+/// vanished without a diagnostic, and every number generated from the ledger
+/// was quietly computed over a subset of the evidence. The doc generator
+/// (`tooling/gen_docs.py`) already refuses to work from a partially readable
+/// ledger for exactly this reason; the harness is the last place that should
+/// be lax about it.
+///
+/// The one tolerated exception is a truncated FINAL line, which is what an
+/// interrupted append actually produces: that is reported on stderr and
+/// dropped, because failing the whole read would make one lost run destroy
+/// access to every earlier measurement.
 pub fn read_all(path: &Path) -> std::io::Result<Vec<RunRecord>> {
     let raw = std::fs::read_to_string(path)?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let last_content = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty() && !l.trim().starts_with('#'));
     let mut out = Vec::new();
-    for line in raw.lines() {
+    for (i, line) in lines.iter().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(r) = parse_line(line) {
-            out.push(r);
+        match parse_line(line) {
+            Ok(r) => out.push(r),
+            Err(e) if Some(i) == last_content => {
+                eprintln!(
+                    "  WARN: ignoring a truncated final ledger row (line {}): {e}",
+                    i + 1
+                );
+            }
+            Err(e) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("ledger line {} is unreadable: {e}", i + 1),
+                ));
+            }
         }
     }
     Ok(out)
 }
 
-/// A deliberately small, dependency-free JSON reader for the fixed shape
-/// this tool writes. It extracts fields by key rather than building a full
-/// JSON value, because the shape is known and a real parser is overkill.
-fn parse_line(line: &str) -> Option<RunRecord> {
-    let field = |key: &str| -> Option<String> {
-        let pat = format!("\"{key}\":");
-        let i = line.find(&pat)? + pat.len();
-        let rest = &line[i..];
-        if let Some(stripped) = rest.strip_prefix('"') {
-            let end = stripped.find('"')?;
-            Some(stripped[..end].to_string())
-        } else {
-            let end = rest.find([',', '}'])?;
-            Some(rest[..end].trim().to_string())
-        }
+/// A key-lookup scanner for the flat object this tool writes.
+///
+/// This is not a general JSON parser, but it does have to agree with the JSON
+/// that other writers produce. The previous version required a value to start
+/// with `"` IMMEDIATELY after the colon, which is true only of this crate's own
+/// output: `json.dumps`, `jq -c` and `serde_json` all emit `"track": "A"`, so
+/// every foreign row was misparsed as a number and kept its quotes (`track`
+/// became the character `"`), and string values were truncated at the first
+/// escaped quote. Both are fixed here: whitespace after the colon is skipped
+/// and escapes are honoured.
+fn parse_line(line: &str) -> Result<RunRecord, String> {
+    let field = |key: &str| -> Option<String> { field_raw(line, key) };
+    let need = |key: &str| -> Result<String, String> {
+        field(key).ok_or_else(|| format!("missing field {key:?}"))
     };
-    let field_f64 = |key: &str| -> Option<f64> { field(key)?.parse().ok() };
-    let field_u32 = |key: &str| -> Option<u32> { field(key)?.parse().ok() };
-    let field_u64 = |key: &str| -> Option<u64> { field(key)?.parse().ok() };
-    let field_i32 = |key: &str| -> Option<i32> { field(key)?.parse().ok() };
-    let field_i64 = |key: &str| -> Option<i64> { field(key)?.parse().ok() };
+    let num = |key: &str| -> Result<String, String> { need(key) };
 
-    Some(RunRecord {
-        track: field("track")?.chars().next()?,
-        commit: field("commit")?,
-        timestamp: field_i64("timestamp")?,
-        run: field_u32("run")?,
-        wall_s: field_f64("wall_s")?,
-        peak_mib: field_f64("peak_mib"),
+    let parse_f64 = |key: &str| -> Result<f64, String> {
+        let raw = num(key)?;
+        raw.parse::<f64>()
+            .map_err(|e| format!("{key}: {raw:?} is not a number: {e}"))
+    };
+    let parse_u32 = |key: &str| -> Result<u32, String> {
+        let raw = num(key)?;
+        raw.parse::<u32>()
+            .map_err(|e| format!("{key}: {raw:?} is not an integer: {e}"))
+    };
+    let parse_u64 = |key: &str| -> Result<u64, String> {
+        let raw = num(key)?;
+        raw.parse::<u64>()
+            .map_err(|e| format!("{key}: {raw:?} is not an integer: {e}"))
+    };
+    let parse_i32 = |key: &str| -> Result<i32, String> {
+        let raw = num(key)?;
+        raw.parse::<i32>()
+            .map_err(|e| format!("{key}: {raw:?} is not an integer: {e}"))
+    };
+    let parse_i64 = |key: &str| -> Result<i64, String> {
+        let raw = num(key)?;
+        raw.parse::<i64>()
+            .map_err(|e| format!("{key}: {raw:?} is not an integer: {e}"))
+    };
+
+    let track_raw = need("track")?;
+    let track = track_raw
+        .chars()
+        .next()
+        .ok_or_else(|| "track is empty".to_string())?;
+
+    Ok(RunRecord {
+        track,
+        commit: need("commit")?,
+        timestamp: parse_i64("timestamp")?,
+        run: parse_u32("run")?,
+        wall_s: parse_f64("wall_s")?,
+        peak_mib: field("peak_mib").and_then(|s| s.parse::<f64>().ok()),
         peak_source: field("peak_source").unwrap_or_default(),
-        output_sha256: field("output_sha256")?,
+        output_sha256: need("output_sha256")?,
         expected_sha256: field("expected_sha256").filter(|s| s != "null" && !s.is_empty()),
-        output_bytes: field_u64("output_bytes")?,
-        exit_code: field_i32("exit_code")?,
-        label: field("label")?,
-        threads: field_u32("threads")?,
+        output_bytes: parse_u64("output_bytes")?,
+        exit_code: parse_i32("exit_code")?,
+        label: need("label")?,
+        threads: parse_u32("threads")?,
         // Absent in records written before this field existed. Those were all
         // scaffold runs (the only thing that could run pre-kickoff), but we do
         // not assume it: the doc generator has its own size heuristic.
         scaffold: field("scaffold").map(|v| v == "true").unwrap_or(false),
     })
+}
+
+/// Find `"key"` followed by `:` and return its raw value, decoded.
+fn field_raw(line: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(&needle) {
+        let after_key = from + rel + needle.len();
+        let rest = line[after_key..].trim_start();
+        // Not this occurrence: it is the value of another field, or a key with
+        // a different name that happens to contain this one.
+        let Some(after_colon) = rest.strip_prefix(':') else {
+            from = after_key;
+            continue;
+        };
+        let value = after_colon.trim_start();
+        if let Some(body) = value.strip_prefix('"') {
+            return Some(decode_string(body));
+        }
+        let end = value.find([',', '}']).unwrap_or(value.len());
+        return Some(value[..end].trim().to_string());
+    }
+    None
+}
+
+/// Decode a JSON string body (the part after the opening quote) up to its
+/// closing quote. Unknown escapes are passed through rather than dropped, so a
+/// malformed row is reported by the field's own parser instead of silently
+/// losing characters.
+fn decode_string(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => break,
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                        Some(ch) => out.push(ch),
+                        None => out.push_str(&hex),
+                    }
+                }
+                Some(other) => out.push(other),
+                None => break,
+            },
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -155,9 +155,28 @@ fn parse_opts(args: &[String]) -> Opts {
 
 // ── shared helpers ─────────────────────────────────────────────────────────
 
+/// The repository root, found by walking up from the working directory.
+///
+/// `current_dir()` alone meant the harness silently measured against whatever
+/// directory it was started in: run from `verification/` it reported ~15
+/// "missing" file failures, and run outside a git repository the git gates
+/// disappeared entirely (see the lockdown's git section). Looking for the
+/// marker files is what makes "run it from anywhere" true.
 fn repo_root() -> PathBuf {
-    // The harness is invoked from the repository root.
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut probe: &Path = &cwd;
+    loop {
+        if probe.join("verification").join("contract.toml").is_file()
+            && probe.join("tracks").is_dir()
+        {
+            return probe.to_path_buf();
+        }
+        match probe.parent() {
+            Some(parent) => probe = parent,
+            None => break,
+        }
+    }
+    cwd
 }
 
 fn git_commit() -> String {
@@ -489,7 +508,19 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
     let all = contract::tracks();
     let track = all.get(&id).unwrap();
     let root = repo_root();
-    let runs: u32 = opts.get_or("runs", "5").parse().unwrap_or(5);
+    let runs_raw = opts.get_or("runs", "5");
+    let runs: u32 = runs_raw
+        .parse()
+        .map_err(|_| format!("--runs must be an integer, got {runs_raw:?}"))?;
+    // Below three runs there is nothing to trim, and below two the determinism
+    // gate cannot fail. `--runs 0` used to reach `sorted[len-1]` and panic with
+    // "attempt to subtract with overflow" (exit 101) instead of saying no.
+    if runs < 3 {
+        return Err(format!(
+            "--runs must be at least 3 (got {runs}): the trimmed mean discards the \
+             highest and lowest, and the determinism gate needs at least two hashes"
+        ));
+    }
     let data_dir = PathBuf::from(opts.get_or(
         "data",
         &format!("{}/verification/data/track-{}", root.display(), id),
@@ -695,7 +726,32 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
                 all_ok = false;
             }
         }
-        None => println!("  SHA-256 gate     : UNVERIFIABLE (no expected hash pinned)"),
+        // No pinned hash means the correctness gate DID NOT RUN. Reporting
+        // that as anything but a failure is how a verifier greens a binary
+        // that does nothing: the default state of this repository is an empty
+        // `verification/expected/`, so "UNVERIFIABLE" was the normal path and
+        // `RESULT: PASS` was the normal verdict. Before Oct 30 there is no
+        // sample hash to pin, so this gate fails until there is one — which is
+        // the honest answer, and the reason `--allow-unpinned` exists for the
+        // pre-kickoff scaffold runs that are known to be unverifiable.
+        None if opts.has("allow-unpinned") => {
+            eprintln!(
+                "  SHA-256 gate     : NOT RUN (no expected hash pinned; \
+                 allowed by --allow-unpinned)"
+            );
+        }
+        None => {
+            eprintln!(
+                "  SHA-256 gate     : FAIL (no expected hash pinned — the correctness \
+                 gate did not run)"
+            );
+            eprintln!(
+                "                     pin it in tracks/{}/verification/expected/{}.sha256, \
+                 or pass --allow-unpinned for a scaffold run",
+                track.dir, track.output
+            );
+            all_ok = false;
+        }
     }
 
     // G3 timeout
@@ -721,13 +777,21 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
 }
 
 fn cmd_verify(opts: &Opts) -> Result<(), String> {
-    // Verification is a single-run bench plus the gate report; the full
-    // 5-run protocol lives in `bench`.
+    // Verification runs the same protocol as `bench`; the only difference is
+    // the default label. The previous version FORCED runs=1, which made the
+    // determinism gate vacuous (one hash is trivially unique) and silently
+    // discarded an explicit `--runs 10`. A verifier whose determinism check
+    // cannot fail is decoration.
     let mut o = Opts {
         map: opts.map.clone(),
         flags: opts.flags.clone(),
     };
-    o.map.insert("runs".into(), "1".into());
+    o.map
+        .entry("runs".to_string())
+        .or_insert_with(|| "5".to_string());
+    o.map
+        .entry("label".to_string())
+        .or_insert_with(|| "verify".to_string());
     cmd_bench(&o)
 }
 
@@ -740,22 +804,38 @@ fn cmd_ledger(opts: &Opts) -> Result<(), String> {
     let filter = opts.get("track").map(|t| t.to_ascii_uppercase());
 
     if opts.has("json") {
+        // Route through the writer's own encoder: interpolating `label` and
+        // `commit` raw emitted invalid JSON for any value containing a quote
+        // or a backslash (a Windows path is the common case), and `--track`
+        // was computed above but only applied in the table branch, so
+        // `ledger --track E --json` printed every track.
         for r in &recs {
+            if let Some(f) = &filter {
+                if r.track != f.chars().next().unwrap_or('?') {
+                    continue;
+                }
+            }
             println!(
-                "{{\"track\":\"{}\",\"label\":\"{}\",\"wall_s\":{:.4},\"peak_mib\":{},\"sha\":\"{}\",\"commit\":\"{}\"}}",
-                r.track,
-                r.label,
+                "{{\"track\":{},\"label\":{},\"wall_s\":{:.4},\"peak_mib\":{},\"sha\":{},\"commit\":{},\"output_bytes\":{},\"scaffold\":{}}}",
+                ledger::json_str(&r.track.to_string()),
+                ledger::json_str(&r.label),
                 r.wall_s,
-                r.peak_mib.map(|p| format!("{p:.2}")).unwrap_or_else(|| "null".into()),
-                r.output_sha256,
-                r.commit
+                r.peak_mib
+                    .map(|p| format!("{p:.2}"))
+                    .unwrap_or_else(|| "null".into()),
+                ledger::json_str(&r.output_sha256),
+                ledger::json_str(&r.commit),
+                r.output_bytes,
+                r.scaffold
             );
         }
         return Ok(());
     }
 
-    // Group by (track, label) and report the trimmed mean.
-    let mut groups: BTreeMap<(char, String), Vec<f64>> = BTreeMap::new();
+    // Group by (track, label, commit). The commit is part of the key because
+    // averaging rows that came from different source states produces a number
+    // that no build ever produced.
+    let mut groups: BTreeMap<(char, String, String), Vec<f64>> = BTreeMap::new();
     for r in &recs {
         if let Some(f) = &filter {
             if r.track != f.chars().next().unwrap_or('?') {
@@ -763,7 +843,7 @@ fn cmd_ledger(opts: &Opts) -> Result<(), String> {
             }
         }
         groups
-            .entry((r.track, r.label.clone()))
+            .entry((r.track, r.label.clone(), r.commit.clone()))
             .or_default()
             .push(r.wall_s);
     }
@@ -772,10 +852,10 @@ fn cmd_ledger(opts: &Opts) -> Result<(), String> {
         return Ok(());
     }
     println!(
-        "{:<6} {:<24} {:>10} {:>10}",
-        "TRACK", "LABEL", "T (s)", "RUNS"
+        "{:<6} {:<20} {:<10} {:>10} {:>7}",
+        "TRACK", "LABEL", "COMMIT", "T (s)", "RUNS"
     );
-    for ((track, label), mut walls) in groups {
+    for ((track, label, commit), mut walls) in groups {
         walls.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let used: Vec<f64> = if walls.len() >= 3 {
             walls[1..walls.len() - 1].to_vec()
@@ -783,7 +863,10 @@ fn cmd_ledger(opts: &Opts) -> Result<(), String> {
             walls.clone()
         };
         let t = used.iter().sum::<f64>() / used.len() as f64;
-        println!("{track:<6} {label:<24} {t:>10.4} {:>10}", walls.len());
+        println!(
+            "{track:<6} {label:<20} {commit:<10} {t:>10.4} {:>7}",
+            walls.len()
+        );
     }
     Ok(())
 }
@@ -792,8 +875,14 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
     let all = contract::tracks();
     let selected: Vec<&Track> = match opts.get("track") {
         Some(t) => {
-            let c = t.chars().next().unwrap().to_ascii_uppercase();
-            vec![all.get(&c).unwrap()]
+            let c = t
+                .chars()
+                .next()
+                .ok_or_else(|| format!("bad --track value: {t:?}"))?
+                .to_ascii_uppercase();
+            vec![all
+                .get(&c)
+                .ok_or_else(|| format!("unknown track {c} (expected A|B|C|D|E)"))?]
         }
         None => all.values().collect(),
     };
@@ -811,12 +900,20 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
                 "peak memory"
             }
         );
-        let rows: &[(f64, f64, f64, f64)] = &[
-            // (T ratio, M ratio, S ratio, X ratio)
-            (20.0, 10.0, 0.60, 1.00),
-            (30.0, 15.0, 0.62, 1.05),
-            (45.0, 22.0, 0.65, 1.10),
-        ];
+        // The ladder is per-track. A single hardcoded set printed Track A's
+        // ratios under Track E, whose M axis is a compression ratio capped
+        // near 1.9 — i.e. it advertised an M of 10x-22x on the one track where
+        // that is arithmetically impossible.
+        let rows: &[(f64, f64, f64, f64)] = match track.id {
+            'A' => &[(20.0, 10.0, 0.60, 1.00), (30.0, 15.0, 0.62, 1.05), (45.0, 22.0, 0.65, 1.10)],
+            'B' => &[(20.0, 8.0, 0.62, 1.00), (30.0, 12.0, 0.62, 1.05), (50.0, 20.0, 0.60, 1.20)],
+            'C' => &[(20.0, 8.0, 0.62, 1.00), (30.0, 12.0, 0.60, 1.05), (45.0, 18.0, 0.58, 1.10)],
+            'D' => &[(15.0, 6.0, 0.70, 1.00), (25.0, 8.0, 0.66, 1.05), (40.0, 12.0, 0.62, 1.10)],
+            // Track E: the M ratio is (our ratio)/2.41, so 1.0-1.9 is the
+            // whole realistic band.
+            'E' => &[(10.0, 1.02, 0.62, 1.00), (25.0, 1.28, 0.60, 1.05), (50.0, 1.87, 0.58, 1.10)],
+            _ => &[(1.0, 1.0, 1.0, 1.0)],
+        };
         for (t, m, s, x) in rows {
             let (k, c) = contract::coefficient(*t, *m, *s, 1.0, *x);
             println!(
