@@ -2,10 +2,10 @@
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.
 Track window: baseline H0–H17 (2h charged to Track C), optimization block H43–H51 (8h charged).
-Reference: T 36.9s · Mref DEFERRED to Oct 28 frozen spec · timeout 369s · input 204MB hostile CSV, 5 fixed columns.
+Reference: T 14.44s · Mref/Sref DEFERRED to Oct 28 frozen spec · timeout 144s · input 204MB hostile CSV, 5 fixed columns.
 Join key, lookup-table schema, aggregate key, and output format: **DEFERRED to Oct 28 frozen spec**.
 Banned: any analytics/dataframe library.
-Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15 × (Xref/X)^0.10, each ratio capped at 50×; speed_score = 100·ln(K)/ln(25).
+Scoring reminder: K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15; speed_score = 50·log10(K), clamped [0,100]. The X axis is gone; only M is capped at 50×.
 
 ---
 

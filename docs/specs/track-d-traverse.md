@@ -2,10 +2,10 @@
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.
 Track window: baseline H0–H17 (2h charged to Track D), optimization block H33–H43 (10h charged).
-Reference: T 72.4s (highest reference time in the event) · Mref/Sref DEFERRED to Oct 28 frozen spec · timeout 724s.
+Reference: T 72.69s (highest reference time in the event) · Mref/Sref DEFERRED to Oct 28 frozen spec · timeout 727s.
 Input: graph.txt — header line "n m", then m lines "u v w" as uint32 ×3 (tail, head, weight), not sorted by u; node ids dense, 0-indexed; directed; a reverse edge, where it exists, is listed separately.
 Output contract (distance-only vs full path) and the unreachable spelling: **DEFERRED to Oct 28 frozen spec**.
-Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15 × (Xref/X)^0.10, each ratio capped at 50×; speed_score = 100·ln(K)/ln(25).
+Scoring reminder: K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15; speed_score = 50·log10(K), clamped [0,100]. The X axis is gone; only M is capped at 50×.
 
 ---
 

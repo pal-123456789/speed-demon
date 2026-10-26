@@ -356,6 +356,9 @@ Detailed, corrected build guides (algorithm, data layout, optimization ladder, d
 checklist, memory budget, risks) live beside this file:
 
 - `track-A-ingest.md` · `track-B-index.md` · `track-C-join.md` · `track-D-traverse.md`
+- **INSANE-LEVEL depth arsenal** — per-track feature inventories (P0/P1/P2), the
+  optimization ladder, determinism traps, edge-case matrices, and the H0 runbooks:
+  `docs/depth/00-INDEX.md` and `docs/depth/track-{A,B,C,D}-*-DEEP.md`.
 - Full Astra deep-dive prompts + the frozen CONTEXT BLOCK: `SpeedDemon-Astra-prompt-pack.md`.
 
 *All numbers here are TARGET/EXPECTED until the harness measures them on the scoring box.*

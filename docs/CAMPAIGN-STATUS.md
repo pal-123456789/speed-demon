@@ -64,7 +64,7 @@ every run.
 | **Rule 05 compliance guard** | **GREEN** | `tooling/rule05_guard.py` — proved to block a planted violation |
 | **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered. `python tooling/gen_docs.py --check` is the CI gate that proves the committed docs *are* the generator's output |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
-| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, decision-complete, no solution code |
+| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, decision-complete, no solution code; the P0/P1/P2 feature inventory + ladder + H0 runbook per track live in `docs/depth/` |
 | Build-time training (PGO, AOT) | **DEFERRED** | an in-window decision once real code exists — the rules allow training on generated fixtures, but a profile of a stub is worse than none; nothing pre-built |
 | One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
 | K calculator | **GREEN** | reproduces the published worked example exactly (K 6.41, speed score 40.4) |

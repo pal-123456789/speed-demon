@@ -2,9 +2,9 @@
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.
 Track window: baseline H0–H17 (2h charged to Track B), optimization block H56–H61 (5h charged).
-Reference: T 58.7s total (build + query, 40% build / 60% query) · Bref/Qref/Mref DEFERRED to Oct 28 frozen spec · timeout 587s.
+Reference: T 56.35s ONE total wall time (build + queries — the 40/60 blend is gone) · Mref/Sref DEFERRED to Oct 28 frozen spec · timeout 564s.
 Corpus: 250MB text. Queries: 50,000 (62% BOOL, 38% PHRASE). Banned: any ready-made search engine.
-Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15 × (Xref/X)^0.10, each ratio capped at 50×; speed_score = 100·ln(K)/ln(25).
+Scoring reminder: K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15; speed_score = 50·log10(K), clamped [0,100]. The X axis is gone; only M is capped at 50×.
 
 ---
 
