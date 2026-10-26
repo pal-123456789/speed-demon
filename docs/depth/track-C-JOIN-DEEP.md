@@ -3,9 +3,11 @@
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-c-join.md`.
 > **Engine:** hostile-CSV ETL join + money-safe group aggregation → billing pipeline.
 > **Ladder goal:** L3. **Contract anchors:** ref **T 14.44 s**, timeout 144 s;
-> input 204 MB hostile CSV, **5 fixed columns**; join key, lookup-table schema,
-> aggregate key, and output format DEFERRED to Oct 28; banned: any analytics /
-> dataframe library. **Absolutes:** Commit T ≈ **0.48 s** (30×), Stretch ≈ 0.32 s (45×).
+> input 204 MB hostile CSV, **3.32M records, 5 fixed columns WITH a header row
+> `id,name,note,region_id,amount`** (events page sample), join vs a lookup
+> table, **emit sorted aggregates**; join key, lookup schema, and output format
+> DEFERRED to Oct 28; banned: any analytics / dataframe library. **Absolutes:**
+> Commit T ≈ **0.48 s** (30×), Stretch ≈ 0.32 s (45×).
 
 ---
 
@@ -17,9 +19,9 @@
 |---|---|---|---|
 | C01 | **The quoting ORACLE — a scalar, byte-exact CSV state machine** | Camps yes/no on: quote toggling, `""` escape inside quotes, delimiters and newlines inside quoted fields, CRLF handling, trailing spaces inside quotes, a bare quote in an unquoted field, a BOM mid-file. Every organisers' DQ lands here. The oracle decides record boundaries and field values | every rule in `quoting`, `bom_handling`, `newline_in_quotes` |
 | C02 | **Record separation respects quotes**: a newline inside a quoted field is data, not a record end | The #1 correctness separation — a SIMD naive LF-split corrupts everything | newline-in-quotes |
-| C03 | **5 fixed columns parsed in order**; the join-key column identified | Column misalignment = silent wrong join | the column list + join-key position |
+| C03 | **5 fixed columns parsed in order**; the join-key column identified | The events page pins them: **`id,name,note,region_id,amount` with a header row**; column misalignment = silent wrong join | join-key position (frozen spec) |
 | C04 | **Amount as DECIMAL, integer math only** (scale 2; rounding mode) | Money in floats = wrong pennies; round-half-up vs banker's is a SHA difference; negative-zero spelling | amount scale + rounding |
-| C05 | **Group aggregation** (sum of amount per group key; count?) | The aggregate shape and its sort order are the output identity | aggregate key + sort order |
+| C05 | **Group aggregation, SORTED output** (events page: "emit sorted aggregates") | The aggregate shape + its sort order are the output identity | aggregate key + sort order (sorted = pinned; the key/sort bytes = frozen spec) |
 | C06 | **Lookup join** (records → lookup by key; missing-key spelling) | Join makes it Track C, not a pure group-by; the lookup's own quoting rules apply if it's CSV too | lookup filename/schema + missing-key output |
 | C07 | **Deterministic number formatting** (fixed 2 decimals, no exponent, padding) | `12.3` vs `12.30` vs `12.30\n` — all SHA | output number format |
 | C08 | **Trailing-newline / separator policy on output** | bytes | trailing newline |
@@ -108,9 +110,19 @@ Peak is dominated by the read shards; keep them small and reused so
 
 ## 7. Validation plan
 
-- **Fixture-first:** port every hostile case above into `gen-fixtures` hostile
+- **Fixture-first:** port every hostile case below into `gen-fixtures` hostile
   CSV cases BEFORE writing the implementation; the oracle is built against the
-  fixtures, not against hope.
+  fixtures, not against hope. The events page's five sample records are the
+  oracle's ACCEPTANCE TEST — copy them byte-for-byte (BOM at file start AND a
+  mid-file BOM, CRLF mixed with bare LF, `""` escapes, embedded comma+LF,
+  trailing space in quotes, `-5.25`, `0.00`, empty quoted fields):
+  ```
+  ⟨BOM⟩id,name,note,region_id,amount␍␊
+  1,"Kaphar, Titus","said ""no"" twice",7,1420.00␍␊
+  2,"Betts","a note that␊spans two lines",7,88.50␊
+  3,,"",12,0.00␍␊
+  4,"trailing space ","comma, quote "" and newline␊together",3,-5.25␊
+  ```
 - `difftest` vs L0 on sample + every fixture; byte-identical across 1/6/12 threads.
 - The SHA gate pins `join.txt`; re-pin per rung.
 

@@ -6,9 +6,15 @@
 > event → most absolute headroom), timeout 727 s; `graph.txt` = header `n m`, then
 > `m` lines `u v w` (**u32 × 3**: tail, head, weight), **not sorted by u**, ids
 > dense 0-indexed, **directed**, reverse edges listed separately (the reverse
-> graph must be built); queries ≈ 2 k DISTANCE-only or full path (DEFERRED);
-> unreachable spelling DEFERRED. **Absolutes:** Commit T ≈ **2.42 s** (30×),
-> Stretch ≈ 1.62 s (45×).
+> graph must be built); graph is **92 MB / 5 M edges**; queries ≈ 2 k, **LOCAL
+> and drawn at a BOUNDED search distance** (events page); distance-only or full
+> path (DEFERRED); unreachable spelling DEFERRED. **Absolutes:** Commit
+> T ≈ **2.42 s** (30×), Stretch ≈ 1.62 s (45×).
+> **Organizer hint (events page):** "fast parsing, a compact layout and a lean
+> search loop decide this track. ... Contraction hierarchies are legal, but this
+> query mix rarely repays them" → **the L3 plan is parsing + CSR layout + lean
+> bidirectional search; heavy preprocessing (CH/ALT) is explicitly
+> DEPRIORITIZED** — spend those hours on the parser and the layout instead.
 
 ---
 
@@ -42,11 +48,16 @@
 
 | # | Feature | Why | Risk |
 |---|---|---|---|
-| D21 | **Contraction Hierarchies (CH)** — preprocessing the graph once; queries become bidirectional Dijkstra on 2 small upward/downward DAGs | The event's heavyweight: preprocessing can take 30–120 s on 5 M edges, but the 2 k queries then run in ~10–50 µs each. Since T is ONE total wall time, CH pays if preprocess + queries < plain-2k-queries | preprocessing cost counts against T; only worth it if L2 query time dominates; CH legal (and "rarely necessary" per our spec notes — verify against the frozen spec) |
-| D22 | **ALT (A\* + landmarks)**: a handful of landmarks precomputed once; A\* on the original graph with the triangle-inequality bound | Cheaper to implement than CH, still reads 2 frontiers | landmark choice affects quality |
-| D23 | **SIMD/sorted-neighbor relax** — when the frontier is dense, process the outgoing slice with wide loads where the CPU allows | micro | depends on layout |
-| D24 | **Weighted radix + bucketed dial if weights have a small max** | Dial's algorithm is O(E + C·V) — ideal for small C | only if weight range is small |
+| D21 | **Fast edge-list parsing** (SIMD digit scanning, no per-line allocation, bulk u32 decode) | The organizer hint is explicit: "A fast submission spends much of its time parsing the edge list" and "fast parsing ... decide[s] this track" — the parser is the L3 room | keep the scalar parse for the first SHA |
+| D22 | **Compact CSR variant**: heads as u32, offset array, weights u32 in a parallel slice; prefer array-of-structs vs struct-of-arrays decided by the bench | "Memory layout beats asymptotics at this size, consistently" (events page) | measure, don't guess |
+| D23 | **Lean bidirectional search loop** with an efficient meet condition and early exit | "queries are local ... bounded search distance ... a lean search loop decide[s] this track" | the front-loaded distance arrays |
+| D24 | **SIMD/sorted-neighbor relax** — when the frontier is dense, process the outgoing slice with wide loads | micro | depends on layout |
 | D25 | **Full-path recovery via parent arrays only when D03 = full path** | parent[u] u32 per node per query thread (bounded queue) | memory: 2 × n × u32 transient per thread |
+
+> **CH/ALT — deprioritized.** The events page says the bounded-distance query
+> mix "rarely repays" contraction hierarchies; leave them as a measured H24+
+> experiment ONLY if L2 + parsing work is done and the bench says the query
+> loop still dominates. Do not pre-build preprocessing before the parser is fast.
 
 ## 2. The ladder
 
@@ -54,7 +65,9 @@
 L0  reference-equivalent (python, ~72.7 s)      H0–H1   — the SHA oracle
 L1  correct single-thread Dijkstra on CSR       H1–H4   — target ~8–10 s, SHA-green
 L2  bidirectional + radix heap + parallel       H4–H12  — target ~2.4 s
-L3  insane (CH or ALT, D21/D22)                 H12+    — target ~0.8–1.2 s; stop when <0.3 pts/hour
+L3  insane (D21–D23: fast edge parse, compact   H12+    — target ~0.8–1.2 s; stop when <0.3 pts/hour
+    layout, lean search; CH/ALT only as a
+    measured H24+ experiment if query time still dominates)
 ```
 
 ## 3. Determinism traps (specific to D)
@@ -91,8 +104,10 @@ The 8 GB cap is far away; the discipline is reusing per-thread scratch arrays so
 - **Queries:** static partition of the 2 k queries across 12 workers; each
   worker owns its scratch (dist[], heap, parents) — allocated ONCE at start,
   reused per query, freed at the merge.
-- If L3 = CH: preprocessing is single-threaded (or 2-phase parallel
-  contraction); queries stay embarrassingly parallel on the CH graph.
+- If L3 experiments with CH/ALT: preprocessing would be single-threaded (or
+  2-phase parallel contraction); queries stay embarrassingly parallel on the
+  CH graph. Per the events page hint, treat this as a measured experiment, not
+  a default.
 
 ## 6. Edge-case matrix
 
@@ -124,8 +139,9 @@ The 8 GB cap is far away; the discipline is reusing per-thread scratch arrays so
    internals and radix heaps are safe. Tag spec notes.
 2. **H1–H4:** L1 — CSR + reverse CSR + single-thread Dijkstra, SHA-green.
 3. **H4–H12:** L2 — bidirectional + radix + parallel queries; bench per rung.
-4. **H12+:** decide CH vs ALT on MEASURED L2 query times; implement the winner;
-   stop when the hour buys < 0.3 points.
+4. **H12+:** L3 = fast edge-list parsing + compact layout + lean bidirectional
+   search (D21–D23); CH/ALT only if the L2 bench still shows query time
+   dominating AND the parser is already fast. Stop when the hour buys < 0.3 points.
 5. **Freeze-day:** determinism ×3, final SHA, PERF.md ladder with run IDs.
 
 ## 9. Open questions → Oct 28
@@ -133,5 +149,5 @@ The 8 GB cap is far away; the discipline is reusing per-thread scratch arrays so
 - Distance-only vs full path (D03) — the biggest structural fork.
 - Unreachable spelling (D04), u32-distance bound (D05), tie-break rule (D07),
   parallel-edge/self-loop policy (D06 edge matrix).
-- Whether CH/ALT preprocessing competes against the single total wall time the
-  same way build-time does for B (it does — one clock).
+- CH/ALT: only as a measured H24+ experiment if the L2 query loop still
+  dominates — the events page says this query mix "rarely repays" them.

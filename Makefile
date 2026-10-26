@@ -106,6 +106,10 @@ docs:
 kcalc:
 	$(PY) tooling/k_calc.py
 
+whatif:
+	$(PY) tooling/k_whatif.py --selfcheck
+	$(PY) tooling/k_whatif.py --track A --t-abs 1.07 --m-abs 15 --lines 150
+
 fmt:
 	-cargo fmt --manifest-path $(HMANIFEST) --all
 

@@ -3,10 +3,15 @@
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-b-index.md`.
 > **Engine:** inverted-index full-text search (boolean + phrase) → Elasticsearch-lite.
 > **Ladder goal:** L3. **Contract anchors:** ref **56.35 s ONE total wall time**
-> (build + all queries; the 40/60 blend is gone), timeout 564 s; corpus 250 MB
-> text, **50,000 queries (62% BOOL, 38% PHRASE)**; stopwords **retained**;
-> queries keep left-associative, no parentheses; banned: any ready-made search
-> engine. **Absolutes:** Commit T ≈ **1.88 s** (30×), Stretch ≈ 1.25 s (45×).
+> (build + all queries; the 40/60 blend is gone), timeout 564 s; corpus ~256 MB
+> text, **50,000 queries (62% BOOL, 38% PHRASE "…")** — **the queries are
+> READABLE UP FRONT**, so plan the index around them (events page);
+> stopwords **retained**; queries keep left-associative, no parentheses;
+> banned: any ready-made search engine. **Absolutes:** Commit T ≈ **1.88 s**
+> (30×), Stretch ≈ 1.25 s (45×). Organizer hints = the L2/L3 roadmap:
+> "posting-list compression actually pays", "intersection order is most of
+> the win on boolean queries", "phrase queries need positions, and positions
+> are where your memory goes".
 
 ---
 
@@ -37,6 +42,7 @@
 | B16 | **Parallel query evaluation across the 50 k queries (12 threads)** | Queries are independent; output is emitted in-order with a per-thread queue → deterministic | — |
 | B17 | **Position lists only for terms that matter** (store u32 deltas; drop positions of single-token vocabulary?) | Memory discipline; check spec's phrase rule first | — |
 | B18 | **No corpus retention**: after the index build, the text is released | 250 MB in RSS is 3× our M target | — |
+| B19 | **Query-aware index planning** — the 50 k queries are readable from the start (events page); rehearse the index shape (dictionary choice, which terms get positions) against the Oct-30 sample query file | Turns a guess into a design decision before H0 work is wasted | sample queries at Oct 30 06:00 |
 
 ### P2 — the insane toppings
 

@@ -23,9 +23,9 @@ any correct entry. **P1** = buys the Commit row. **P2** = the "insane" toppings.
 | A02 | **5-field record parser** (ts, method, endpoint, status, latency) | One wrong split on an irregular line = ordering/parsing bomb. Fields are space-delimited but the endpoint may telescope | the delimiter rule |
 | A03 | **RFC3339 → unix-µs civil-time parse, hand-rolled** | std date parsers cost 35–45% of the reference's time and allocate; a fixed-calendar algorithm (days-from-civil, leap table) is ~15 lines and 60× faster. Validate `-`, `:`, `.`, `Z`/offset exactly | the accepted range (all local+00:00?) |
 | A04 | **latency_us as u32, never ms** | The unit is the official trap; a naive "convert to ms" silently changes percentiles | — |
-| A05 | **Percentile definition** (nearest-rank vs interpolated; which index; p99/p999 list) | The single largest correctness exposure. Must match the reference EXACTLY on 1,842 sorted lists | percentile rule + index semantics |
-| A06 | **Error-rate semantics** (fraction vs %, decimals, which statuses count as error) | 4xx and 5xx must be separated if the spec says so; count vs fraction formatting is a SHA difference | error-rate format |
-| A07 | **Group key** (endpoint only? endpoint × hour? endpoint × status class?) | The grouping is the output's identity — the most DEFERRED value | group key + hour bucket format |
+| A05 | **Percentile computation** — the LIST is pinned: **p50/p95/p99** (events page: "per-endpoint request counts, p50/p95/p99 latency"); the definition (nearest-rank vs interpolated, which index) is the remaining frozen-spec item | Must match the reference EXACTLY on 1,842 sorted lists. The events page narrowed the exposure from "which percentiles?" to "which definition?" | percentile definition + index semantics (list itself = p50/p95/p99) |
+| A06 | **Error-rate semantics** — the error class is pinned: **status 5xx** (events page: "5xx counts toward the error rate"); fraction vs %, decimals are frozen-spec | 4xx never counts; count vs fraction formatting is a SHA difference | error-rate format (class = 5xx) |
+| A07 | **Group key** — pinned: **endpoint, bucketed by hour** (events page: "per-endpoint ... and error rates bucketed by hour"); only the line ordering stays DEFERRED | The grouping is the output's identity — now published, not guessed | sort order + hour-bucket spelling |
 | A08 | **Explicit output sort** | ts is monotonic per shard, interleaved across shards → output ordering is NOT input order; must be an explicit stable sort | sort order |
 | A09 | **Deterministic float formatting** | Percentiles print with fixed decimals and NO scientific notation; trailing-zero policy is a SHA difference | float format spec |
 | A10 | **Trailing-newline / separator policy** | The last line and the field separator are bytes in the SHA | separator + trailing newline |
@@ -131,7 +131,8 @@ transient < 16 MB at all times — read 1 MiB chunks, reuse, free shards at merg
 
 ## 9. Open questions → Oct 28
 
-- Exact percentile definition and index (A05).
-- Group key / hour buckets / error-rate format / separators / sort (A06–A10).
+- Exact percentile DEFINITION and index for p50/p95/p99 (the list itself is
+  pinned by the events page — see `docs/depth/99-EVENTS-PAGE-PINS.md`).
+- Hour-bucket spelling (RFC3339 hour vs integer hour index), sort order,
+  separator/trailing-newline bytes, error-rate formatting.
 - Accepted timestamp range and timezone spellings (A03).
-- Whether the median is wanted in addition to p99 (affects the final pass).

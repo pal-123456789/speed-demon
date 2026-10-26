@@ -143,14 +143,20 @@ timeout_s = 321
 # FILENAME: the spec fixes the dataset filenames; only the schema is public.
 input_file = "access.log"
 output_file = "ingest.txt"
-# Output contract (pin these):
-#   - grouping key: endpoint x hour? endpoint only? endpoint x status class?
-#   - line ordering: by endpoint id (sorted bytes) or by first-seen order?
-#   - percentile definition: nearest-rank on the sorted list? which index?
-#   - error rate: fraction or percentage? how many decimals? trailing zeros?
-#   - separator: single space or tab? trailing newline present?
-#   - hour bucket format: RFC3339 hour, or an integer hour index?
-group_key = "DEFERRED"
+# Output contract (events-page PRE-PINS, fetched Oct 27 — still verify against
+# the frozen spec's exact formatting):
+#   - grouping key: ENDPOINT, bucketed by HOUR  ("per-endpoint request counts,
+#     p50/p95/p99 latency, and error rates bucketed by hour")
+#   - percentiles: p50, p95, p99 (the list is published)
+#   - error class: status 5xx ("5xx counts toward the error rate")
+#   - line ordering: by endpoint id (sorted bytes) or by first-seen order?  [frozen spec]
+#   - percentile definition: nearest-rank on the sorted list? which index?    [frozen spec]
+#   - error rate: fraction or percentage? how many decimals? trailing zeros?  [frozen spec]
+#   - separator: single space or tab? trailing newline present?              [frozen spec]
+#   - hour bucket format: RFC3339 hour, or an integer hour index?            [frozen spec]
+group_key = "endpoint per hour bucket (events page: 'per-endpoint request counts ... bucketed by hour')"
+percentiles = "p50/p95/p99 (events page, pre-freeze)"
+error_class = "status 5xx (events page: '5xx counts toward the error rate')"
 sort_order = "DEFERRED"
 percentile_rule = "DEFERRED"
 error_rate_format = "DEFERRED"
@@ -176,6 +182,10 @@ output_file = "index.txt"
 # The build/query blend is GONE. The formula used to be a 40/60 weighted
 # blend of two ratios; it is now a single wall time for the whole program.
 blend_formula = "REMOVED"
+# Events page (fetch Oct 27): queries are READABLE UP FRONT ("the queries are
+# readable from the start, and the task is to answer these 50,000") — plan the
+# index around them. Mix: 62% BOOL, 38% PHRASE "..." (adjacent tokens, exact
+# order, stopwords retained). Corpus ~256 MB / 50,000 queries.
 # Boolean semantics: left-associative, no parentheses. How does the
 # reference treat NOT? Does it bind tighter than AND? Pin it.
 boolean_associativity = "left"
@@ -199,6 +209,12 @@ timeout_s = 144
 records_file = "records.csv"     # published name: RECORDS.CSV
 lookup_file = "DEFERRED"         # the lookup table's name is not public
 output_file = "join.txt"
+# Events page (fetch Oct 27): 5 fixed columns WITH a header row
+# (id,name,note,region_id,amount — visible in the sample bytes), 3.32M records,
+# "emit sorted aggregates". Hostile features confirmed by the sample: CRLF and
+# bare LF mixed, escaped quotes (""), embedded commas and newlines inside
+# quoted fields, trailing space inside quotes, negative amounts, empty quoted
+# fields, and a U+FEFF BOM at the file start AND mid-file at chunk boundaries.
 # The QUOTING RULES are the whole task. Pin every one:
 #   - a quoted field containing a bare LF: is the LF kept in the value?
 #   - is a CRLF inside a quoted field kept as CRLF or normalised to LF?
@@ -236,6 +252,11 @@ unreachable_spelling = "DEFERRED"
 # SEPARATELY when they exist — so the reverse graph must be built.)
 weights_are = "uint32"
 max_distance_bound = "DEFERRED"   # needed to prove u32 is safe
+# Events page (fetch Oct 27): graph is 92 MB / 5M edges. Queries are LOCAL and
+# drawn at a BOUNDED search distance — "fast parsing, a compact layout and a
+# lean search loop decide this track"; "Contraction hierarchies are legal, but
+# this query mix rarely repays them" → parsing + CSR layout + lean bidirectional
+# search are the L3 plan; heavy preprocessing is explicitly deprioritized.
 
 # ── Track E — Compress — CUT ──────────────────────────────────────────────
 # "Four tracks, A to D. Track E (Compress) is cut: storing the input raw

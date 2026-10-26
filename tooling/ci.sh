@@ -14,10 +14,13 @@
 #   3  unit tests             (harness)
 #   4  offline build          (harness, --offline)
 #   5  scored build path      (per-track build.sh: rustc direct, offline)
-#   6  S and D axes           (code lines per track folder; dependency honesty)
-#   7  per-track gates        (verify: determinism, sandbox, timeout)
-#   8  scaffold sentinels     (a stub must never reach the freeze)
-#   9  the pre-freeze lockdown
+#   6  build-context replay   (each track builds from a clean COPY of its folder)
+#   7  image contract         (digest-pinned allowlisted stages, no cached outputs)
+#   8  K what-if self-check   (scoring math pinned to the published example)
+#   9  S and D axes           (code lines per track folder; dependency honesty)
+#  10  per-track gates        (verify: determinism, sandbox, timeout)
+#  11  scaffold sentinels     (a stub must never reach the freeze)
+#  12  the pre-freeze lockdown
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -163,6 +166,29 @@ if sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track
 else
   tail -25 /tmp/sd-scorebuild.txt
   fail "the scored build path is broken — the image would fail to build"
+fi
+
+# The scored build copies the track folder as the Docker context ($COPY .
+# /src). A build that "works here" because it reads a file OUTSIDE the folder
+# (untracked, gitignored, or just nearby) fails on the scoring box. Replay the
+# context from a clean copy so that contract is a gate, not a surprise at H68.
+step "BUILD-CONTEXT REPLAY (each track builds from a clean copy)"
+if sh tooling/context-replay.sh >/tmp/sd-replay.txt 2>&1; then
+  ok "all 4 tracks build + run from a clean context copy"
+else
+  grep 'FAIL' /tmp/sd-replay.txt | sed 's/^/  /'
+  fail "a track depends on something outside its folder — the scored build would fail"
+fi
+
+# The K formula is the team's compass; the what-if tool must keep reproducing
+# the published worked example (K 6.41, speed 40.4) or the scoring math has
+# drifted. Also a reminder of where the next hour pays most.
+step "K WHAT-IF SELF-CHECK (scoring math pinned to the published example)"
+if "$PY" tooling/k_whatif.py --selfcheck >/tmp/sd-kwhatif.txt 2>&1; then
+  ok "what-if explorer reproduces the published example (K 6.41, speed 40.4)"
+else
+  cat /tmp/sd-kwhatif.txt
+  fail "the K math drifted from the events page"
 fi
 
 # The rules announced before the Oct 28 freeze require the final image to
