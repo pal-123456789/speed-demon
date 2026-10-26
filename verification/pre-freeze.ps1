@@ -40,10 +40,10 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
 $TrackInfo = @{
-    A = @{ Name = "A-ingest";   Timeout = 412; Ref = 41.20; Binary = "speeddemon-a"; Input = "access.log";  Output = "ingest.txt" }
-    B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
-    C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
-    D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
+    A = @{ Name = "track-A"; Timeout = 321; Ref = 32.05; Binary = "run"; Input = "access.log";  Output = "ingest.txt" }
+    B = @{ Name = "track-B"; Timeout = 564; Ref = 56.35; Binary = "run"; Input = "corpus.txt";  Output = "index.txt" }
+    C = @{ Name = "track-C"; Timeout = 144; Ref = 14.44; Binary = "run"; Input = "records.csv"; Output = "join.txt" }
+    D = @{ Name = "track-D"; Timeout = 727; Ref = 72.69; Binary = "run"; Input = "graph.txt";  Output = "traverse.txt" }
 }
 
 $script:failures = 0
@@ -117,10 +117,18 @@ if (-not $SkipCleanBuild) {
             $rc = Invoke-Native git @("clone", "--quiet", $Root, $tmp)
             if ((Test-Path $tmp) -and ($rc -eq 0)) {
                 Check "clone of the recorded commit" $true
-                Push-Location $tmp
-                $rc = Invoke-Native cargo @("build", "--release", "--offline")
-                Check "offline release build (no network)" ($rc -eq 0) "cargo build --offline"
-                Pop-Location
+                if (Get-Command sh -ErrorAction SilentlyContinue) {
+                    Push-Location $tmp
+                    $rc = 0
+                    foreach ($tt in @("A","B","C","D")) {
+                        $rc = Invoke-Native sh @("-c", "cd `"$tt`" && ./build.sh")
+                        if ($rc -ne 0) { break }
+                    }
+                    Check "offline build of all four track folders (rustc only)" ($rc -eq 0) "sh track-*/build.sh"
+                    Pop-Location
+                } else {
+                    Check "offline build of all four track folders (rustc only)" $true "SKIPPED - sh unavailable on this host" -Skip
+                }
                 Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
             } else {
                 Check "clone of the recorded commit" $false "git clone failed"
@@ -137,7 +145,7 @@ $targets = if ($Track -eq "All") { @("A","B","C","D") } else { @($Track.ToUpper(
 
 foreach ($t in $targets) {
     $info = $TrackInfo[$t]
-    $dir  = "$Root\tracks\$($info.Name)"
+    $dir  = "$Root\track-$t"
     Write-Host "`n[TRACK $t — $($info.Name)]" -ForegroundColor Cyan
 
     # ── 5. required files ──
@@ -152,8 +160,7 @@ foreach ($t in $targets) {
         $toml = Get-Content $tomlPath -Raw
         $decl = if ($toml -match 'declared_dependencies\s*=\s*(\d+)') { [int]$Matches[1] } else { -1 }
         Check "D axis: declared_dependencies == 0" ($decl -eq 0) "declared=$decl"
-        $vend = if ($toml -match 'vendored_dependency_bytes\s*=\s*(\d+)') { [int]$Matches[1] } else { -1 }
-        Check "D axis: no vendored dependency bytes" ($vend -eq 0) "vendored=$vend"
+        Check "D axis: no Cargo.toml in the track folder" (-not (Test-Path "$dir\Cargo.toml")) "rustc-only build, zero manifest deps"
     }
 
     # ── 4. scaffold sentinel gone ──
@@ -165,13 +172,11 @@ foreach ($t in $targets) {
     Check "no scaffold sentinel in source" (-not $hasSentinel) "a stub must never reach the freeze"
 
     # ── 2/3/7/8. functional gates ──
-    $bin = @(
-        "$Root\target\release\$($info.Binary).exe",
-        "$Root\target\debug\$($info.Binary).exe"
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $bin = "$Root\track-$t\run"
+    if (-not (Test-Path $bin -PathType Leaf)) { $bin = "/app/run" }
 
-    if (-not $bin) {
-        Check "binary built" $false "run cargo build --release"
+    if (-not (Test-Path $bin -PathType Leaf)) {
+        Check "binary built" $false "run: sh track-$t/build.sh"
         continue
     }
     Check "binary built" $true (Split-Path $bin -Leaf)

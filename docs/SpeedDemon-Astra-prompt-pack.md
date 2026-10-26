@@ -71,55 +71,51 @@ often LARGER than the naive reference and that is an accepted trade for speed.
 CAP: every factor is capped at 50× (no axis can contribute more than 50^exponent). In
 practice teams hit the cap on MEMORY, almost never on time.
 
-K → POINTS: speed_score = 100 × ln(K) / ln(25), clamped to [0,100].
-  K=25 → 100 pts.  K=5 → 50 pts.  K<1 (slower+heavier than naive) → 0 pts.
-  Reference points on the curve: K 1.0/2.0/3.5/5.0/8.0/12.0/18.0/25 →
-  score 0.0/21.5/38.9/50.0/64.6/77.2/89.8/100.0. The curve is logarithmic on purpose:
-  the first 2× is an afternoon; 12×→24× is a weekend rewrite.
+K → POINTS: speed_score = 50 × log10(K), clamped to [0,100].
+  K=10 → 50 pts.  K=100 → 100 pts.  K=1 → 0 pts.  K<1 → 0 (clamped).
+  Reference points on the curve: K 1.0/2.0/5.0/10.0/20.0/50.0/100 →
+  score 0.0/15.1/35.0/50.0/65.1/85.0/100.0. The curve is logarithmic on purpose:
+  the first 2× is an afternoon; 10×→20× is a weekend rewrite.
 
-TRACK E EXCEPTION: on Track E the M slot is COMPRESSED SIZE (ratio), not memory. And its
-T blends throughput: compression time is measured but weighted at ONE QUARTER of
-decompression time (decompression dominates).
+(TRACK E — Compress — was CUT before the freeze. Four tracks, A–D.)
 
-WORKED EXAMPLE (Team Nightshade, Track A) — the canonical illustration:
-  T 41.20s→1.31s = 31.45× (^0.40=3.972)
-  M 2940MB→210MB = 14.00× (^0.20=1.695)
-  S 3180B→5400B  = 0.59×  (^0.15=0.924)  <- wrote 70% MORE code, LOST points here
+WORKED EXAMPLE (the organizers' published one, Team Nightshade, Track A) — canonical:
+  T 32.05s→1.28s = 25.04× (^0.50=5.004)   <- half the weight is TIME, spend there
+  M 210MB→36.8MB = 5.70×  (^0.20=1.416)
+  S 56→109 lines  = 0.51×  (^0.15=0.905)  <- wrote 2× more code, LOST points here
   D 1.00→1.00    = 1.00×  (^0.15=1.000)
-  X 10.40→9.80   = 1.06×  (^0.10=1.006)
-  K = 6.26  →  speed score 57.0/100.  Judge 82/100.
-  Track A total = 57.0×0.65 + 82.0×0.35 = 37.05 + 28.70 = 65.75.
-  Lesson the organizers draw: 14× memory bought only +1.695; those hours would have
-  scored higher spent on the parser (time). The formula tells you where to work.
+  K = 6.41  →  speed score 40.4/100.  Judge 82/100.
+  Track A total = 40.4×0.65 + 82.0×0.35 = 26.24 + 28.70 = 54.94.
+  Lesson the organizers draw: 25× time bought +5.00; the S axis (0.15 weight, capped at
+  1.0) punishes verbosity. The formula tells you where to work.
 
-===== THE FOUR GATES (pass/fail, checked on EVERY one of the 5 runs) =====
+===== THE THREE GATES (pass/fail, checked on EVERY run) =====
 Fail ANY gate → zero on that track, and they publish which gate you failed.
   1. CORRECTNESS: SHA-256 of your output file == expected hash, exactly. Spec pins line
      ordering AND float formatting so the check is binary. Right 4/5 runs = FAIL
-     (nondeterminism is a correctness bug). The 10% sample ships with its expected hash.
-  2. SPEED FLOOR: within 10× of the fastest correct submission in that track (required
-     for the overall title — stops a 200-byte 4-minute entry winning on source size).
-  3. TIMEOUT: hard kill at 10× the reference time. Track A 412s, B 587s, C 369s,
-     D 724s, E 298s. A hang is a failed run, not a slow one.
-  4. SANDBOX: no network; dataset mount read-only; root filesystem read-only; scratch is
+     (nondeterminism is a correctness bug). The sample ships with its expected hash.
+  2. TIMEOUT: hard kill at 10× the reference time. Track A 321s, B 564s, C 144s,
+     D 727s. A hang is a failed run, not a slow one.
+  3. SANDBOX: no network; dataset mount read-only; root filesystem read-only; scratch is
      a 1 GB tmpfs at /tmp. They diff the container filesystem after every run. Writing
      precomputed answers into the image, phoning home, or touching the dataset mount =
      DISQUALIFICATION FROM THE WHOLE EVENT, not just the track. (Rule: no precomputed
      answers; the scoring dataset uses a seed you have never seen; code that recognizes
      the input and short-circuits is DQ.)
 
-===== THE MACHINE (HEL1) — design for exactly this =====
-Hetzner EX44 dedicated, Helsinki. Intel Core i5-13500: 14 cores / 20 threads
-(6 P-cores @ up to 4.80GHz, 8 E-cores @ 3.50GHz). Cache: 544KiB L1d, 704KiB L1i,
-11.5MiB L2, 24MiB L3. RAM 64GB DDR4-3200 (2×32GB), non-ECC. Storage 2×512GB Micron 3500
-NVMe RAID1. OS Debian 13 (trixie). Docker + cgroups v2.
+===== THE MACHINE (fsn1) — design for exactly this =====
+Hetzner EX44 dedicated, Falkenstein (fsn1) — NOT Helsinki. Intel Core i5-13500:
+14 cores / 20 threads (6 P-cores @ up to 4.80GHz, 8 E-cores @ 3.50GHz).
+Cache: 544KiB L1d, 704KiB L1i, 11.5MiB L2, 24MiB L3. RAM 64GB DDR4-3200 (2×32GB),
+non-ECC. Storage 2×512GB Micron 3500 NVMe RAID1. OS Debian 13 (trixie). Docker +
+cgroups v2.
 Before scoring they set no_turbo=1 (performance governor, turbo OFF → sustained ~2.5GHz
-base, not a boost ceiling) and pin containers to the SIX P-CORES ONLY via
---cpuset-cpus=0-11 (12 hardware threads). THERE ARE NO E-CORES AVAILABLE TO YOU. Design
-parallelism for exactly 12 threads on 6 physical P-cores; spawning 20 workers will hurt.
+base, not a boost ceiling) and pin the container to `--cpuset-cpus=0-11` with an 8 GB
+memory cap. Design parallelism for exactly 12 workers on 12 scheduled CPUs; spawning
+20 workers will hurt.
 
-===== THE EXACT SCORING RUN (verbatim; only team/commit/track substituted) =====
-  docker build --network=none -t speeddemon/$TEAM:$COMMIT .
+===== THE EXACT SCORING RUN (verbatim; only team/track/commit substituted) =====
+  docker build --network=none -t speeddemon/$TEAM-$TRACK:$COMMIT track-$TRACK
   vmtouch -t /srv/speeddemon/data/track-$TRACK      # dataset pre-warmed into page cache
   docker run --rm --cpuset-cpus="0-11" --cpuset-mems="0" \
     --memory=8g --memory-swap=8g --pids-limit=512 --network=none --read-only \
@@ -151,9 +147,9 @@ LEADERBOARD: during the 72h you push to a submission branch for an automated run
 HOLDOUT dataset after freeze — the only set that counts. Gap between sample rank and
 final rank = the price of overfitting.
 
-===== THE FIVE TRACKS (each = one fixed task on one fixed dataset) =====
-Enter as many as you like; 3 is the minimum for the overall title. I am entering ALL 5.
-Per-track reference TIME and TIMEOUT are given; other reference axis values (M/S/X) come
+===== THE FOUR TRACKS (each = one fixed task on one fixed dataset) =====
+Enter as many as you like; 3 is the minimum for the overall title. I am entering ALL 4.
+Per-track reference TIME and TIMEOUT are given; other reference axis values (M/S/D) come
 from the Oct 28 frozen spec/harness — parameterize around them, don't invent them.
 Only the LIBRARY THAT SOLVES THE WHOLE TASK is banned per track (named in each spec);
 other dependencies are allowed but charged on the D axis.
@@ -626,7 +622,7 @@ tracks, in two sentences.
 - Once Prompts 1–8 are done and verified, I'll assemble the output into a clean plan in
   **D:\SpeedDemon-Ref** (one master plan file + per-track files) and we iterate from there.
 - If you want to go even deeper on any single track before building, say so and I'll write a
-  follow-up micro-prompt (e.g. "Track E blob-segment float coder, exhaustively").
+  follow-up micro-prompt (e.g. "Track B inverted-index merge loop, exhaustively").
 
 **Legality reminder:** this is design/preparation only, which the rules explicitly permit.
 No project code is written or committed before kickoff (Oct 30 18:00 UTC).

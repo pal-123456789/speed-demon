@@ -56,10 +56,10 @@ function Write-Warn { param([string]$Message) Write-Host "  [WARN] $Message" -Fo
 function Write-Info { param([string]$Message) Write-Host "  [INFO] $Message" -ForegroundColor Gray }
 
 $TrackInfo = @{
-    A = @{ Name = "A-ingest";   Timeout = 412; Ref = 41.20; Binary = "speeddemon-a"; Input = "access.log";  Output = "ingest.txt" }
-    B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
-    C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
-    D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
+    A = @{ Name = "track-A"; Timeout = 321; Ref = 32.05; Binary = "run"; Input = "access.log";  Output = "ingest.txt" }
+    B = @{ Name = "track-B"; Timeout = 564; Ref = 56.35; Binary = "run"; Input = "corpus.txt";  Output = "index.txt" }
+    C = @{ Name = "track-C"; Timeout = 144; Ref = 14.44; Binary = "run"; Input = "records.csv"; Output = "join.txt" }
+    D = @{ Name = "track-D"; Timeout = 727; Ref = 72.69; Binary = "run"; Input = "graph.txt";  Output = "traverse.txt" }
 }
 $info = $TrackInfo[$Track]
 
@@ -77,14 +77,10 @@ New-Item -ItemType Directory -Force -Path $dataDir, $outDir | Out-Null
 # -PathType Leaf matters: Test-Path returns TRUE for a directory, so without it
 # a missing binary would silently select a directory path and fail obscurely
 # when executed.
-$bin = @(
-    "$Root\target\release\$($info.Binary).exe",
-    "$Root\target\debug\$($info.Binary).exe",
-    "$Root\bin\$($info.Binary)"
-) | Where-Object { Test-Path $_ -PathType Leaf } | Select-Object -First 1
-
-if (-not $bin) {
-    Write-Host "  [FAIL] binary $($info.Binary) not found — run 'cargo build --release'" -ForegroundColor Red
+$bin = "$Root\track-$Track\run"
+if (-not (Test-Path $bin -PathType Leaf)) { $bin = "/app/run" }
+if (-not (Test-Path $bin -PathType Leaf)) {
+    Write-Host "  [FAIL] binary not found — run: sh track-$Track/build.sh" -ForegroundColor Red
     exit 1
 }
 
@@ -147,7 +143,7 @@ for ($i = 0; $i -lt $times.Count; $i++) {
 Write-Host "`n--- RESULT ---" -ForegroundColor Cyan
 Write-Host ("  T (trimmed mean) : {0:N4} s" -f $tMean)
 Write-Host ("  fastest / slowest: {0:N3} s / {1:N3} s   spread {2:N1}%" -f $best, $worst, $spread)
-Write-Host ("  local ratio vs ref: {0}x   (reference {1}s on HEL1)" -f $ratio, $info.Ref)
+Write-Host ("  local ratio vs ref: {0}x   (reference {1}s on fsn1)" -f $ratio, $info.Ref)
 Write-Host ("  timeout headroom  : {0:N1}x under the {1}s hard kill" -f ($info.Timeout / $tMean), $info.Timeout)
 
 if ($hashes.Count -gt 0) {
@@ -165,15 +161,15 @@ if ($hashes.Count -gt 0) {
     }
 }
 
-# ── G2 SPEED FLOOR ──
+# ── G2 TIMEOUT (hard kill at 10x reference; the old speed-floor gate is gone) ──
 # The organizers zero any track whose time is more than 10x the reference.
 # Reporting the ratio without failing on it made this a comment, not a gate:
 # a track running 1000x slow still exited 0.
 if ($ratio -gt 10.0) {
-    Write-Host ("  [FAIL] G2 speed floor: {0}x the reference exceeds the 10x ceiling" -f $ratio) -ForegroundColor Red
+    Write-Host ("  [FAIL] G2 timeout: {0}x the reference exceeds the 10x hard kill" -f $ratio) -ForegroundColor Red
     exit 1
 }
-Write-Host ("  [PASS] G2 speed floor: {0}x the reference (ceiling 10x)" -f $ratio) -ForegroundColor Green
+Write-Host ("  [PASS] G2 timeout: {0}x the reference (hard kill at 10x)" -f $ratio) -ForegroundColor Green
 
 # ── optional container run for the real M axis (cgroup memory.peak) ──
 if ($Docker) {
@@ -182,7 +178,7 @@ if ($Docker) {
     Write-Host "build: docker build --network=none -t $image ." -ForegroundColor Gray
     Write-Host "run  : docker run --rm --cpuset-cpus=0-11 --cpuset-mems=0 --memory=8g --memory-swap=8g --pids-limit=512 --network=none --read-only --tmpfs /tmp:rw,size=1g,exec --ulimit nofile=8192:8192 -v ${dataDir}:/data:ro -v ${outDir}:/out:rw -e TRACK=$Track $image" -ForegroundColor Gray
     if (Get-Command docker -ErrorAction SilentlyContinue) {
-        docker build --network=none -t $image $Root
+        docker build --network=none -t $image "$Root\track-$Track"
         if ($LASTEXITCODE -eq 0) {
             docker run --rm --cpuset-cpus="0-11" --cpuset-mems="0" --memory=8g --memory-swap=8g `
                 --pids-limit=512 --network=none --read-only --tmpfs /tmp:rw,size=1g,exec `

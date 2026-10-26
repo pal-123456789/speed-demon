@@ -46,8 +46,8 @@ PINNED="${IMAGE}@${DIGEST}"
 echo "pinning to $PINNED"
 
 FILES="$ROOT/Dockerfile"
-for t in A-ingest B-index C-join D-traverse; do
-  FILES="$FILES $ROOT/tracks/$t/Dockerfile"
+for t in A B C D; do
+  FILES="$FILES $ROOT/track-$t/Dockerfile"
 done
 
 changed=0

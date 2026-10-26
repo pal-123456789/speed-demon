@@ -1,4 +1,4 @@
-//! The frozen HEL1 contract, in one place.
+//! The frozen fsn1 contract, in one place.
 //!
 //! Every number here is from the published event page. Nothing is invented.
 //! Values the event page does not publish are `None` and are reported as
@@ -41,7 +41,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'A',
         Track {
             id: 'A',
-            dir: "A-ingest",
+            dir: "track-A",
             input: "access.log",
             output: "ingest.txt",
             // "Reference numbers are now measured on the scoring machine, five
@@ -58,7 +58,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'B',
         Track {
             id: 'B',
-            dir: "B-index",
+            dir: "track-B",
             input: "corpus.txt",
             output: "index.txt",
             ref_time_s: 56.35,
@@ -71,7 +71,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'C',
         Track {
             id: 'C',
-            dir: "C-join",
+            dir: "track-C",
             input: "records.csv",
             output: "join.txt",
             ref_time_s: 14.44,
@@ -84,7 +84,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'D',
         Track {
             id: 'D',
-            dir: "D-traverse",
+            dir: "track-D",
             input: "graph.txt",
             output: "traverse.txt",
             ref_time_s: 72.69,
@@ -217,7 +217,11 @@ mod tests {
         // rules. This test pins the new answer: K = 8.7810, speed 47.18.
         let (k, _) = coefficient(31.4504, 14.0, 0.5889, 1.0);
         assert!((k - 8.7810).abs() < 0.01, "K was {k}");
-        assert!((speed_score(k) - 47.18).abs() < 0.05, "speed was {}", speed_score(k));
+        assert!(
+            (speed_score(k) - 47.18).abs() < 0.05,
+            "speed was {}",
+            speed_score(k)
+        );
 
         // And the OLD number must not be what comes out, or this test has
         // proved nothing.
@@ -235,8 +239,16 @@ mod tests {
         // "Memory is capped at 50×. Wall time is not."
         let (k, c) = coefficient(1e9, 1e9, 1e9, 1e9);
         // T saturates only at the finite guard; M at 50; S and D at 1.0.
-        assert!((c[1] - 50f64.powf(W_M)).abs() < 1e-9, "M contribution was {}", c[1]);
-        assert!((c[0] - 1e9f64.powf(W_T)).abs() < 1e-6, "T contribution was {}", c[0]);
+        assert!(
+            (c[1] - 50f64.powf(W_M)).abs() < 1e-9,
+            "M contribution was {}",
+            c[1]
+        );
+        assert!(
+            (c[0] - 1e9f64.powf(W_T)).abs() < 1e-6,
+            "T contribution was {}",
+            c[0]
+        );
         assert!((c[2] - 1.0).abs() < 1e-12);
         assert!((c[3] - 1.0).abs() < 1e-12);
         let expect = 1e9f64.powf(W_T) * 50f64.powf(W_M);

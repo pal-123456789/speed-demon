@@ -4,7 +4,7 @@
 On Oct 28 18:00 UTC the organizers freeze the specs. Every value this
 repository has honestly marked DEFERRED becomes a fact at that moment. The
 risk is not the work; it is the *bookkeeping*: a dozen values scattered
-across a contract file, five track manifests, a Rust table and the K
+across a contract file, four track manifests, a Rust table and the K
 budgets, each of which has to change consistently.
 
 This tool is the checklist and the enforcer:
@@ -61,13 +61,13 @@ CATALOGUE = {
         "error_rate_format": ("error-rate decimals and format", "SPEC A, output section", True),
         "field_separator": ("the output separator", "SPEC A, output section", False),
         "trailing_newline": ("whether the last line ends in \\n", "SPEC A / the sample's expected hash", True),
-        "ref_source_bytes": ("the S axis denominator", "SPEC A, reference table", False),
+        "ref_source_lines": ("the S axis denominator", "SPEC A, reference table", False),
     },
     "B": {
         "ref_build_time_s": ("the 40% half of the T axis", "SPEC B, reference table", False),
         "ref_query_time_s": ("the 60% half of the T axis", "SPEC B, reference table", False),
         "ref_peak_mem_mb": ("the M axis denominator", "SPEC B, reference table", False),
-        "ref_source_bytes": ("the S axis denominator", "SPEC B, reference table", False),
+        "ref_source_lines": ("the S axis denominator", "SPEC B, reference table", False),
         "blend_formula": ("HOW build+query combine — a 24% K swing", "SPEC B, scoring section", True),
         "boolean_precedence": ("NOT vs AND binding", "SPEC B, query semantics", True),
         "tokenizer": ("what counts as a token", "SPEC B, query semantics", True),
@@ -84,7 +84,7 @@ CATALOGUE = {
         "sort_order": ("the output's line ordering", "SPEC C, output section", True),
         "output_number_format": ("how numbers are rendered", "SPEC C, output section", True),
         "ref_peak_mem_mb": ("the M axis denominator", "SPEC C, reference table", False),
-        "ref_source_bytes": ("the S axis denominator", "SPEC C, reference table", False),
+        "ref_source_lines": ("the S axis denominator", "SPEC C, reference table", False),
     },
     "D": {
         "queries_file": ("the queries input's name", "SPEC D, inputs", True),
@@ -92,7 +92,7 @@ CATALOGUE = {
         "unreachable_spelling": ("what an unreachable pair prints", "SPEC D, output section", True),
         "max_distance_bound": ("whether u64 distances are provably safe", "SPEC D, fields", False),
         "ref_peak_mem_mb": ("the M axis denominator", "SPEC D, reference table", False),
-        "ref_source_bytes": ("the S axis denominator", "SPEC D, reference table", False),
+        "ref_source_lines": ("the S axis denominator", "SPEC D, reference table", False),
     },
 }
 
@@ -212,15 +212,15 @@ def cmd_check(sections) -> int:
         ref_time = sec.get("ref_time_s", "")
         if DEFERRED in ref_time.upper() or not ref_time:
             failures.append(f"[{track}] ref_time_s is missing — the T axis has no denominator")
-        ref_src = sec.get("ref_source_bytes", "")
+        ref_src = sec.get("ref_source_lines", "")
         if DEFERRED in ref_src.upper() or not ref_src:
-            print(f"  note: [{track}] ref_source_bytes still DEFERRED — the S axis ratio cannot be computed yet")
+            print(f"  note: [{track}] ref_source_lines still DEFERRED — the S axis ratio cannot be computed yet")
 
     # The harness's own consistency test is the authority on drift.
-    print("  running the harness consistency test (cargo test -p sd-harness)...")
+    print("  running the harness consistency test (cargo test --offline --manifest-path verification/harness/Cargo.toml)...")
     import subprocess
     proc = subprocess.run(
-        ["cargo", "test", "--offline", "-p", "sd-harness"],
+        ["cargo", "test", "--offline", "--manifest-path", "verification/harness/Cargo.toml"],
         cwd=ROOT, capture_output=True, text=True,
     )
     if proc.returncode != 0:

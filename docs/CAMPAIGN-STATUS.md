@@ -8,26 +8,28 @@
 > require all project code to be written inside the 72-hour window
 > (Oct 30 18:00 UTC → Nov 2 18:00 UTC).
 >
-> Last updated: after the Oct 22 full audit. See §1a.
+> Last updated: after the restructure to per-track images (Oct 27). See §1a.
 
 ---
 
 ## 1a. What the Oct 22 audit changed
 
 The audit ran the build scripts rather than reading them. Five of them had
-never been executed, and every one of those five was broken. Because the
-harness builds a single image for all four tracks, each defect was a total
-loss on submission rather than a degraded score.
+never been executed, and every one of those five was broken. Back then the
+harness built a single image for all four tracks, so each defect was a total
+loss on submission rather than a degraded score. The image contract is now
+**per track** (one image per track folder, built as its own context), so a
+defect in one track costs that track alone.
 
 | Defect | Consequence if it had shipped | Fixed |
 |---|---|---|
-| `--crate-name speeddemon-a` | rustc rejects hyphens; build fails | one build implementation, underscore crate names |
-| Core rlib built for the host triple, binary linked for musl | link fails with E0461 | core compiled with `--target` |
-| `-C linker-flavor=gnu-lld` | unstable option, hard error on stable | `ld.lld`, which is stable |
-| musl "detected" via `--print target-libdir` | succeeds for uninstalled targets; build fails later | checks for the std archive |
-| gnu link in an image with no C compiler | impossible link, no network to fix it | static musl link via the toolchain's rust-lld |
-| Per-track Dockerfiles | referenced `/app/build.sh` with the track dir as context; nothing was in the image | generated from a template, repo root as context, `--check` in CI |
-| `pgo-build.sh` | built with cargo into `target/pgo`, never reached the image; no `llvm-profdata merge`, so `-profile-use` had nothing to read | profile lands in `target/pgo/prof`, consumed by `build-one.sh` |
+| `--crate-name speeddemon-a` | rustc rejects hyphens; build fails | tracks self-contained; no shared crate names |
+| Core rlib built for the host triple, binary linked for musl | link fails with E0461 | `core/` removed — each track compiles its own `src/main.rs` |
+| `-C linker-flavor=gnu-lld` | unstable option, hard error on stable | plain `rustc` → the rust base image's default linker (stable) |
+| musl "detected" via `--print target-libdir` | succeeds for uninstalled targets; build fails later | gone with the musl build — runtime is the debian:13-slim glibc |
+| gnu link in an image with no C compiler | impossible link, no network to fix it | rust:1-slim-trixie ships gcc + libc6-dev for linking |
+| Per-track Dockerfiles | referenced `/app/build.sh` with the track dir as context; nothing was in the image | official shape: `COPY . /src` + `RUN ./build.sh`, per-track context, digest-pinned stages |
+| `pgo-build.sh` | built with cargo into `target/pgo`, never reached the image; no `llvm-profdata merge`, so `-profile-use` had nothing to read | removed — build-time training is an in-window decision once real code exists |
 | `ci.sh` | hardcoded `python3`; called an unimplemented `--s-only`, so the S axis silently passed | interpreter detection, one pass for both axes, 5 new gates |
 | No executable bits in git | a fresh clone silently ignores the pre-commit hook | all scripts `100755` |
 
@@ -50,12 +52,12 @@ every run.
 
 | Component | State | Evidence |
 |---|---|---|
-| Workspace (4 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
-| Core library (13 unit tests) | **GREEN** | 13/13 pass: arena, interner, chunking, pool, cents, float bits |
-| **`verification/harness`** — the scoring-box replica | **GREEN** | 16/16 tests: pure-Rust SHA-256 (known vectors), JSONL ledger, lockdown, contract table *and contract.toml agreement*. `cgroup.rs` has **no unit test** — it is exercised only by live container runs |
-| `rustfmt` + `clippy -D warnings` | **AMBER** | the hook enforces both **once installed**, and it is **not installed in this clone** — `tooling/hooks/pre-commit` exists but `.git/hooks/` holds only `*.sample`. Run `sh tooling/install-hooks.sh` before the freeze |
-| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build-one.sh` builds all 4 statically for musl; `build-all.sh` loops over it; verified from a clean context |
-| One-image-four-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test in CI. `TRACK` is validated, never coerced — an unrecognised value used to be filtered to the empty string and silently defaulted to track A |
+| 4 self-contained track folders (track-A..track-D) | **GREEN** | `sh track-*/build.sh` from a clean clone — all four produce `./run` offline |
+| Track scaffolds (rustc-only, rule-05-safe) | **GREEN** | every `src/main.rs` is a stub; `rule05_guard` scans all four folders |
+| **`verification/harness`** — the scoring-box replica | **GREEN** | 20/20 tests: pure-Rust SHA-256 (known vectors, held-out sample), JSONL ledger, lockdown, contract table *and contract.toml agreement*. `cgroup.rs` has **no unit test** — it is exercised only by live container runs |
+| `rustfmt` + `clippy -D warnings` | **GREEN** | both run as best-effort gates in `tooling/ci.sh` (skip only when the component is not installed); the pre-commit hook also enforces them once installed |
+| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `track-*/build.sh` compiles each folder's `src/main.rs` directly; the `ci.sh` "scored build path" gate builds all four, and the Dockerfile runs the identical script |
+| Per-track image contract (one image per track) | **GREEN** | each track folder is its own build context; entrypoint IS the track binary — no dispatcher. `check_base_pinned.py` verifies digest-pinned, allowlisted stages |
 | 3-gate verifier (SHA / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows). **The speed floor gate is gone** — there are three gates, not four. Inside the harness, an unpinned expected hash is now a **FAIL**, not a green tick |
 | 5-run trimmed-mean benchmark | **GREEN** | `harness bench` + `bench.ps1` |
 | Pre-freeze lockdown | **AMBER — failures** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux). The failures are the correct pre-kickoff state; see §1a |
@@ -63,7 +65,7 @@ every run.
 | **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered. `python tooling/gen_docs.py --check` is the CI gate that proves the committed docs *are* the generator's output |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
 | **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, decision-complete, no solution code |
-| **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` merges to `pgo/merged.profdata` (shippable) and `build-one.sh` consumes **the file**; `tooling/check_pgo_wiring.sh` proves the profile can reach the image. Both halves were broken until now — see §1b |
+| Build-time training (PGO, AOT) | **DEFERRED** | an in-window decision once real code exists — the rules allow training on generated fixtures, but a profile of a stub is worse than none; nothing pre-built |
 | One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
 | K calculator | **GREEN** | reproduces the published worked example exactly (K 6.41, speed score 40.4) |
 | S/D axis measurement | **GREEN** | **D = 1.0000 on all four tracks** |
@@ -181,8 +183,8 @@ every K budget in the plan becomes real.
 ### Before Oct 28 (now) — done
 
 ```bash
-cargo build --release --offline        # builds
-cargo test --offline -p speeddemon-core # 13/13 (the workspace is 29: 13 core + 16 harness)
+sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh
+cargo test --offline --manifest-path verification/harness/Cargo.toml # 20/20 harness
 sh tooling/install-hooks.sh            # installs the pre-commit gate
 ```
 
@@ -199,7 +201,10 @@ sh tooling/install-hooks.sh            # installs the pre-commit gate
 
 ```bash
 # pin the expected hashes (one line each: "<sha256>  <output-file>")
-echo "<sha256>  ingest.txt" > tracks/A-ingest/verification/expected/ingest.txt.sha256
+# NOTE: already pinned from the scaffolds' deterministic output — track-A/..D/
+# verification/expected/*.sha256 exist; replacing a pin after H0 requires the
+# SHA gate to go green again with the real implementation.
+echo "<sha256>" > track-A/verification/expected/ingest.txt.sha256
 
 # and confirm the gate is live
 powershell -File verification/verify.ps1 -Track A
@@ -328,9 +333,7 @@ python3 tooling/gen_docs.py                # regenerate PERF.md / README.md
 python3 tooling/rule05_guard.py            # the pre-kickoff compliance check
 python3 tooling/difftest.py out.txt ref.txt  # why did the hash mismatch?
 python3 tooling/spec_intake.py --status    # the Oct 28 checklist
-python3 tooling/gen_dockerfiles.py         # regenerate the per-track Dockerfiles
-sh tooling/vendor-toolchain.sh             # vendor rustc + musl std for --network=none
-sh tooling/pgo-build.sh --track A          # offline profile-guided build
+python3 tooling/check_base_pinned.py       # image contract: digest-pinned allowlisted stages
 sh tooling/install-hooks.sh                # the pre-commit gate
 ```
 
@@ -343,8 +346,7 @@ sh tooling/install-hooks.sh                # the pre-commit gate
 | `tooling/spec_intake.py` | Pinning the frozen values by hand on Oct 28 and getting one wrong |
 | `verification/harness` (ledger) | Writing PERF.md from memory instead of from measurements |
 | `verification/harness` (lockdown) | A stub reaching the freeze because nobody checked |
-| `tooling/pgo-build.sh` | Leaving 10–20% of T on the table because the build is free |
-| `tooling/gen_dockerfiles.py` | A hand-edited per-track Dockerfile that no longer matches the build |
+| `tooling/check_base_pinned.py` | A hand-edited Dockerfile that drifts off the allowlist, or a base image that is not digest-pinned |
 | `tooling/ci.sh` | Discovering a broken gate 20 minutes before a commit you needed |
 
 ---
@@ -355,9 +357,9 @@ sh tooling/install-hooks.sh                # the pre-commit gate
    submissions fail. The scalar state machine is the oracle; SIMD is only a
    candidate *locator*. Never let a fast path near the quoting rules.
 2. **A non-offline build.** `docker build --network=none` fails the build, and
-   a failed build scores zero — on every track, because the image is shared.
-   `tooling/vendor-toolchain.sh` is the fix, and it must be run on a
-   networked machine *before* the hack.
+   a failed build scores zero on **that track** (images are per-track, so the
+   damage is contained). The digest-pinned `rust:1-slim-trixie` build stage
+   ships the toolchain, so nothing is vendored and nothing is fetched.
 3. **A deadline that moves.** The scoring run is on a **holdout** dataset
    generated at a seed you have never seen. Anything tuned to the sample's
    bytes is a liability, and code that recognises the input is

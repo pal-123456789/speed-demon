@@ -1,0 +1,12 @@
+# Machine-readable track descriptor; the harness queues the submission
+# from this file without a human in the loop.
+track = "C"
+team = "solo"
+language = "rust"
+declared_dependencies = 0
+entrypoint = "/app/run"
+input_dir = "/data"
+output_dir = "/out"
+input_file = "records.csv"
+output_file = "join.txt"
+data_files = ["records.csv"]

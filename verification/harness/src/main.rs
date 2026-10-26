@@ -1,6 +1,6 @@
 //! sd-harness — the Speed Demon scoring-box replica.
 //!
-//! This is the tool that runs ON the scoring box (HEL1, Debian 13, Docker,
+//! This is the tool that runs ON the scoring box (fsn1, Debian 13, Docker,
 //! cgroup v2) and reproduces the organizer's measurement protocol exactly:
 //!
 //!   * the verbatim `docker run` flags, including `--cpuset-cpus=0-11`,
@@ -86,9 +86,9 @@ fn usage() {
     eprintln!(
         "sd-harness — Speed Demon scoring-box replica
 
-  sd-harness bench   --track A|B|C|D|E [--runs N] [--data DIR] [--out DIR]
+  sd-harness bench   --track A|B|C|D [--runs N] [--data DIR] [--out DIR]
                      [--image IMG] [--label NAME] [--no-docker] [--ledger PATH]
-  sd-harness verify  --track A|B|C|D|E [...]
+  sd-harness verify  --track A|B|C|D [...]
   sd-harness ledger  [--track A] [--json]
   sd-harness plan    [--track A]
   sd-harness prewarm --file PATH
@@ -116,7 +116,7 @@ impl Opts {
     fn req_track(&self) -> Result<char, String> {
         let t = self
             .get("track")
-            .ok_or_else(|| "--track is required (A|B|C|D|E)".to_string())?;
+            .ok_or_else(|| "--track is required (A|B|C|D)".to_string())?;
         let c = t
             .chars()
             .next()
@@ -423,6 +423,23 @@ fn run_container(
     })
 }
 
+/// The per-track binary produced by track-*/build.sh: the extensionless
+/// `run` in the track folder (the old `target/release/speeddemon-{a}`
+/// dispatcher layout is gone). `--bin` overrides it; on Windows prefer
+/// `run.exe` when present, since CreateProcess cannot launch an
+/// extensionless file.
+fn local_bin(root: &Path, id: char, opts: &Opts) -> PathBuf {
+    if let Some(b) = opts.get("bin") {
+        return PathBuf::from(b);
+    }
+    let dir = root.join(format!("track-{}", id.to_ascii_uppercase()));
+    let exe = dir.join("run.exe");
+    if cfg!(windows) && exe.is_file() {
+        return exe;
+    }
+    dir.join("run")
+}
+
 /// Run the binary directly, without a container. For local iteration on a
 /// machine without Docker. The sandbox gate is reported as SKIPPED because
 /// it cannot be evaluated outside the container.
@@ -574,14 +591,7 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
 
     for i in 1..=runs {
         let outcome = if no_docker {
-            let bin = PathBuf::from(opts.get_or(
-                "bin",
-                &format!(
-                    "{}/target/release/speeddemon-{}",
-                    root.display(),
-                    id.to_ascii_lowercase()
-                ),
-            ));
+            let bin = local_bin(&root, id, opts);
             run_direct(track, &bin, &data_dir, &out_dir)?
         } else {
             run_container(track, &image, &data_dir, &out_dir)?
@@ -660,7 +670,7 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
         sorted[sorted.len() - 1]
     );
     println!(
-        "  ratio vs reference: {:.3}x   (reference {:.2} s on HEL1)",
+        "  ratio vs reference: {:.3}x   (reference {:.2} s on fsn1)",
         t / track.ref_time_s,
         track.ref_time_s
     );
@@ -750,7 +760,7 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
                  gate did not run)"
             );
             eprintln!(
-                "                     pin it in tracks/{}/verification/expected/{}.sha256, \
+                "                     pin it in {}/verification/expected/{}.sha256, \
                  or pass --allow-unpinned for a scaffold run",
                 track.dir, track.output
             );
@@ -886,7 +896,7 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
                 .to_ascii_uppercase();
             vec![all
                 .get(&c)
-                .ok_or_else(|| format!("unknown track {c} (expected A|B|C|D|E)"))?]
+                .ok_or_else(|| format!("unknown track {c} (expected A|B|C|D)"))?]
         }
         None => all.values().collect(),
     };
@@ -896,8 +906,7 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
         println!("--- Track {} ({}) ---", track.id, track.dir);
         println!(
             "  reference: {:.2}s  timeout {:.0}s  M axis: peak memory",
-            track.ref_time_s,
-            track.timeout_s
+            track.ref_time_s, track.timeout_s
         );
         // The ladder is per-track. A single hardcoded set printed Track A's
         // ratios under Track E, whose M axis is a compression ratio capped
@@ -908,26 +917,10 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
         // 1.0 on every track because this repository declares no runtime
         // dependencies.
         let rows: &[(f64, f64, f64)] = match track.id {
-            'A' => &[
-                (20.0, 10.0, 0.60),
-                (30.0, 15.0, 0.62),
-                (45.0, 22.0, 0.65),
-            ],
-            'B' => &[
-                (20.0, 8.0, 0.62),
-                (30.0, 12.0, 0.62),
-                (50.0, 20.0, 0.60),
-            ],
-            'C' => &[
-                (20.0, 8.0, 0.62),
-                (30.0, 12.0, 0.60),
-                (45.0, 18.0, 0.58),
-            ],
-            'D' => &[
-                (15.0, 6.0, 0.70),
-                (25.0, 8.0, 0.66),
-                (40.0, 12.0, 0.62),
-            ],
+            'A' => &[(20.0, 10.0, 0.60), (30.0, 15.0, 0.62), (45.0, 22.0, 0.65)],
+            'B' => &[(20.0, 8.0, 0.62), (30.0, 12.0, 0.62), (50.0, 20.0, 0.60)],
+            'C' => &[(20.0, 8.0, 0.62), (30.0, 12.0, 0.60), (45.0, 18.0, 0.58)],
+            'D' => &[(15.0, 6.0, 0.70), (25.0, 8.0, 0.66), (40.0, 12.0, 0.62)],
             _ => &[(1.0, 1.0, 1.0)],
         };
         for (t, m, s) in rows {
@@ -986,7 +979,7 @@ fn recs_passed(hashes: &[String], expected: &str) -> usize {
 }
 
 /// Hash a file, so an expected hash can be pinned into
-/// `tracks/<track>/verification/expected/<output>.sha256`.
+/// `<track>/verification/expected/<output>.sha256`.
 ///
 /// Small files are hashed in one shot; large ones are streamed, so a 312 MB
 /// input never has to fit in memory.
@@ -1048,7 +1041,7 @@ fn cmd_lockdown(opts: &Opts) -> Result<(), String> {
 
 fn cmd_contract(_opts: &Opts) -> Result<(), String> {
     let all = contract::tracks();
-    println!("FROZEN HEL1 CONTRACT");
+    println!("FROZEN FSN1 CONTRACT");
     println!(
         "weights: T {:.2}  M {:.2}  S {:.2}  D {:.2}  (sum {:.2})",
         contract::W_T,
@@ -1059,7 +1052,9 @@ fn cmd_contract(_opts: &Opts) -> Result<(), String> {
     );
     println!(
         "axis caps: memory {}x, S {}x, D {}x, wall time uncapped",
-        contract::AXIS_CAP, contract::S_FACTOR_CAP, contract::D_FACTOR_CAP
+        contract::AXIS_CAP,
+        contract::S_FACTOR_CAP,
+        contract::D_FACTOR_CAP
     );
     println!("speed score = 50*log10(K), clamped to 0..100");
     println!();

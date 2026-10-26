@@ -8,14 +8,14 @@ docs/RULE-CHANGES-oct28.md. Both axes are now penalties only: neither can score
 above 1.0, so nothing here can earn points by shrinking or restructuring.
 
 S  source size, weight 0.15
-   "counted in code lines (by scc, after your language's formatter), and it can
-    only cost you. Its factor is capped at 1.0, so it no longer rewards the
-    tersest language."
-   Measured REPO-WIDE: "S covers everything in your repo at the recorded
-   commit, except registry packages first published before Oct 1 by people
-   outside your team. A library you wrote counts as source wherever it lives."
-   The old definition — bytes after comment stripping and identifier
-   normalisation — is superseded and no longer approximates the scored value.
+   "Source size is code lines counted by scc after your language's formatter,
+    across each track's folder, minus registry packages first published before
+    Oct 1, 2026 by people outside the team. It covers everything in the
+    track's folder at the recorded commit, which is all the build can see."
+   The factor is capped at 1.0: it can only cost, never pay.
+   The old definitions — bytes after comment stripping, identifier
+   normalisation, or a repo-wide count — are superseded and do not approximate
+   the scored quantity.
 
 D  dependency weight, weight 0.15
    D = 1 + (direct non-stdlib runtime dependencies in your manifest)
@@ -51,16 +51,16 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 
 TRACK_DIRS = {
-    "A": "A-ingest",
-    "B": "B-index",
-    "C": "C-join",
-    "D": "D-traverse",
+    "A": "track-A",
+    "B": "track-B",
+    "C": "track-C",
+    "D": "track-D",
 }
 
-# The published reference source size for Track A (the event page states
-# 3,180 B). Other tracks' reference sizes are not published; they come from
-# the Oct 28 frozen spec.
-REF_SOURCE_BYTES = {"A": 3180}
+# The published reference source size for Track A: 56 CODE LINES (the S unit
+# is code lines by scc). Other tracks' reference sizes are not published;
+# they come from the Oct 28 frozen spec.
+REF_SOURCE_LINES = {"A": 56}
 
 # The D formula from the Oct 28 rule change: D = 1 + the number of direct
 # non-stdlib runtime dependencies. Must match `d_value` in
@@ -204,46 +204,36 @@ def _fallback_code_lines(text: str) -> int:
 
 
 def measure_source(track_dir: Path) -> dict:
-    """Measure the S axis: CODE LINES, repo-wide, as `scc` counts them.
+    """Measure the S axis: code lines by scc over THIS TRACK'S FOLDER.
 
-    Changed before the Oct 28 freeze (docs/RULE-CHANGES-oct28.md §1):
-
-      * the unit is code lines, not bytes, and comments/blank lines do not
-        count, so the old comment-stripping and identifier-normalising
-        arithmetic no longer approximates the scored quantity;
-      * "S covers everything in your repo at the recorded commit", so the
-        repo-wide count is the scored numerator's denominator — not just the
-        track's own `src/`;
-      * the factor is capped at 1.0, so being small earns nothing.
-
-    The per-track count is still reported, because it is what a developer can
-    act on, but `repo_code_lines` is the number that feeds the axis.
+    After the Oct 28 change, S is counted with scc across the track's folder
+    ("all the build can see"), minus registry packages first published before
+    Oct 1, 2026 by people outside the team. We ship no registry packages, so
+    the folder is the scope. The factor is capped at 1.0: being small earns
+    nothing.
     """
-    files = sorted((track_dir / "src").rglob("*.rs")) if (track_dir / "src").exists() else []
-    track_lines = 0
-    per_file = []
-    used_scc = _scc_code_lines(track_dir / "src")
-    for f in files:
-        text = f.read_bytes().decode("utf-8", errors="replace")
-        n = _fallback_code_lines(text)
-        track_lines += n
-        per_file.append({"file": str(f.relative_to(ROOT)), "code_lines": n})
-
-    # Repo-wide: what the rule actually counts.
-    repo_scc = _scc_code_lines(ROOT)
-    repo_lines = repo_scc if repo_scc is not None else _fallback_code_lines(
-        "\n".join(
-            p.read_bytes().decode("utf-8", errors="replace")
-            for p in sorted(ROOT.rglob("*.rs"))
-            if "target" not in p.parts and "vendor" not in p.parts
-        )
+    src_files = sorted(
+        p
+        for p in track_dir.rglob("*")
+        if p.is_file()
+        and "target" not in p.parts
+        and "verification" not in p.parts
+        and p.name not in ("run", "run.exe", "run.pdb")
+        and not p.name.endswith((".pdb", ".exe"))
     )
+    per_file = []
+    fallback = 0
+    for f in src_files:
+        n = _fallback_code_lines(f.read_bytes().decode("utf-8", errors="replace"))
+        fallback += n
+        per_file.append({"file": str(f.relative_to(ROOT)), "code_lines": n})
+    scc_lines = _scc_code_lines(track_dir)
     return {
         "files": per_file,
-        "track_code_lines": track_lines,
-        "repo_code_lines": repo_lines,
-        "counter": "scc" if (used_scc is not None and repo_scc is not None) else "fallback(non-blank,non-comment)",
-        "scc_available": used_scc is not None,
+        "code_lines": scc_lines if scc_lines is not None else fallback,
+        "counter": "scc" if scc_lines is not None else "fallback(non-blank,non-comment)",
+        "scc_available": scc_lines is not None,
+        "fallback_code_lines": fallback,
     }
 
 
@@ -276,9 +266,7 @@ def measure_dependencies(track_dir: Path) -> dict:
                 continue
             if in_deps and "=" in s and not s.startswith("#"):
                 name = s.split("=")[0].strip()
-                # `speeddemon-core` is this repository's own code: it counts as
-                # SOURCE under S, not as a third-party dependency under D.
-                if name and name != "speeddemon-core":
+                if name:
                     deps.append(name)
 
     # vendored third-party source (NOT our own crate's source) — reported only
@@ -303,14 +291,13 @@ def measure_dependencies(track_dir: Path) -> dict:
 # ── report ────────────────────────────────────────────────────────────────
 
 def report(track: str, as_json: bool) -> dict:
-    tdir = ROOT / "tracks" / TRACK_DIRS[track]
+    tdir = ROOT / TRACK_DIRS[track]
     s = measure_source(tdir)
     d = measure_dependencies(tdir)
-    ref = REF_SOURCE_BYTES.get(track)
-    # S is repo-wide code lines now, so the ratio uses the repo-wide count.
-    # REF_SOURCE_BYTES still holds the superseded byte figure, so a ratio from
-    # it is NOT the scored ratio and must not be presented as one.
-    s_ratio = (ref / s["repo_code_lines"]) if (ref and s["repo_code_lines"]) else None
+    ref = REF_SOURCE_LINES.get(track)
+    # S is code lines by scc over the track's own folder, so the ratio uses
+    # that count against the reference (published: Track A = 56 lines).
+    s_ratio = (ref / s["code_lines"]) if (ref and s["code_lines"]) else None
     # "Its factor is capped at 1.0" — the axis can only cost.
     s_factor = min(1.0, s_ratio ** 0.15) if s_ratio else None
 
@@ -324,16 +311,13 @@ def report(track: str, as_json: bool) -> dict:
     }
     if not as_json:
         print(f"\n=== TRACK {track} ({TRACK_DIRS[track]}) ===")
-        print(f"  S  source size — CODE LINES (scc), repo-wide")
+        print(f"  S  source size — CODE LINES (scc) over {TRACK_DIRS[track]}/")
         print(f"     counter          : {s['counter']}")
-        print(f"     repo code lines  : {s['repo_code_lines']}   <- the S axis")
-        print(f"     this track only  : {s['track_code_lines']}")
+        print(f"     folder code lines: {s['code_lines']}   <- the S axis")
         print(f"     S factor capped at 1.0: being smaller earns nothing")
         if s_ratio is not None:
-            print(f"     vs superseded reference ({ref} B — bytes, not lines): "
+            print(f"     vs reference ({ref} code lines): "
                   f"ratio {s_ratio:.4f}x  factor {s_factor:.4f}")
-            print("     NOTE: not the scored value; the reference must be "
-                  "re-derived in code lines")
         else:
             print("     vs reference      : (reference code lines not published — "
                   "pin it from the Oct 28 spec)")

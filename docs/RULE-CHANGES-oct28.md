@@ -48,19 +48,22 @@ Consequences:
 
 > "D counts direct dependencies declared in your manifest, so ordinary
 > libraries cost a predictable amount: one dependency gives a factor of 0.90."
+> (That 0.90 is the K factor for one dependency: `(D_ref/D)^0.15 = (1/2)^0.15
+> ≈ 0.90`. The formula itself is `D = 1 + dependencies` — NOT `0.90^deps`.)
 
 | | Before (this repo) | Now |
 |---|---|---|
-| Formula | `D = 1 + (non-stdlib runtime deps) + (vendored source bytes / 50000)` (`measure_axes.py:14`) | `D = 0.90^(direct dependencies declared in the manifest)` |
-| One dependency | ≈ 2.0 → a *large* penalty | **0.90** → a small, predictable penalty |
-| Zero dependencies | 1.0 | **1.0** |
+| Formula | `D = 1 + (non-stdlib runtime deps) + (vendored source bytes / 50000)` (`measure_axes.py` — REPLACED) | `D = 1 + direct non-stdlib runtime dependencies` (the vendored-bytes term is gone) |
+| One dependency | ≥ 2.0 + vendor bytes → a *large* penalty | `D = 2.0`; on K a factor `(1/2)^0.15 ≈ 0.90` — small and predictable |
+| Zero dependencies | 1.0 | **1.0** (the baseline; nothing to lose) |
 
 Consequences:
-* The old formula punished a single dependency far harder than the new one, so
-  every "D = 1.0000" row stays correct (zero deps → 1.0 either way), but any
-  document that quotes the old formula is now misleading.
-* The `declared_dependencies == 0` gate in `harness lockdown` is still the right
-  *check* (we ship zero), but it must no longer be justified by the old formula.
+* With zero dependencies `D = 1.0` exactly — every "D = 1.0000" row in this
+  repo is correct, and adding ANY crate immediately costs `(1/2)^0.15 ≈ 0.90`
+  per crate against the reference's `D_ref = 1.00`.
+* The `declared_dependencies == 0` gate in `harness lockdown` is still the
+  right *check* (we ship zero), and it is now justified directly by the Oct 28
+  formula: `D = 1 + deps`, so zero deps ⇒ the best possible D factor.
 
 ## 3. S loophole closed — a library you wrote counts as source
 
@@ -92,13 +95,12 @@ whole `docker build`, PGO included.
 > train on input you generate with the published generator inside the build. The
 > image may not ship cached outputs."
 
-This is exactly the shape `tooling/pgo-build.sh` already has: train on generated
-fixtures inside the build, ship no outputs. Two checks follow:
-* the build must not read `/data` (it does not — fixtures are generated), and
-* **the image must not ship cached outputs** — `verification/data/` is already
-  excluded by `.dockerignore`; the check is that no track *output* file
-  (`ingest.txt`, `index.txt`, `join.txt`, `traverse.txt`, `corpus.sd`) is
-  present in the final image.
+Build-time training (PGO, a JVM AOT cache, native-image) is allowed on generated
+fixtures; it is an in-window decision once real code exists. Two checks follow:
+* the build must not read `/data` (fixtures are generated, never the dataset), and
+* **the image must not ship cached outputs** — no track *output* file
+  (`ingest.txt`, `index.txt`, `join.txt`, `traverse.txt`) may be present in the
+  final image.
 
 ## 6. M — unchanged, and already what we do
 
@@ -119,10 +121,11 @@ from it must be marked unverifiable.
 * No I/O-bound track this edition (F is deferred); `io_uring` is blocked by
   Docker's default seccomp profile, `mmap` works. Nothing in this repo planned
   an I/O track or relied on `io_uring`.
-* The scoring box is a dedicated **Hetzner EX44 (Intel i5-13500)**, Helsinki,
-  runs pinned to its **six performance cores (12 threads)**, turbo off. This
-  matches the repo's `--cpuset-cpus=0-11` and the "12 threads on 6 P-cores"
-  language already used in the Track A spec.
+* The scoring box is a dedicated **Hetzner EX44 (Intel i5-13500)** at
+  **Falkenstein (fsn1)** — not Helsinki — running pinned to
+  `--cpuset-cpus=0-11` with an **8 GB memory cap** and `no_turbo`. This
+  matches the repo's `--cpuset-cpus=0-11 --memory=8g` flags in the
+  verify/bench scripts and in the run commands shown in every PERF.md.
 
 ---
 
@@ -132,9 +135,9 @@ from it must be marked unverifiable.
 |---|---|---|
 | S measured as code lines by `scc` | `tooling/measure_axes.py` | **changed** — counts code lines, `scc` when available |
 | S factor capped at 1.0 | `verification/harness/src/contract.rs` | **changed** — `S_FACTOR_CAP` |
-| D = 0.90^deps | `verification/harness/src/contract.rs`, `tooling/measure_axes.py` | **changed** — `D_FACTOR_PER_DEP` |
+| D = 1 + direct deps | `verification/harness/src/contract.rs` (`d_value`), `tooling/measure_axes.py` | implements the Oct 28 formula (`D_REF + n_deps`); `0.90^deps` was never the rule |
 | Machine-readable values | `verification/contract.toml` | **changed** — `[rules_oct28]` |
-| Digest-pinned base images | `Dockerfile`, `tracks/*/Dockerfile` | **enforced** by `tooling/check_base_pinned.py`; digests still to be filled |
+| Digest-pinned base images | `track-*/Dockerfile` — one per track, build + runtime stages | **enforced** by `tooling/check_base_pinned.py` against `tooling/base-image.txt`; both digests pinned (rust:1-slim-trixie, debian:13-slim) |
 | Build ≤ 600 s, image ≤ 2048 MB | `verification/pre-freeze.ps1`, `harness lockdown` | **recorded** as gates; need the measured values on the scoring box |
 | No cached outputs in the image | `.dockerignore` + `tooling/check_base_pinned.py` | **checked** |
 | M from the kernel counter only | `verification/harness/src/cgroup.rs` | already correct; RSS fallback must stay labelled |

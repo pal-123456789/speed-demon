@@ -1,7 +1,7 @@
 //! The pre-freeze lockdown, in Rust.
 //!
 //! This is the same checklist as `verification/pre-freeze.ps1`, but
-//! implemented natively so it runs on the scoring box (HEL1 is Debian; there
+//! implemented natively so it runs on the scoring box (fsn1 is Debian; there
 //! is no PowerShell there). One implementation of each gate, usable from
 //! both platforms, is worth more than two implementations that drift.
 //!
@@ -190,11 +190,11 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
         let Some(track) = tracks.get(id) else {
             ld.fail(
                 &format!("track {id} exists"),
-                "unknown track letter (expected A|B|C|D|E)",
+                "unknown track letter (expected A|B|C|D)",
             );
             continue;
         };
-        let dir = root.join("tracks").join(track.dir);
+        let dir = root.join(track.dir);
         ld.pass_track_header(track);
 
         for required in [
@@ -217,49 +217,30 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
             ld.fail("required dir: src/", "missing");
         }
 
-        // The D-axis honesty, from the track's own declaration — and now
-        // cross-checked against the manifest it claims to describe.
+        // The D-axis honesty, from the track's own declaration. The track
+        // folder has no Cargo.toml by design: it builds with rustc directly,
+        // so zero manifest dependencies is a fact, not a claim. If a
+        // Cargo.toml ever appears it must be reflected in declared_dependencies.
         let manifest = dir.join(".speed-demon.toml");
         let declared = toml_value(&manifest, "declared_dependencies")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(-1);
-        let actual = count_direct_dependencies(&dir.join("Cargo.toml"));
-        match actual {
-            Some(n) if n as i64 == declared => {
-                let factor = contract::d_ratio(n as u32);
-                ld.pass(
-                    "D axis: declared_dependencies == 0",
-                    &format!("declared={declared} (matches Cargo.toml), D factor {factor:.4}"),
-                );
-            }
-            Some(n) => {
-                // The declared number and the manifest disagree: one of them
-                // is wrong, and we cannot tell which, so the check fails.
-                ld.fail(
-                    "D axis: declared_dependencies == 0",
-                    &format!(
-                        "declared={declared} but Cargo.toml declares {n} direct \
-                         dependency(ies); D factor would be {:.4}",
-                        contract::d_ratio(n as u32)
-                    ),
-                );
-            }
-            None => {
-                ld.fail(
-                    "D axis: declared_dependencies == 0",
-                    "cannot read the track's Cargo.toml, so the declaration cannot be checked",
-                );
-            }
-        }
-        let vendored = toml_value(&manifest, "vendored_dependency_bytes")
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(-1);
-        if vendored == 0 {
-            ld.pass("D axis: no vendored dependency bytes", "vendored=0");
+        let actual = count_direct_dependencies(&dir.join("Cargo.toml")).unwrap_or(0) as i64;
+        if actual == declared && declared == 0 {
+            let factor = contract::d_ratio(actual as u32);
+            ld.pass(
+                "D axis: declared_dependencies == 0",
+                &format!("declared={declared}, D factor {factor:.4}"),
+            );
         } else {
+            // The declared number and reality disagree (or a manifest with
+            // dependencies appeared): one of them is wrong, so the check fails.
             ld.fail(
-                "D axis: no vendored dependency bytes",
-                &format!("vendored={vendored}"),
+                "D axis: declared_dependencies == 0",
+                &format!(
+                    "declared={declared}, manifest has {actual} direct dep(s); \
+                     D = 1 + deps, so the declaration must match reality"
+                ),
             );
         }
 
@@ -311,7 +292,7 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
             None => ld.fail(
                 "sample SHA-256 green",
                 &format!(
-                    "no valid hash in tracks/{}/verification/expected/{}.sha256 \
+                    "no valid hash in {}/verification/expected/{}.sha256 \
                      (need 64 hex chars) — the correctness gate cannot be verified",
                     track.dir, track.output
                 ),
@@ -332,20 +313,9 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
         ld.fail("OSI licence present", "LICENSE missing");
     }
 
-    if root.join("Dockerfile").is_file() {
-        ld.pass("scored Dockerfile present at the repository root", "");
-    } else {
-        ld.fail(
-            "scored Dockerfile present at the repository root",
-            "missing",
-        );
-    }
-
-    if root.join("run").is_file() {
-        ld.pass("runtime dispatcher present", "");
-    } else {
-        ld.fail("runtime dispatcher present", "missing");
-    }
+    // The scored image is built per track folder (track-*/Dockerfile), and
+    // the required-files loop above already verifies each one. There is no
+    // repository-root Dockerfile or runtime dispatcher any more.
 
     // ── git state ───────────────────────────────────────────────────────
     // The submission must be a public repository with an OSI licence at the
@@ -497,7 +467,7 @@ pub fn find_sentinel(src: &Path) -> Result<Option<String>, String> {
 pub fn last_measurement(root: &Path, id: char) -> Option<ledger::RunRecord> {
     let path: PathBuf = root.join("verification").join("ledger.jsonl");
     let recs = ledger::read_all(&path).ok()?;
-    recs.into_iter().filter(|r| r.track == id).next_back()
+    recs.into_iter().rfind(|r| r.track == id)
 }
 
 #[cfg(test)]
@@ -534,7 +504,7 @@ mod tests {
     #[test]
     fn a_placeholder_hash_is_not_a_pin() {
         let root = std::env::temp_dir().join(format!("sd-pin-{}", std::process::id()));
-        let dir = root.join("A-ingest");
+        let dir = root.join("track-A");
         let expected = dir.join("verification").join("expected");
         fs::create_dir_all(&expected).unwrap();
         let pin = expected.join("ingest.txt.sha256");

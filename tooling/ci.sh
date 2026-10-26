@@ -9,12 +9,12 @@
 # fails in seconds rather than after a five-minute Docker build:
 #
 #   0  rule 05 compliance     (pre-kickoff: no solution code in the tree)
-#   1  format drift           (rustfmt --check)
-#   2  lints                  (clippy -D warnings)
-#   3  unit tests             (core + harness)
-#   4  offline build          (--offline, and the vendored-toolchain path)
-#   5  D axis                 (no non-stdlib dependencies, anywhere)
-#   6  S axis                 (source size, per track)
+#   1  format drift           (rustfmt --check, harness)
+#   2  lints                  (clippy -D warnings, harness)
+#   3  unit tests             (harness)
+#   4  offline build          (harness, --offline)
+#   5  scored build path      (per-track build.sh: rustc direct, offline)
+#   6  S and D axes           (code lines per track folder; dependency honesty)
 #   7  per-track gates        (verify: determinism, sandbox, timeout)
 #   8  scaffold sentinels     (a stub must never reach the freeze)
 #   9  the pre-freeze lockdown
@@ -92,25 +92,33 @@ fi
 
 # ── 1. format ─────────────────────────────────────────────────────────────
 step "FORMAT (rustfmt --check)"
-if cargo fmt --all -- --check >/tmp/sd-fmt.txt 2>&1; then
-  ok "no formatting drift"
+if cargo fmt --manifest-path verification/harness/Cargo.toml -- --check >/tmp/sd-fmt.txt 2>&1; then
+  ok "no formatting drift (harness)"
 else
-  cat /tmp/sd-fmt.txt
-  fail "rustfmt drift — run: cargo fmt --all"
+  if grep -qiE "component.*rustfmt|rustup|no such command|unrecognized" /tmp/sd-fmt.txt; then
+    skip "rustfmt is not installed on this host"
+  else
+    cat /tmp/sd-fmt.txt
+    fail "rustfmt drift — run: cargo fmt --manifest-path verification/harness/Cargo.toml"
+  fi
 fi
 
 # ── 2. lints ──────────────────────────────────────────────────────────────
 step "LINTS (clippy -D warnings)"
-if cargo clippy --all-targets --offline -- -D warnings >/tmp/sd-clippy.txt 2>&1; then
-  ok "no clippy warnings"
+if cargo clippy --manifest-path verification/harness/Cargo.toml --all-targets --offline -- -D warnings >/tmp/sd-clippy.txt 2>&1; then
+  ok "no clippy warnings (harness)"
 else
-  cat /tmp/sd-clippy.txt
-  fail "clippy warnings (see above)"
+  if grep -qiE "component.*clippy|rustup|no such command|unrecognized" /tmp/sd-clippy.txt; then
+    skip "clippy is not installed on this host"
+  else
+    cat /tmp/sd-clippy.txt
+    fail "clippy warnings (see above)"
+  fi
 fi
 
 # ── 3. tests ──────────────────────────────────────────────────────────────
 step "UNIT TESTS"
-if cargo test --offline >/tmp/sd-test.txt 2>&1; then
+if cargo test --offline --manifest-path verification/harness/Cargo.toml >/tmp/sd-test.txt 2>&1; then
   # cargo test can exit 0 while reporting no passing test at all (a changed
   # output format, a filtered run). Counting "test result: ok" lines and
   # printing the count without checking it produced "PASS 0 test binaries
@@ -131,46 +139,30 @@ fi
 
 # ── 5. offline build ──────────────────────────────────────────────────────
 step "OFFLINE BUILD (--offline, no network)"
-if cargo build --release --offline >/tmp/sd-build.txt 2>&1; then
+if cargo build --release --offline --manifest-path verification/harness/Cargo.toml >/tmp/sd-build.txt 2>&1; then
   ok "release build succeeded offline"
 else
   tail -40 /tmp/sd-build.txt
   fail "offline build failed"
 fi
 
-# The SCORED image does NOT use cargo: it runs build-all.sh, which calls
-# rustc directly and statically links through the toolchain's own rust-lld.
-# That path has failed three separate ways (hyphenated crate name, an
-# uninstalled target, an unstable linker flavor) and cargo never touches it,
-# so it gets its own gate.
-step "SCORED BUILD PATH (build-all.sh: rustc direct, static musl)"
-if sh ./build-all.sh >/tmp/sd-scorebuild.txt 2>&1; then
-  BINS="$(ls bin/speeddemon-? 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "$BINS" = "5" ]; then
-    ok "all 5 binaries built and statically linked"
-    grep -m1 'target .*linker' /tmp/sd-scorebuild.txt | sed 's/^/  /'
+# The SCORED image is built per track folder: `docker build ... track-$TRACK`
+# with the track folder as the context. Each track's build.sh compiles its
+# self-contained src/ with rustc directly inside the digest-pinned rust image —
+# no cargo, no registry, no network. That exact path is what the image uses, so
+# it gets its own gate.
+step "SCORED BUILD PATH (per-track build.sh: rustc direct, offline)"
+if sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh \
+   >/tmp/sd-scorebuild.txt 2>&1; then
+  RUNS="$(ls track-?/run 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$RUNS" = "4" ]; then
+    ok "all 4 track folders built ./run (rustc, offline)"
   else
-    fail "expected 5 binaries, found $BINS"
+    fail "expected 4 binaries, found $RUNS"
   fi
 else
   tail -25 /tmp/sd-scorebuild.txt
   fail "the scored build path is broken — the image would fail to build"
-fi
-
-step "RUN DISPATCHER (TRACK routing, loud failures)"
-if sh tooling/test-dispatcher.sh >/tmp/sd-dispatch.txt 2>&1; then
-  ok "dispatcher self-test passed"
-else
-  cat /tmp/sd-dispatch.txt
-  fail "run dispatcher misroutes or fails silently"
-fi
-
-step "PER-TRACK DOCKERFILES (generated, cannot drift)"
-if "$PY" tooling/gen_dockerfiles.py --check >/tmp/sd-docker.txt 2>&1; then
-  ok "all 5 per-track Dockerfiles match the template"
-else
-  cat /tmp/sd-docker.txt
-  fail "a per-track Dockerfile was hand-edited — run: python tooling/gen_dockerfiles.py"
 fi
 
 # The rules announced before the Oct 28 freeze require the final image to
@@ -196,16 +188,10 @@ else
   fail "a .ps1 would fail to parse under Windows PowerShell 5.1"
 fi
 
-# The PGO profile must reach the compiler as a FILE. `-C profile-use=<dir>`
-# is only a warning ("is a directory") and rustc still exits 0, so the build
-# looked like it used a profile when it used none.
-step "PGO WIRING (the profile reaches rustc as a file)"
-if sh tooling/check_pgo_wiring.sh >/tmp/sd-pgowiring.txt 2>&1; then
-  ok "the merged profile is copied into the image context and passed as a file"
-else
-  grep -E 'FAIL|missing|not ' /tmp/sd-pgowiring.txt | head -20 | sed 's/^/  /'
-  fail "the PGO profile cannot reach rustc — PGO would silently do nothing"
-fi
+# The PGO recipe is an in-window decision once the real implementations exist;
+# nothing wired for the pre-kickoff scaffolds. (Build-time training is allowed
+# per the rules, but a profile of a stub is worse than none, so there is no PGO
+# gate until H0.)
 
 # A non-executable pre-commit hook is silently ignored by git on Linux, and a
 # non-executable build.sh fails only when someone finally runs it. Neither
@@ -218,17 +204,18 @@ else
   fail "a script lost its executable bit — git update-index --chmod=+x <file>"
 fi
 
-# Every other gate tests a piece. This one tests the ASSEMBLY: one dispatcher,
-# TRACK chosen at run time, /data read-only, /out writable, exactly one file
-# out. A piece can be green while the assembly is broken.
+# Every other gate tests a piece. This one tests the ASSEMBLY: each track's
+# binary run against a real data dir + empty out dir, /data-style read-only
+# input, /out writable, exactly one file out. A piece can be green while the
+# assembly is broken.
 #
-# On Windows the track binaries are PE files and cannot be executed by the
-# dispatcher, so the test only runs where they are ELF. Try WSL, which is a
+# On Windows the track binaries are PE files; the functional gates still run
+# (the binary executes fine), only the ELF assertion is N/A. WSL would be a
 # real Linux kernel — the strongest available substitute for the scoring box.
-step "END-TO-END SANDBOX (dispatcher + all 5 tracks, real Linux)"
-if [ -x bin/speeddemon-a ]; then
+step "END-TO-END SANDBOX (all 4 track binaries, real Linux)"
+if [ -x track-A/run ]; then
   if sh tooling/e2e-sandbox.sh >/tmp/sd-e2e.txt 2>&1; then
-    ok "all 5 tracks: dispatch, static link, 1 file out, determinism, failure modes"
+    ok "all 4 tracks: binary runs, 1 file out, determinism, failure modes"
   else
     grep -E 'FAIL|passed,' /tmp/sd-e2e.txt | sed 's/^/  /'
     fail "end-to-end sandbox test failed"
@@ -238,8 +225,8 @@ elif command -v wsl.exe >/dev/null 2>&1 || command -v wsl >/dev/null 2>&1; then
   # Translate the repo path to its /mnt/<drive>/... form for the WSL side.
   WSL_ROOT="$("$WSL_BIN" -e sh -c 'wslpath -a "$1" 2>/dev/null' _ "$PWD" 2>/dev/null | tr -d '\r')"
   if [ -n "${WSL_ROOT:-}" ] &&
-     "$WSL_BIN" -e sh -c "cd '$WSL_ROOT' && sh tooling/e2e-sandbox.sh" >/tmp/sd-e2e.txt 2>&1; then
-    ok "all 5 tracks via WSL: dispatch, static link, 1 file out, determinism"
+     "$WSL_BIN" -e sh -c "cd '$WSL_ROOT' && sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh && sh tooling/e2e-sandbox.sh" >/tmp/sd-e2e.txt 2>&1; then
+    ok "all 4 tracks via WSL: build, run, 1 file out, determinism"
   else
     grep -E 'FAIL|passed,|FATAL' /tmp/sd-e2e.txt 2>/dev/null | sed 's/^/  /'
     fail "end-to-end sandbox test failed under WSL"
@@ -272,18 +259,31 @@ fi
 
 # ── 7. per-track gates ────────────────────────────────────────────────────
 step "TRACK GATES (determinism, sandbox, timeout)"
-HARNESS="target/release/sd-harness"
+HARNESS="verification/harness/target/release/sd-harness"
+if [ ! -x "$HARNESS" ] && [ -x "$HARNESS.exe" ]; then
+  HARNESS="$HARNESS.exe"
+fi
 if [ ! -x "$HARNESS" ]; then
-  cargo build --release --offline -p sd-harness >/dev/null 2>&1 || true
+  cargo build --release --offline --manifest-path verification/harness/Cargo.toml >/dev/null 2>&1 || true
 fi
 for t in $(echo "$TRACKS" | tr ',' ' '); do
   tt="$(echo "$t" | tr '[:lower:]' '[:upper:]')"
   if [ "$FAST" = "1" ]; then
     skip "track $tt gates skipped (--fast)"
+  elif [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+    # The harness spawns the track binary, which on this host is a Windows PE
+    # build; the definitive ELF semantics need a Linux host (or the WSL e2e
+    # run in gate 10, which covers the same functional gates).
+    skip "track $tt gates skipped (harness verify needs Linux ELF binaries; e2e suite covers this host)"
   else
     # The Rust harness is the canonical gate runner: the same code runs on
     # the scoring box, where PowerShell does not exist.
-    if "$HARNESS" verify --track "$tt" --no-docker >/tmp/sd-track-$tt.txt 2>&1; then
+    if [ -x "$REPO/track-$tt/run" ]; then
+      BIN="$REPO/track-$tt/run"
+    else
+      BIN="$REPO/track-$tt/run.exe"
+    fi
+    if "$HARNESS" verify --track "$tt" --no-docker --bin "$BIN" >/tmp/sd-track-$tt.txt 2>&1; then
       ok "track $tt gates passed"
     else
       cat /tmp/sd-track-$tt.txt
@@ -303,25 +303,33 @@ done
 step "SCAFFOLD SENTINELS (mode-aware)"
 NOW_EPOCH="$(date -u +%s)"
 KICKOFF_EPOCH="$(date -u -d '2026-10-30T18:00:00Z' +%s 2>/dev/null || echo 0)"
-SENT_FILES="$(grep -rl 'SCAFFOLD_NOT_IMPLEMENTED' tracks/*/src 2>/dev/null | wc -l | tr -d ' ')"
+SENT_FILES="$(grep -rl 'SCAFFOLD_NOT_IMPLEMENTED' track-*/src 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$KICKOFF_EPOCH" != "0" ] && [ "$NOW_EPOCH" -lt "$KICKOFF_EPOCH" ]; then
-  if [ "$SENT_FILES" = "5" ]; then
-    ok "pre-kickoff: all 5 tracks are still scaffolds (rule 05 holds)"
+  if [ "$SENT_FILES" = "4" ]; then
+    ok "pre-kickoff: all 4 track folders are still scaffolds (rule 05 holds)"
   else
-    fail "pre-kickoff: $SENT_FILES/5 tracks carry a sentinel — a track lost its stub before the window opened"
+    fail "pre-kickoff: $SENT_FILES/4 track folders carry a sentinel — a track lost its stub before the window opened"
   fi
 else
   if [ "$SENT_FILES" = "0" ]; then
     ok "in-window: no scaffold sentinel in the tree"
   else
-    fail "$SENT_FILES track(s) still contain a scaffold sentinel — that track would score zero"
+    fail "$SENT_FILES track folder(s) still contain a scaffold sentinel — that track would score zero"
   fi
 fi
 
 # ── 9. lockdown ───────────────────────────────────────────────────────────
+# The lockdown is the FREEZE-DAY gate (tree clean, hashes pinned, public
+# remote, no sentinel). Pre-kickoff those assertions are all false BY DESIGN
+# — the scaffold sentinel is mandatory, the tree is mid-edit, and the public
+# repo lands on Nov 2 — so running it before kickoff only trains people to
+# ignore a red gate. It runs from kickoff onwards; KICKOFF_EPOCH comes from
+# the same clock as the sentinel gate above.
 step "PRE-FREEZE LOCKDOWN"
 if [ "$FAST" = "1" ]; then
   skip "lockdown skipped (--fast)"
+elif [ "$KICKOFF_EPOCH" != "0" ] && [ "$NOW_EPOCH" -lt "$KICKOFF_EPOCH" ]; then
+  skip "lockdown is a freeze-day gate — it runs from kickoff (pre-kickoff the sentinel, tree, and remote assertions are false by design)"
 else
   if "$HARNESS" lockdown >/tmp/sd-freeze.txt 2>&1; then
     ok "lockdown passed"

@@ -10,9 +10,10 @@ docs/RULE-CHANGES-oct28.md:
   * D = 1 + the number of direct non-stdlib runtime dependencies declared in
     the manifest; the vendored-bytes term is gone. This repository declares
     none, so D must be exactly 1.0 on every track.
-  * S is counted in code lines, repo-wide, and its factor is capped at 1.0.
-    The cap means being small earns nothing, so a ratio above 1.0 is not an
-    error — but it must never be applied uncapped anywhere else.
+  * S is counted in code lines by scc across each track's folder, and its
+    factor is capped at 1.0. The cap means being small earns nothing, so a
+    ratio above 1.0 is not an error — but it must never be applied uncapped
+    anywhere else.
 
 Exit status: 0 all assertions hold, 1 an assertion failed, 2 the input was
 unusable.
@@ -73,11 +74,11 @@ def main(argv: list[str]) -> int:
                 f"track {track}: zero dependencies but D = {dval:.4f}, expected 1.0000"
             )
 
-        lines = s.get("repo_code_lines")
+        lines = s.get("code_lines")
         if not lines:
-            failures.append(f"track {track}: no repo code lines were measured")
+            failures.append(f"track {track}: no code lines were measured")
         else:
-            print(f"S track {track}: {lines} repo code lines "
+            print(f"S track {track}: {lines} code lines in the track folder "
                   f"(counter: {s.get('counter', '?')})")
         print(f"D track {track}: D = {dval:.4f}, {deps} direct dependencies")
 

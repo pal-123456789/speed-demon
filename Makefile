@@ -1,27 +1,28 @@
 .PHONY: help verify bench freeze-check fmt clippy kcalc test axes fixtures docs \
-        guard harness ci pgo prewarm plan hash clean build spec dockerfiles dispatch
+        guard harness ci plan prewarm hash build spec clean
 
-# The campaign is a Rust workspace, but the tooling is Python and the
-# verification is split between PowerShell (Windows dev) and a Rust harness
-# (the scoring box). The `harness` targets are the ones that matter on
-# HEL1, where there is no PowerShell and no Python.
+# The tracks are self-contained rustc-only folders (track-A..track-D); the
+# verification harness is a standalone Rust package at verification/harness;
+# the tooling is Python. The `harness` targets are the ones that matter on
+# fsn1, where there is no PowerShell and no Python.
 #
-# `pwsh` was hardcoded in the verify/bench/freeze-check targets. This host has
-# only Windows PowerShell 5.1, so those three targets simply did not run here.
-# They now pick whichever PowerShell exists, and fall back to the Rust harness
-# (the same checklist) when neither does.
+# `python3` is hardcoded nowhere: some hosts ship only `python` (Windows,
+# slim containers), so make picks whichever interpreter exists.
+
+PY := $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null)
+HMANIFEST := verification/harness/Cargo.toml
 
 help:
 	@echo "Speed Demon — campaign targets"
 	@echo ""
 	@echo "  BUILD"
-	@echo "    make build          — offline release build of everything"
-	@echo "    make test           — unit tests (core + harness)"
-	@echo "    make fmt            — rustfmt all crates"
-	@echo "    make clippy         — clippy, warnings denied"
+	@echo "    make build          — offline release build of the harness"
+	@echo "    make test           — harness unit tests"
+	@echo "    make fmt            — rustfmt the harness (best effort)"
+	@echo "    make clippy         — clippy, warnings denied (best effort)"
 	@echo ""
-	@echo "  GATES (the four organizers' gates)"
-	@echo "    make verify         — SHA + determinism + timeout + sandbox, all tracks"
+	@echo "  GATES (the three organizers' gates)"
+	@echo "    make verify         — correctness + timeout + sandbox, all tracks"
 	@echo "    make bench TRACK=A  — 5-run trimmed-mean bench for one track"
 	@echo "    make freeze-check   — the full pre-freeze lockdown"
 	@echo "    make ci             — every gate in one command (the one to run)"
@@ -29,8 +30,8 @@ help:
 	@echo "  THE SCORING BOX (Linux, no PowerShell needed)"
 	@echo "    make harness        — build the native harness"
 	@echo "    make plan           — the K budget for every track"
-	@echo "    make prewarm F=…    — pull a dataset into the page cache"
-	@echo "    make hash F=…       — SHA-256 of a file, for pinning an expected hash"
+	@echo "    make prewarm F=...    — pull a dataset into the page cache"
+	@echo "    make hash F=...       — SHA-256 of a file, for pinning an expected hash"
 	@echo ""
 	@echo "  TOOLING"
 	@echo "    make guard          — rule 05 pre-kickoff compliance check"
@@ -38,23 +39,20 @@ help:
 	@echo "    make axes           — the S and D axes"
 	@echo "    make fixtures       — regenerate the anti-overfit fixture corpus"
 	@echo "    make docs           — regenerate the per-track PERF.md and README.md"
-	@echo "    make dockerfiles    — regenerate the per-track Dockerfiles"
-	@echo "    make dispatch       — dispatcher self-test"
 	@echo "    make kcalc          — the K-coefficient calculator"
-	@echo "    make pgo TRACK=A    — offline profile-guided build"
 
 build:
-	cargo build --release --offline
+	cargo build --release --offline --manifest-path $(HMANIFEST)
 
 test:
-	cargo test --offline
+	cargo test --offline --manifest-path $(HMANIFEST)
 
 verify:
 	@PS=$$(command -v pwsh || command -v powershell); \
 	if [ -n "$$PS" ]; then \
 	  "$$PS" -NoProfile -File verification/verify.ps1 -All; \
 	else \
-	  cargo run --release --offline -p sd-harness -- verify --track "$(or $(TRACK),A)"; \
+	  cargo run --release --offline --manifest-path $(HMANIFEST) -- verify --track "$(or $(TRACK),A)"; \
 	fi
 
 bench:
@@ -62,7 +60,7 @@ bench:
 	if [ -n "$$PS" ]; then \
 	  "$$PS" -NoProfile -File verification/bench.ps1 -Track $(TRACK) -Runs 5; \
 	else \
-	  cargo run --release --offline -p sd-harness -- bench --track $(TRACK) --runs 5; \
+	  cargo run --release --offline --manifest-path $(HMANIFEST) -- bench --track $(TRACK) --runs 5; \
 	fi
 
 freeze-check:
@@ -70,7 +68,7 @@ freeze-check:
 	if [ -n "$$PS" ]; then \
 	  "$$PS" -NoProfile -File verification/pre-freeze.ps1 -All; \
 	else \
-	  cargo run --release --offline -p sd-harness -- lockdown; \
+	  cargo run --release --offline --manifest-path $(HMANIFEST) -- lockdown; \
 	fi
 
 # Every gate, in the cheapest-fails-first order. This is the command to run
@@ -79,49 +77,40 @@ ci:
 	sh tooling/ci.sh
 
 harness:
-	cargo build --release --offline -p sd-harness
+	cargo build --release --offline --manifest-path $(HMANIFEST)
 
 plan:
-	cargo run --release --offline -p sd-harness -- plan
+	cargo run --release --offline --manifest-path $(HMANIFEST) -- plan
 
 prewarm:
-	cargo run --release --offline -p sd-harness -- prewarm --file $(F)
+	cargo run --release --offline --manifest-path $(HMANIFEST) -- prewarm --file $(F)
 
 hash:
-	cargo run --release --offline -p sd-harness -- hash --file $(F)
+	cargo run --release --offline --manifest-path $(HMANIFEST) -- hash --file $(F)
 
 guard:
-	python3 tooling/rule05_guard.py
+	$(PY) tooling/rule05_guard.py
 
 spec:
-	python3 tooling/spec_intake.py --status
-
-dockerfiles:
-	python3 tooling/gen_dockerfiles.py
-
-dispatch:
-	sh tooling/test-dispatcher.sh
+	$(PY) tooling/spec_intake.py --status
 
 axes:
-	python3 tooling/measure_axes.py --all
+	$(PY) tooling/measure_axes.py --all
 
 fixtures:
-	python3 tooling/gen-fixtures.py --all
+	$(PY) tooling/gen-fixtures.py --all
 
 docs:
-	python3 tooling/gen_docs.py
+	$(PY) tooling/gen_docs.py
 
 kcalc:
-	python3 tooling/k_calc.py
-
-pgo:
-	sh tooling/pgo-build.sh --track $(TRACK)
+	$(PY) tooling/k_calc.py
 
 fmt:
-	cargo fmt --all
+	-cargo fmt --manifest-path $(HMANIFEST) --all
 
 clippy:
-	cargo clippy --all-targets --offline -- -D warnings
+	-cargo clippy --manifest-path $(HMANIFEST) --all-targets --offline -- -D warnings
 
 clean:
-	cargo clean
+	cargo clean --manifest-path $(HMANIFEST)

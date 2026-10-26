@@ -27,8 +27,8 @@ that the rules clearly expect to be written inside the window:
   * a percentile estimator                     (Track A)
 
 What does NOT count, and is explicitly allowed: the harness, the tooling,
-the verifier, the contract, the docs, and *generic* data structures in
-`core/` (an arena, a byte scanner, a thread pool). Infrastructure and
+the verifier, the contract, the docs, and *generic* data structures
+(an arena, a byte scanner, a thread pool). Infrastructure and
 design are what the rules explicitly permit before kickoff.
 
 Usage:
@@ -80,7 +80,7 @@ class Pattern:
 
 # Infrastructure and design are legal before kickoff. Only these directories
 # are scanned for solution code.
-SCAN_ROOTS = ("tracks", "core")
+SCAN_ROOTS = ("track-A", "track-B", "track-C", "track-D")
 
 # Paths never scanned: the verification harness, the tooling, the docs.
 SCAN_EXEMPT_PREFIXES = (
@@ -164,6 +164,16 @@ PATTERNS: list[Pattern] = [
         r"\b(error_rate_bucket|endpoint_aggregate|latency_histogram|"
         r"hour_bucket)\b",
         "Track A's aggregation shape is its solution.",
+    ),
+    # ── Deleted pre-kickoff solution code (the Oct 27 audit) ───────────────
+    Pattern(
+        "removed-core-symbols",
+        "A",
+        r"\b(parse_cents|format_cents|find_csv_special|classify_byte_mask|"
+        r"transpose_f32_block)\b",
+        "These symbols shipped in the core/ solution code removed during the "
+        "audit; their reappearance in a track folder would mean pre-kickoff "
+        "solution code has returned.",
     ),
 ]
 

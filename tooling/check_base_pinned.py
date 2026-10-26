@@ -42,7 +42,7 @@ IMAGE_SIZE_CAP_MB = 2048
 # The scored output filenames. None of them may be baked into the image: the
 # rule says the image may not ship cached outputs, and a pre-computed answer
 # would also defeat the SHA gate on the holdout.
-OUTPUT_FILES = ("ingest.txt", "index.txt", "join.txt", "traverse.txt", "corpus.sd")
+OUTPUT_FILES = ("ingest.txt", "index.txt", "join.txt", "traverse.txt")
 
 
 class Result:
@@ -69,7 +69,7 @@ def dockerfiles() -> list[Path]:
     top = ROOT / "Dockerfile"
     if top.is_file():
         found.append(top)
-    for p in sorted(ROOT.glob("tracks/*/Dockerfile")):
+    for p in sorted(ROOT.glob("track-*/Dockerfile")):
         found.append(p)
     return found
 
@@ -88,11 +88,34 @@ def check_base_pinned(res: Result) -> None:
         res.bad("no Dockerfile found to inspect")
         return
     seen_refs: set[str] = set()
+    allow: set[str] = set()
+    base_file = ROOT / "tooling" / "base-image.txt"
+    if base_file.is_file():
+        allow = {
+            ln.strip()
+            for ln in base_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        }
+    if not allow:
+        res.bad("tooling/base-image.txt is empty — no allowlisted base images recorded")
+
+    # The runtime base: the final image must be the clean runtime stage (the
+    # last FROM in each Dockerfile), not the toolchain build stage. The runtime
+    # image is the non-toolchain entry in the allowlist.
+    runtime_ref = ""
+    for ref in sorted(allow):
+        if not ref.startswith("rust:"):
+            runtime_ref = ref
+    if not runtime_ref:
+        res.bad("tooling/base-image.txt does not pin a non-toolchain runtime base")
+
     for path in files:
         rel = path.relative_to(ROOT)
         text = path.read_text(encoding="utf-8", errors="replace")
         args: dict[str, str] = {}
         unpinned: list[str] = []
+        non_allowlisted: list[str] = []
+        last_from = ""
         for line in text.splitlines():
             if line.lstrip().startswith("#"):
                 continue
@@ -104,43 +127,43 @@ def check_base_pinned(res: Result) -> None:
             if not m:
                 continue
             raw = m.group(1)
-            # Drop an `AS name` alias and any trailing --platform flag.
             parts = [t for t in raw.split() if not t.startswith("--")]
             ref = resolve_base(path, parts[0], args) if parts else ""
+            if ref:
+                last_from = ref
             if not ref:
                 unpinned.append(f"{raw}  (unresolvable ARG)")
             elif not DIGEST_RE.search(ref):
                 unpinned.append(ref)
+            elif allow and ref not in allow:
+                non_allowlisted.append(ref)
             else:
                 seen_refs.add(ref)
-        if unpinned:
-            for ref in unpinned:
-                res.bad(
-                    f"{rel}: FROM {ref} is not digest-pinned "
-                    "(need image@sha256:<64 hex>)"
-                )
-        else:
-            res.ok(f"{rel}: every FROM is digest-pinned")
-
-    # The root image and the five per-track images must use the SAME base, or
-    # "the image" the judges build is not the image anyone reviewed.
-    if len(seen_refs) > 1:
-        for ref in sorted(seen_refs):
-            res.bad(f"the Dockerfiles disagree about the base image: {ref}")
-    elif seen_refs:
-        res.ok(f"every Dockerfile uses the same base image: {sorted(seen_refs)[0]}")
-
-    # And that base must be the one recorded in the single source of truth.
-    base_file = ROOT / "tooling" / "base-image.txt"
-    if base_file.is_file():
-        want = base_file.read_text(encoding="utf-8").strip()
-        if want and seen_refs and want not in seen_refs:
+        for ref in unpinned:
             res.bad(
-                f"tooling/base-image.txt says {want}, but the Dockerfiles use "
-                f"{', '.join(sorted(seen_refs))}"
+                f"{rel}: FROM {ref} is not digest-pinned "
+                "(need image@sha256:<64 hex>)"
             )
-    else:
-        res.bad("tooling/base-image.txt is missing — the base image has no single source of truth")
+        for ref in non_allowlisted:
+            res.bad(
+                f"{rel}: FROM {ref} is not in tooling/base-image.txt — the "
+                "allowlist records every image this submission builds from"
+            )
+        if not unpinned and not non_allowlisted:
+            res.ok(f"{rel}: every FROM is digest-pinned and allowlisted")
+        if last_from and runtime_ref and last_from != runtime_ref:
+            res.bad(
+                f"{rel}: the runtime stage is {last_from}, expected {runtime_ref} — "
+                "the final image must be the clean runtime base, not a toolchain image"
+            )
+        elif last_from:
+            res.ok(f"{rel}: runtime stage is the clean {runtime_ref.split('@')[0]} base")
+
+    # And every base used must be recorded in the single source of truth.
+    if seen_refs and allow and not seen_refs.issubset(allow):
+        res.bad(
+            f"tooling/base-image.txt does not cover {', '.join(sorted(seen_refs - allow))}"
+        )
 
 
 def check_no_cached_outputs(res: Result) -> None:
@@ -150,9 +173,9 @@ def check_no_cached_outputs(res: Result) -> None:
         top = ROOT / name
         if top.is_file():
             present.append(name)
-        for p in ROOT.glob(f"tracks/*/{name}"):
+        for p in ROOT.glob(f"track-*/{name}"):
             present.append(str(p.relative_to(ROOT)))
-        for p in ROOT.glob(f"tracks/*/src/{name}"):
+        for p in ROOT.glob(f"track-*/src/{name}"):
             present.append(str(p.relative_to(ROOT)))
     if present:
         for p in present:

@@ -12,9 +12,10 @@
 [global]
 data_dir = "/data"
 out_dir = "/out"
-# The harness runs ONE image and selects the track at RUN time:
-#   -v /srv/speeddemon/data/track-$TRACK:/data:ro -e TRACK=$TRACK IMAGE
-# Therefore the entrypoint dispatches on $TRACK. See /app/run.
+# The build is PER TRACK: `docker build --network=none -t speeddemon/$TEAM-$TRACK:$COMMIT track-$TRACK`
+# with the track folder as the build context, exactly as the events page shows.
+# Each image's entrypoint IS that track's binary; the organizer's run command
+# still passes -e TRACK=$TRACK, which a per-track binary simply ignores.
 dispatch_env = "TRACK"
 # Sandbox: read-only root, no network, 1 GiB tmpfs at /tmp, dataset ro.
 tmpfs = "/tmp"
@@ -61,12 +62,13 @@ gates = ["correctness", "timeout", "sandbox"]
 [rules_oct28]
 # "Four tracks, A to D. Track E (Compress) is cut."
 tracks = ["A", "B", "C", "D"]
-# "Source size is code lines counted by scc after your formatter, across the
-# whole repo minus registry packages first published before Oct 1, 2026 by
-# people outside the team."
+# "Source size is code lines counted by scc after your language's formatter,
+# across each track's folder, minus registry packages first published before
+# Oct 1, 2026 by people outside the team. It covers everything in the track's
+# folder at the recorded commit, which is all the build can see."
 s_unit = "code_lines"
 s_counter = "scc"
-s_scope = "whole_repository"
+s_scope = "per_track_folder"
 s_registry_exception_before = "2026-10-01"
 # "Byte-identical copies of our published generators and references are free,
 # so copying the generator in for build-time training costs nothing."

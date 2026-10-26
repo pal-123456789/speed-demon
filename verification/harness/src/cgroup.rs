@@ -46,7 +46,7 @@ pub fn find_container_peak() -> Option<PeakReading> {
                 }
             }
         }
-        candidates.sort_by(|a, b| b.1.cmp(&a.1));
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.1));
         if let Some((path, _)) = candidates.first() {
             if let Some(p) = read_peak(path) {
                 return Some(p);

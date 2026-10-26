@@ -3,18 +3,18 @@
     Speed Demon local scoring-box replica + gate verifier.
 
 .DESCRIPTION
-    Reproduces the HEL1 harness contract as closely as the local machine
+    Reproduces the fsn1 (Falkenstein) harness contract as closely as the local machine
     allows, then runs the FOUR GATES that decide whether a track scores at all:
 
       G1 CORRECTNESS  SHA-256 of the output file == the expected hash.
                       A mismatch, or a missing expected hash, is a FAIL.
-      G2 SPEED FLOOR  wall time must be within 10x of the fastest measured
-                      correct run in this track (a local proxy for the
-                      organizer's leaderboard floor).
-      G3 TIMEOUT      wall time must stay under 10x the reference time
-                      (A 412s / B 587s / C 369s / D 724s).
-      G4 SANDBOX      exactly one file in /out, no writes outside /tmp, and
+      G2 TIMEOUT      wall time must stay under the hard kill at 10x the
+                      reference time (A 321s / B 564s / C 144s / D 727s).
+      G3 SANDBOX      exactly one file in /out, no writes outside /tmp, and
                       the output must not contain the scaffold sentinel.
+
+    (There is no speed-floor gate: the organizers removed it. The speed ratio
+    is reported below as information only.)
 
     Timing protocol mirrors the organizer: 5 runs, discard highest and
     lowest, mean of the middle three.
@@ -42,12 +42,12 @@ if ($All) { $Track = "All" }
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
-# ── HEL1 constants (frozen) ────────────────────────────────────────────────
+# ── fsn1 constants (frozen) ─────────────────────────────────────────────────
 $TrackInfo = @{
-    A = @{ Name = "A-ingest";   Timeout = 412; Ref = 41.20; Binary = "speeddemon-a"; Input = "access.log";  Output = "ingest.txt" }
-    B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
-    C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
-    D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
+    A = @{ Name = "track-A"; Timeout = 321; Ref = 32.05; Binary = "run"; Input = "access.log";  Output = "ingest.txt" }
+    B = @{ Name = "track-B"; Timeout = 564; Ref = 56.35; Binary = "run"; Input = "corpus.txt";  Output = "index.txt" }
+    C = @{ Name = "track-C"; Timeout = 144; Ref = 14.44; Binary = "run"; Input = "records.csv"; Output = "join.txt" }
+    D = @{ Name = "track-D"; Timeout = 727; Ref = 72.69; Binary = "run"; Input = "graph.txt";  Output = "traverse.txt" }
 }
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -82,8 +82,8 @@ function Invoke-Native {
 function Get-ExpectedHash {
     param([string]$TrackId)
     $candidates = @(
-        "$Root\tracks\$($TrackInfo[$TrackId].Name)\verification\expected\$($TrackInfo[$TrackId].Output).sha256",
-        "$Root\tracks\$($TrackInfo[$TrackId].Name)\verification\expected\sample.sha256"
+        "$Root\$($TrackInfo[$TrackId].Name)\verification\expected\$($TrackInfo[$TrackId].Output).sha256",
+        "$Root\$($TrackInfo[$TrackId].Name)\verification\expected\sample.sha256"
     )
     foreach ($c in $candidates) {
         if (Test-Path $c) {
@@ -115,10 +115,8 @@ foreach ($t in $targets) {
     # locate a built binary: cargo target dir first, then /app/bin
     $bin = $null
     $cands = @(
-        "$Root\target\release\$($info.Binary).exe",
-        "$Root\target\debug\$($info.Binary).exe",
-        "$Root\bin\$($info.Binary)",
-        "/app/bin/$($info.Binary)"
+        "$Root\$($info.Name)\run",
+        "/app/run"
     )
     foreach ($c in $cands) { if (Test-Path $c) { $bin = $c; break } }
     if (-not $bin) {
@@ -199,12 +197,12 @@ foreach ($t in $targets) {
 
     # ── G4 SANDBOX ──
     $outFiles = @(Get-ChildItem $outDir -File)
-    if ($outFiles.Count -eq 1) { Write-Ok "G4 sandbox: exactly one file in the output dir" }
-    else { Write-Bad "G4 sandbox: $($outFiles.Count) files in output dir (must be exactly 1)"; $overallOk = $false }
+    if ($outFiles.Count -eq 1) { Write-Ok "G3 sandbox: exactly one file in the output dir" }
+    else { Write-Bad "G3 sandbox: $($outFiles.Count) files in output dir (must be exactly 1)"; $overallOk = $false }
 
     $sentinel = Select-String -Path (Join-Path $outDir $info.Output) -Pattern "SCAFFOLD_NOT_IMPLEMENTED" -SimpleMatch -Quiet -ErrorAction SilentlyContinue
-    if ($sentinel) { Write-Bad "G4 sandbox: scaffold sentinel present — the real implementation is not in place"; $overallOk = $false }
-    else { Write-Ok "G4 sandbox: no scaffold sentinel in output" }
+    if ($sentinel) { Write-Bad "G3 sandbox: scaffold sentinel present — the real implementation is not in place"; $overallOk = $false }
+    else { Write-Ok "G3 sandbox: no scaffold sentinel in output" }
 
     # ── timing ──
     $tMean = Get-TrimmedMean -Values $times
@@ -216,12 +214,12 @@ foreach ($t in $targets) {
 
     # ── G3 TIMEOUT ──
     $worst = ($times | Measure-Object -Maximum).Maximum
-    if ($worst -lt $info.Timeout) { Write-Ok "G3 timeout: worst run $($worst.ToString("0.00"))s < $($info.Timeout)s" }
-    else { Write-Bad "G3 timeout: worst run $($worst.ToString("0.00"))s exceeds $($info.Timeout)s"; $overallOk = $false }
+    if ($worst -lt $info.Timeout) { Write-Ok "G2 timeout: worst run $($worst.ToString("0.00"))s < $($info.Timeout)s" }
+    else { Write-Bad "G2 timeout: worst run $($worst.ToString("0.00"))s exceeds $($info.Timeout)s"; $overallOk = $false }
 
-    # ── G2 SPEED FLOOR (local proxy) ──
+    # ── LOCAL SPEED RATIO (informational; the speed-floor gate is gone) ──
     $ratio = [math]::Round($tMean / $info.Ref, 3)
-    Write-Info "local speed ratio vs reference: ${ratio}x (reference $($info.Ref)s on HEL1)"
+    Write-Info "local speed ratio vs reference: ${ratio}x (reference $($info.Ref)s on fsn1)"
 
     $summary += [pscustomobject]@{
         Track = $t

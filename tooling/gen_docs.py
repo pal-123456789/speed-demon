@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 TRACKS = {
     "A": {
-        "dir": "A-ingest",
+        "dir": "track-A",
         "name": "Ingest",
         "task": "Aggregate 3.1M structured log lines (312 MB) into per-endpoint request "
                 "counts, p50/p95/p99 latency, and error rates bucketed by hour.",
@@ -127,7 +127,7 @@ the M axis with data we never need resident.""",
   bottleneck and is therefore the one place a surprise is still possible.""",
     },
     "B": {
-        "dir": "B-index",
+        "dir": "track-B",
         "name": "Index",
         "task": "Build an inverted index over a 250 MB text corpus, then answer 50,000 "
                 "boolean and phrase queries. Build time and query time are measured "
@@ -219,7 +219,7 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.""",
   measurement says is actually limiting.""",
     },
     "C": {
-        "dir": "C-join",
+        "dir": "track-C",
         "name": "Join",
         "task": "Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, "
                 "embedded newlines, mixed line endings, a UTF-8 BOM on some chunks and "
@@ -313,7 +313,7 @@ charged to cgroup `memory.peak`.""",
   rather than assuming, and document the result either way.""",
     },
     "D": {
-        "dir": "D-traverse",
+        "dir": "track-D",
         "name": "Traverse",
         "task": "Traverse a 5M-edge directed weighted graph and answer 2,000 "
                 "source-target shortest-path queries. Preprocessing is allowed and is "
@@ -560,7 +560,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File verification\\verify.ps1 -Tr
 powershell -NoProfile -ExecutionPolicy Bypass -File verification\\pre-freeze.ps1 -Track {track}
 
 # or, with a Rust toolchain and no PowerShell, the harness does the same work
-cargo run --release --offline -p sd-harness -- bench --track {track} --no-docker
+cargo run --release --offline --manifest-path verification/harness/Cargo.toml -- bench --track {track} --no-docker
 ```
 
 Commit hash of this measurement: `_(fill)`.
@@ -596,13 +596,15 @@ reference's `D_ref = 1.00` — the reference sets no precedent to lose to on
 that axis, and every crate added here would be charged directly against it.
 
 The one thing that is *not* a dependency is the Rust toolchain, which is a
-build-time requirement rather than a runtime one. See `tooling/vendor-toolchain.sh`.
+build-time requirement rather than a runtime one. The build stage uses the
+digest-pinned, allowlisted `rust:1-slim-trixie` image, which ships the
+toolchain, so nothing needs to be vendored.
 
 ## Building and running
 
 ```bash
-# the scored image: one image, all five tracks, dispatched on $TRACK
-docker build --network=none -t speeddemon/solo:{track} .
+# the scored image is built PER TRACK, from the track folder as context
+docker build --network=none -t speeddemon/$TEAM-{track}:$COMMIT track-{track}
 
 docker run --rm \\
   --cpuset-cpus="0-11" --cpuset-mems="0" \\
@@ -613,7 +615,7 @@ docker run --rm \\
   -v /srv/speeddemon/data/track-{track}:/data:ro \\
   -v /srv/speeddemon/out/$RUN:/out:rw \\
   -e TRACK={track} \\
-  speeddemon/solo:{track}
+  speeddemon/$TEAM-{track}:$COMMIT
 ```
 
 The build runs `rustc` directly — no cargo, no registry, no network — so it
@@ -823,7 +825,7 @@ def main(argv=None) -> int:
     if unknown or "--help" in argv or "-h" in argv:
         print(
             "usage: gen_docs.py [--check | --dry-run]\n"
-            "  (no args)  write tracks/*/PERF.md and tracks/*/README.md\n"
+            "  (no args)  write track-*/PERF.md and track-*/README.md\n"
             "  --check    exit 1 if the committed docs are stale; writes nothing\n"
             "  --dry-run  report what would change; writes nothing",
             file=sys.stderr,
@@ -834,7 +836,7 @@ def main(argv=None) -> int:
     written = []
 
     for track, cfg in TRACKS.items():
-        tdir = ROOT / "tracks" / cfg["dir"]
+        tdir = ROOT / cfg["dir"]
 
         m_label = "peak memory"
 

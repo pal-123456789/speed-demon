@@ -50,3 +50,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Per-track local build artifacts: each track's build.sh emits ./run (and on
+# Windows a .pdb). These are host-built binaries of unknown provenance and must
+# never enter the submission repo or the Docker build context.
+track-*/run
+track-*/run.exe
+track-*/run.pdb
+

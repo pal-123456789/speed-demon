@@ -148,7 +148,7 @@ write to disk. Only this assistant writes to the reference folder.
 | Speed curve | 100·ln(K)/ln(25), K = 25 → 100 | **50·log10(K)**, K = 10 → 50, K = 100 → 100. Worked example **K 6.41 → 40.4** |
 | Caps | every axis capped at 50× | **T uncapped; M capped at 50×; S and D can cost but never pay** |
 | D axis | `1 + deps + vendored_bytes/50000`, `0.90^deps` | **`D = 1 + direct non-stdlib runtime deps`**; one dep ⇒ D = 2 ⇒ **2⁻⁰·¹⁵ = 0.90** on K |
-| S axis | bytes, comments stripped, identifiers normalised | **code lines by `scc` after the formatter, whole repo minus pre-Oct-1 third-party registry packages** |
+| S axis | bytes, comments stripped, identifiers normalised | **code lines by `scc` after the formatter, per track folder** (all the build can see), minus pre-Oct-1 third-party registry packages — capped at 1.0 |
 | Track B timing | 40% build / 60% query blend | **one total wall time; the queries are readable from the start** |
 | Reference language | Go, Python and Rust | **one naive Python reference per track** |
 | Machine | the old Finnish host and its EX44 box | **Falkenstein (fsn1)** — same i5-13500, same 64 GB, same limits |
@@ -261,17 +261,18 @@ machine (no SIMD, no cleverness) and deferring all C speed work to the H43 deep 
 ## 7. Deliverables system (judge 35%) — corrected
 
 - **Monorepo**, public at freeze with a root OSI license. One directory per track
-  (`tracks/A-ingest` … `tracks/D-traverse`), each self-contained: `Dockerfile`, `build.sh`, `run`,
-  `.speed-demon.toml`, `README.md`, `PERF.md`, `src/`, `tests/`. Shared `core/` only for code used by
-  ≥2 tracks. A judge should understand a track without leaving its directory.
+  (`track-A` … `track-D`), each a self-contained build context: `Dockerfile`, `build.sh`,
+  `.speed-demon.toml`, `README.md`, `PERF.md`, `src/`, `verification/expected/`. No shared
+  core crate. A judge should understand a track without leaving its directory.
 - **Dockerfile:** every `FROM` must name an image from `speeddemon.dev/allowlist.json`, **pinned by
   digest** (the published example is
   `debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad`), and
   **nothing else may enter the image**: no `COPY --from` of another image, no `ADD` of a URL.
-  `build.sh` runs with **no network** (no apt/cargo-fetch/pip/curl) — **the Rust toolchain must
-  already be in the build context** (vendor a pinned rustc, or compile std-only with
-  `rustc src/main.rs -O`, no cargo). PGO/BOLT allowed (build unscored). Builds are capped at
-  **10 minutes** and the image at **2 GB**. `run` reads fixed `/data` filenames, writes exactly one
+  `build.sh` runs with **no network** (no apt/cargo-fetch/pip/curl). The build stage is the
+  digest-pinned, allowlisted `rust:1-slim-trixie` image — it ships rustc plus gcc/libc6-dev
+  for linking, so nothing is vendored — and `./build.sh` compiles `src/main.rs` directly with
+  `rustc`, no cargo. PGO/BOLT allowed (build unscored). Builds are capped at
+  **10 minutes** and the image at **2 GB**. The binary reads fixed `/data` filenames, writes exactly one
   `/out` file, exits 0, leaves nothing else. **Byte-identical copies of the published generators and
   references are free** — so copying a generator in for build-time training costs nothing.
 - **PERF.md (8%)** — the strongest judge lever: header with per-axis ratios + K + speed score (local,
