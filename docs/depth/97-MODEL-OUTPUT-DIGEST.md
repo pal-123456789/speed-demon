@@ -341,9 +341,12 @@ tie-break, write once.
 Ranked by impact (all sizes are the model's estimates):
 1. **Whole-input residency (100+ MB)** — no `fs::read`/`read_to_end`/`lines().collect()`;
    `FileExt::read_at` into per-thread 128–256 KiB buffers, carry the partial tail.
-2. **The file's own page cache** — IF charged to our cgroup, no read pattern
-   avoids it; levers are `posix_fadvise(DONTNEED)` (FFI, loses warm cache) or
-   `O_DIRECT` (`custom_flags(0x4000)`, slow on warm cache). Measure first.
+2. **/data page cache — RESOLVED by the owner (Oct 27): FREE.** The input is
+   pre-warmed with `vmtouch` on the HOST before the container starts, so those
+   file pages are charged outside our cgroup — reading /data adds nothing to
+   M, and `posix_fadvise(DONTNEED)`/`O_DIRECT` are NOT needed. What DOES
+   count: anything WE first pull into the page cache (the output file pages),
+   our own allocations, and /tmp tmpfs writes.
 3. **Unbounded pipelines** — no unbounded `mpsc` (reader can buffer the whole
    file); workers claim chunk indices from an `AtomicUsize` inside
    `std::thread::scope`; if a producer is needed, `sync_channel(k)` with a fixed
@@ -622,3 +625,40 @@ B needs NO positions (adjacency scan) and NO stopword list; C's oracle must
 reproduce the Python csv dialect + the per-record BOM strip; D is
 distance-only with -1. The deep dives' P0 tables are now pinned facts, not
 guesses.
+
+---
+
+## 13. OWNER CLARIFICATIONS (official Discord, Oct 27) — the grey areas are closed
+
+**Q1 — does a DSL-as-library count as a dependency?**
+"Yes. D is just the count of direct non-stdlib runtime dependencies in your
+manifest, whatever the library does, so an effects DSL pulled in as a
+dependency counts like any other: one dependency is a 0.90 factor on your
+score. Write the effects layer yourself and it's your own source, so it lands
+in S instead (capped at 1.0, so source can cost you but never win it). You've
+read the thread-pool case right: since S can't pay, pulling one in only costs
+you on D, so there's no reason to."
+
+- Consequence: D = 1 + direct deps is the WHOLE story; no library category is
+  exempt. Every crate = K x 0.90. Std-only stays optimal, always.
+- "Write it yourself → it lands in S" — our prep/ kit (bump/lines/parse_u32/
+  itoa) is exactly that: generic primitives as OUR source, not a dependency.
+
+**Q2 — which peak-memory counter, and do /data pages count?**
+"It's the container's cgroup memory.peak (cgroup v2), read on the host after
+your container exits, not ru_maxrss. So M is the peak of everything charged
+to your run's own cgroup: what your process allocates, what you write into
+the 1 GB /tmp tmpfs, and any page your process is first to pull into the page
+cache. The input in /data does not count: it's pre-warmed into the page cache
+with vmtouch on the host before your container starts, so those file pages
+are already charged outside your cgroup."
+
+- Consequence 1 (M counter): our harness's cgroup.rs already reads
+  `/sys/fs/cgroup/.../memory.peak` — correct per the owner. Never measure with
+  ru_maxrss or `ps` RSS.
+- Consequence 2 (/data free): buffered reads of /data cost ZERO M — no
+  fadvise/O_DIRECT games needed; read buffers are purely a T decision.
+- Consequence 3 (what DOES count): our own heap, /tmp tmpfs writes, AND the
+  OUTPUT FILE's first-touched pages. Keep the output write minimal and
+  single-shot (it is — one file, hand-formatted, one write_all). Never spill
+  intermediates to /tmp (counts AND defeats the point of scratchless).

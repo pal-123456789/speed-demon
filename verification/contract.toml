@@ -129,6 +129,24 @@ m_is_kernel_peak = true
 overall_aggregate = "geometric_mean_of_best_three"
 overall_min_tracks = 3
 
+# ── Owner clarifications (official Discord answers, Oct 27) ─────────────────
+# M counter: cgroup v2 memory.peak, read on the HOST after the container
+# exits — NOT ru_maxrss. M is the peak of everything charged to the run's own
+# cgroup: process allocations, /tmp tmpfs writes, AND any page the process is
+# first to pull into the page cache (e.g. the output file). /data does NOT
+# count: it is pre-warmed with vmtouch on the host before the container
+# starts, so those file pages are charged outside our cgroup.
+m_counter = "cgroup v2 memory.peak, read on the host after exit (not ru_maxrss) — owner-confirmed"
+m_charged = "process allocations + /tmp tmpfs writes + any page our process first pulls into the page cache (output file pages count)"
+m_data_pages_charged = false
+m_output_pages_charged = true
+# D axis: the count of direct non-stdlib runtime dependencies, whatever the
+# library does (an effects DSL counts like any other). One dep = 0.90 factor
+# on the score; writing it yourself moves it to S (capped at 1.0, can only
+# cost). There is therefore no reason to pull in thread-pool or parser crates.
+d_counts_every_direct_library = true
+d_one_dep_factor = 0.90
+
 # ── Track A — Ingest ───────────────────────────────────────────────────────
 [A]
 status = "DEFERRED"
