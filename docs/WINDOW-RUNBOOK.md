@@ -15,12 +15,16 @@
 |---|---|---|
 | H0 (once) | `sh tooling/h0-launch.sh` | build all → gates → fixtures → kit → pins, in one run |
 | H0–H2 | `python tooling/spec_intake.py --check` | the Oct-28 pins applied; **0 blocking** = intake done |
-| Every rung | `sh tooling/bench-rung.sh A --label rung-07` | build → mini determinism → SHA-check → 5-run bench → ledger |
+| Any time | `python check.py a --data data/a --expected <sha>` | the OFFICIAL board checker (from the starter): builds with `--network=none`, runs under the board's sandbox, prints the output hash — the closest local proxy for a board run |
+| Every rung | `sh tooling/bench-rung.sh a --label rung-07` | build → mini determinism → SHA-check → 5-run bench → ledger |
 | Every rung | `python tooling/k_whatif.py --scoreboard --t A=<s> --m A=<MB> --l A=<lines>` | K / speed / track total / best-3 geomean |
 | Every ~8 h | `python tooling/k_whatif.py --waterfill --hours H --base … --doubling …` | re-solve the hour budget from measured rates |
 | H50+ | `sh tooling/determinism-check.sh all` | the full P6 matrix before every green commit |
 | Before freeze | `sh tooling/ci.sh` | all 15 gates, then `verification/pre-freeze.ps1 -All` / `lockdown` |
 | Freeze | git push | public repo + OSI license + final commit; PERF.md cites run IDs |
+
+> Board contract reminder: the live board caps runs at **3× the reference**
+> (final scoring: 10×), so a track must be under 3× to appear on the board.
 
 ## Hour-by-hour
 
