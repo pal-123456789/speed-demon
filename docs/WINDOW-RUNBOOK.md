@@ -86,6 +86,40 @@
    `lockdown` (Linux) green, public repo pushed, real team name set in
    `.speed-demon.toml`.
 
+## Submission logistics (the five official steps)
+
+These happen outside the repo — **no gate can check them, and missing one
+means no score.**
+
+1. **Repo from the template.** The submission repo must be created from
+   `hackathon-raptors/speed-demon-starter` ("Use this template"); it may stay
+   **private until code freeze**. The board reads only the `track-*` folders,
+   so this repo's `track-a..track-d`, `LICENSE`, `check.py` and
+   `.speed-demon.toml` files are the content that repo needs; the
+   `tooling/`/`verification/`/`docs/` folders are optional there.
+2. **Install the Speed Demon Board app** (`github.com/apps/speed-demon-board`)
+   on that repo — read-only; it builds every `track-*` folder on push.
+3. **Register the team** through the submission form linked from
+   speeddemon.dev — one form per team, with the repo URL and the tracks
+   entered. **No registration = no score.**
+4. **Push to the `speed-demon` branch** (the template's default branch). The
+   board builds and runs within minutes; one run per team per 15 minutes;
+   the board caps a run at 3× the reference.
+5. **Make the repo public under an OSI licence at code freeze**
+   (Nov 2, 18:00 UTC). This repo's LICENSE is MIT and already in place.
+
+**Pre-flight checklist before the first push**
+
+- [ ] `team` set to the real name in all four `.speed-demon.toml` (currently
+      the placeholder `solo`)
+- [ ] folders for tracks you are NOT entering deleted (an unchanged folder is
+      the reference itself → the board reports it "unchanged" and does not run
+      it)
+- [ ] `python check.py <t> --data <dir> --expected <sha>` passes on a
+      Docker-capable machine (the one thing this Windows host cannot run)
+- [ ] the PERF.md board-run table is ready to record the first run IDs
+- [ ] `sh tooling/ci.sh` green and the working tree committed
+
 ## The immutable rules (recited at every decision point)
 
 1. SHA-green before speed — determinism is correctness; the SHA gate is binary.
