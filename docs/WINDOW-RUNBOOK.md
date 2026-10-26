@@ -30,7 +30,12 @@
 
 ### H0–H2 — intake (no optimization)
 1. `sh tooling/h0-launch.sh` — state, builds, gates, fixtures, kit, pins.
-2. Read the four frozen specs AND the reference implementations. Write down,
+2. **Oct 30 06:00: the organizers publish the generators and the sample
+   hashes.** Fetch the official-shaped data with `sh tooling/gen-official-data.sh`
+   (seed 1, `sample` scale = 10%; `SCALE=full` is the board dataset). Then
+   `python check.py <t> --data verification/data/track-<t>` is the official
+   local check. Our own `gen-fixtures.py` remains the anti-overfit layer.
+3. Read the four frozen specs AND the reference implementations. Write down,
    per track, the EXACT output format, rounding/tie/order rules, malformed-
    input policy, unreachable/empty spellings.
 3. Apply the pins to `verification/contract.toml`; `spec_intake.py --check`

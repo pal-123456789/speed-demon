@@ -57,3 +57,7 @@ track-*/run
 track-*/run.exe
 track-*/run.pdb
 
+
+# The organizers' generators checkout (fetched by tooling/gen-official-data.sh)
+.official-generators/
+

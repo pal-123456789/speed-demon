@@ -14,6 +14,7 @@ missing=0
 for f in tooling/ci.sh tooling/install-hooks.sh tooling/pin-base-image.sh \
          tooling/check-exec-bits.sh tooling/bench-rung.sh tooling/h0-launch.sh \
          tooling/hooks/pre-commit \
+         tooling/gen-official-data.sh \
          track-a/build.sh track-b/build.sh track-c/build.sh track-d/build.sh
 do
     mode=$(git ls-files -s "$f" 2>/dev/null | awk '{print $1}')

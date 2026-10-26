@@ -1,13 +1,8 @@
 # Speed Demon - Track A (Ingest). Per-track scored image.
 #
-# Built with the track folder as the build context, exactly as the events
-# page shows:
-#   docker build --network=none -t speeddemon/<team>-A:<commit> track-a
-#
-# Both stages are digest-pinned, allowlisted base images (these are the
-# digests published on speeddemon.dev). Nothing else enters the image: no
-# COPY --from other images, no ADD, no network, no cache mounts. The final
-# image contains exactly one file: the built binary.
+# The track folder is the build context. Both stages use digest-pinned,
+# allowlisted base images (the digests published on speeddemon.dev).
+# The build is offline and the final image contains one file: the binary.
 
 FROM rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb AS build
 COPY . /src
