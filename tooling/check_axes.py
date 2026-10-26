@@ -7,9 +7,9 @@ PASS over an axis that is actually wrong.
 
 docs/RULE-CHANGES-oct28.md:
 
-  * D counts direct dependencies declared in the manifest; one dependency is a
-    factor of 0.90. This repository declares none, so D must be exactly 1.0 on
-    every track.
+  * D = 1 + the number of direct non-stdlib runtime dependencies declared in
+    the manifest; the vendored-bytes term is gone. This repository declares
+    none, so D must be exactly 1.0 on every track.
   * S is counted in code lines, repo-wide, and its factor is capped at 1.0.
     The cap means being small earns nothing, so a ratio above 1.0 is not an
     error — but it must never be applied uncapped anywhere else.
@@ -22,8 +22,15 @@ from __future__ import annotations
 
 import json
 import sys
+# Force UTF-8 on stdio. On Windows the default code page mangles every
+# non-ASCII character this tool prints, which corrupts logs and makes
+# mojibake indistinguishable from real output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-TRACKS = ("A", "B", "C", "D", "E")
+
+TRACKS = ("A", "B", "C", "D")
 
 
 def main(argv: list[str]) -> int:
@@ -59,7 +66,7 @@ def main(argv: list[str]) -> int:
         if deps != 0:
             failures.append(
                 f"track {track}: {deps} declared dependencies — D would be "
-                f"{dval:.4f}, not 1.0000. The rule is 0.90 per direct dependency."
+                f"{dval:.4f}, not 1.0000. The rule is D = 1 + direct dependencies."
             )
         elif abs(dval - 1.0) > 1e-12:
             failures.append(

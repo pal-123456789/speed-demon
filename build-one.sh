@@ -13,7 +13,7 @@
 #   The builder stage is debian:13-slim, which ships NO C compiler. The
 #   scoring build runs with --network=none, so `apt-get install gcc` is not
 #   an option either. A stock `x86_64-unknown-linux-gnu` link needs `cc`,
-#   so it would fail on the scoring box and score ZERO on all five tracks
+#   so it would fail on the scoring box and score ZERO on all four tracks
 #   (the image is shared).
 #
 #   The way out is the musl target with a fully static link:
@@ -35,7 +35,7 @@
 #   sh build-one.sh B                # build track B
 #
 # Environment:
-#   TRACK            which track to build (A..E). Overridden by $1.
+#   TRACK            which track to build (A..D). Overridden by $1.
 #   SD_REUSE_CORE=1  reuse an existing bin/libspeeddemon_core.rlib instead
 #                    of recompiling it (used by build-all.sh).
 set -eu
@@ -53,9 +53,8 @@ case "$TRACK" in
     B) TRACK_DIR="B-index";    BIN="speeddemon-b" ;;
     C) TRACK_DIR="C-join";     BIN="speeddemon-c" ;;
     D) TRACK_DIR="D-traverse"; BIN="speeddemon-d" ;;
-    E) TRACK_DIR="E-compress"; BIN="speeddemon-e" ;;
     *)
-        echo "[build-one] FATAL: unknown track '$TRACK' (expected A..E)" >&2
+        echo "[build-one] FATAL: unknown track '$TRACK' (expected A..D)" >&2
         exit 1
         ;;
 esac

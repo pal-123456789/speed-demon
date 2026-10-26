@@ -17,7 +17,7 @@ echo "[build-all] building all five tracks"
 
 # The first track compiles the core; the rest reuse it.
 SD_REUSE_CORE=0
-for TRACK in A B C D E; do
+for TRACK in A B C D; do
     SD_REUSE_CORE="$SD_REUSE_CORE" sh "$APP_DIR/build-one.sh" "$TRACK"
     SD_REUSE_CORE=1
 done

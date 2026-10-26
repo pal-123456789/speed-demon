@@ -21,7 +21,6 @@ WHAT IT DOES
   Track C  a HOSTILE CSV: quoted commas, escaped quotes, embedded LF/CRLF,
            mixed line endings, a mid-file BOM, empty fields, trailing spaces
   Track D  "n m" header then "u v w" edges (unsorted)
-  Track E  a 4-segment corpus: prose, logs, json, blob
 
   Every generator is seeded, so a failure is reproducible from its seed.
   Retain the failing seeds — they become regression tests.
@@ -38,8 +37,6 @@ import json
 import math
 import os
 import random
-import struct
-import zlib
 from pathlib import Path
 # Force UTF-8 on stdio. On Windows the default code page mangles every
 # non-ASCII character this tool prints, which corrupts logs and makes
@@ -226,43 +223,11 @@ def gen_track_d(nodes: int, edges: int, seed: int, out_dir: Path) -> None:
     print(f"  D: {nodes} nodes, {edges} edges -> {path}")
 
 
-# ── Track E ───────────────────────────────────────────────────────────────
-
-def gen_track_e(seed: int, out_dir: Path, scale: int = 1) -> None:
-    """Four concatenated segments: prose, logs, json, blob."""
-    rng = random.Random(seed)
-    path = out_dir / "corpus.bin"
-
-    prose = ("the quick brown fox jumps over the lazy dog " * 400)[: 300_000 * scale]
-    logs = "".join(
-        f"2026-01-01T{rng.randint(0,23):02d}:00:00.{rng.randint(0,999999):06d}Z "
-        f"GET /v2/orders/{{id}} {rng.choice(STATUSES)} {rng.randint(1,999999)}\n"
-        for _ in range(4000 * scale)
-    )
-    json_seg = "".join(
-        f'{{"id":{i},"name":"user{i}","tags":["a","b","c"],"active":true,'
-        f'"score":{rng.random():.4f}}}\n'
-        for i in range(2000 * scale)
-    )
-    blob = b"".join(
-        struct.pack("<f", rng.gauss(0, 1) + (i % 7) * 0.5)
-        for i in range(30000 * scale)
-    )
-
-    with path.open("wb") as f:
-        f.write(prose.encode("utf-8"))
-        f.write(logs.encode("utf-8"))
-        f.write(json_seg.encode("utf-8"))
-        f.write(blob)
-    print(f"  E: corpus.bin {path.stat().st_size} bytes "
-          f"(prose/logs/json/blob concatenated) -> {path}")
-
-
 # ── main ──────────────────────────────────────────────────────────────────
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Speed Demon fixture generator")
-    p.add_argument("--track", choices=["A", "B", "C", "D", "E", "all"])
+    p.add_argument("--track", choices=["A", "B", "C", "D", "all"])
     p.add_argument("--all", action="store_true")
     p.add_argument("--out", default="verification/data")
     p.add_argument("--rows", type=int, default=20000)
@@ -270,12 +235,11 @@ def main() -> int:
     p.add_argument("--nodes", type=int, default=5000)
     p.add_argument("--edges", type=int, default=20000)
     p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--scale", type=int, default=1)
     p.add_argument("--adversarial", action="store_true",
                    help="Track C: emit the tiny hand-crafted edge-case corpus")
     args = p.parse_args()
 
-    targets = ["A", "B", "C", "D", "E"] if (args.all or args.track in (None, "all")) else [args.track]
+    targets = ["A", "B", "C", "D"] if (args.all or args.track in (None, "all")) else [args.track]
 
     for t in targets:
         out_dir = Path(args.out) / f"track-{t}"
@@ -292,8 +256,6 @@ def main() -> int:
                 gen_track_c(args.rows, args.seed, out_dir)
         elif t == "D":
             gen_track_d(args.nodes, args.edges, args.seed, out_dir)
-        elif t == "E":
-            gen_track_e(args.seed, out_dir, args.scale)
     print("\nDone. These fixtures are NOT the sample data — they exist to "
           "catch overfitting.")
     return 0

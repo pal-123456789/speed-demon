@@ -9,7 +9,7 @@ missing=0
 for f in run build-all.sh build-one.sh tooling/ci.sh tooling/install-hooks.sh \
          tooling/vendor-toolchain.sh tooling/pgo-build.sh tooling/test-dispatcher.sh \
          tooling/hooks/pre-commit tracks/A-ingest/build.sh tracks/B-index/build.sh \
-         tracks/C-join/build.sh tracks/D-traverse/build.sh tracks/E-compress/build.sh
+         tracks/C-join/build.sh tracks/D-traverse/build.sh
 do
     if [ -x "$f" ]; then
         echo "  +x   $f"

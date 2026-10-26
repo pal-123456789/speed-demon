@@ -41,7 +41,6 @@ TRACKS = [
     ("B", "B-index"),
     ("C", "C-join"),
     ("D", "D-traverse"),
-    ("E", "E-compress"),
 ]
 
 

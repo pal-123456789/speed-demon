@@ -16,7 +16,7 @@
 
 The audit ran the build scripts rather than reading them. Five of them had
 never been executed, and every one of those five was broken. Because the
-harness builds a single image for all five tracks, each defect was a total
+harness builds a single image for all four tracks, each defect was a total
 loss on submission rather than a degraded score.
 
 | Defect | Consequence if it had shipped | Fixed |
@@ -50,38 +50,38 @@ every run.
 
 | Component | State | Evidence |
 |---|---|---|
-| Workspace (5 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
+| Workspace (4 tracks + shared core) | **GREEN** | `cargo build --offline` from a clean clone — passes |
 | Core library (13 unit tests) | **GREEN** | 13/13 pass: arena, interner, chunking, pool, cents, float bits |
 | **`verification/harness`** — the scoring-box replica | **GREEN** | 16/16 tests: pure-Rust SHA-256 (known vectors), JSONL ledger, lockdown, contract table *and contract.toml agreement*. `cgroup.rs` has **no unit test** — it is exercised only by live container runs |
 | `rustfmt` + `clippy -D warnings` | **AMBER** | the hook enforces both **once installed**, and it is **not installed in this clone** — `tooling/hooks/pre-commit` exists but `.git/hooks/` holds only `*.sample`. Run `sh tooling/install-hooks.sh` before the freeze |
-| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build-one.sh` builds all 5 statically for musl; `build-all.sh` loops over it; verified from a clean 54-file context |
-| One-image-five-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test 5/5 in CI. `TRACK` is validated, never coerced — an unrecognised value used to be filtered to the empty string and silently defaulted to track A |
-| 4-gate verifier (SHA / determinism / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows). The two differ: `verify.ps1` has a speed floor and no determinism gate. Inside the harness, an unpinned expected hash is now a **FAIL**, not a green tick |
+| Offline build path (`rustc`, no cargo, no network) | **GREEN** | `build-one.sh` builds all 4 statically for musl; `build-all.sh` loops over it; verified from a clean context |
+| One-image-four-tracks dispatch on `$TRACK` | **GREEN** | `run` + root `Dockerfile`; dispatcher self-test in CI. `TRACK` is validated, never coerced — an unrecognised value used to be filtered to the empty string and silently defaulted to track A |
+| 3-gate verifier (SHA / timeout / sandbox) | **GREEN** | Rust harness (Linux) + `verify.ps1` (Windows). **The speed floor gate is gone** — there are three gates, not four. Inside the harness, an unpinned expected hash is now a **FAIL**, not a green tick |
 | 5-run trimmed-mean benchmark | **GREEN** | `harness bench` + `bench.ps1` |
-| Pre-freeze lockdown (81 checks) | **AMBER — 12 failures** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux). All 12 are the correct pre-kickoff state; see §1a |
+| Pre-freeze lockdown | **AMBER — failures** | `pre-freeze.ps1` (Windows) + `harness lockdown` (Linux). The failures are the correct pre-kickoff state; see §1a |
 | **Rule 05 compliance guard** | **GREEN** | `tooling/rule05_guard.py` — proved to block a planted violation |
 | **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered. `python tooling/gen_docs.py --check` is the CI gate that proves the committed docs *are* the generator's output |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
-| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 5 × ~290 lines, decision-complete, no solution code |
+| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, decision-complete, no solution code |
 | **Offline PGO pipeline** | **GREEN** | `tooling/pgo-build.sh` merges to `pgo/merged.profdata` (shippable) and `build-one.sh` consumes **the file**; `tooling/check_pgo_wiring.sh` proves the profile can reach the image. Both halves were broken until now — see §1b |
-| One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — 15 gates, cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
-| K calculator | **GREEN** | reproduces the published Nightshade example exactly (K 6.2569, speed 56.97, total 65.73) |
-| S/D axis measurement | **GREEN** | **D = 1.0000 on all five tracks** |
+| One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
+| K calculator | **GREEN** | reproduces the published worked example exactly (K 6.41, speed score 40.4) |
+| S/D axis measurement | **GREEN** | **D = 1.0000 on all four tracks** |
 | Anti-overfit fixture generator | **GREEN** | grammar-preserving data + 11 hand-crafted hostile CSV cases |
-| **SPEC.md intake** | **GREEN** | `tooling/spec_intake.py` — 36 DEFERRED values enumerated, K budget recomputed from pins, refuses "ready" while a blocker is unanswered |
-| Track implementations (A–E) | **STUB** | scaffold sentinel present — *correct* pre-kickoff state |
+| **SPEC.md intake** | **GREEN** | `tooling/spec_intake.py` — DEFERRED values enumerated, K budget recomputed from pins, refuses "ready" while a blocker is unanswered |
+| Track implementations (A–D) | **STUB** | scaffold sentinel present — *correct* pre-kickoff state |
 
 ### The open FAILs, and why each is correct right now
 
-`harness lockdown` reports **12 failed checks**: 5 × "no scaffold sentinel in
-source", 5 × "sample SHA-256 green", "public remote configured", and the
+`harness lockdown` reports **failed checks**: 4 × "no scaffold sentinel in
+source", 4 × "sample SHA-256 green", "public remote configured", and the
 working tree. Every one of them clears by doing the work rather than by
 changing a check.
 
 | FAIL | Why it is correct now | When it clears |
 |---|---|---|
-| 5× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 18:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
-| 5× "sample SHA-256 green" | The expected hashes are pinned from the Oct 30 06:00 UTC sample. This used to be reported as SKIP, which let the lockdown certify a correctness gate it had proved it could not check — a placeholder file containing `TODO-fill-this-in` counted as a pin. It is now a FAIL until a real 64-hex pin exists | Oct 30, when the sample ships and the hashes are pinned |
+| 4× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 18:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
+| 4× "sample SHA-256 green" | The expected hashes are pinned from the Oct 30 06:00 UTC sample. This used to be reported as SKIP, which let the lockdown certify a correctness gate it had proved it could not check — a placeholder file containing `TODO-fill-this-in` counted as a pin. It is now a FAIL until a real 64-hex pin exists | Oct 30, when the sample ships and the hashes are pinned |
 | "public remote configured" | There is no public GitHub repo yet. This now requires an https/ssh URL — it previously accepted any two `git remote -v` lines, so a `file://` path passed | before the freeze — push to a public repo under an OSI licence |
 | "working tree clean" | The tree is mid-audit; this is the real state, not a measurement artefact. It previously **vanished entirely on a host without git**, which is how a dirty tree with no remote could print "ALL CHECKS PASSED — safe to freeze" | the final commit before the freeze |
 
@@ -109,23 +109,22 @@ or exit code:
 
 ---
 
-## 1b. The five decisions that are already locked
+## 1b. The four decisions that are already locked
 
 These are made, with the arithmetic behind them, in `docs/specs/`. They are
 locked **before** the window opens so that H0 is typing, not deciding.
 
 | # | Decision | Why it is locked |
 |---|---|---|
-| 1 | **Contraction Hierarchies are REJECTED for Track D** | CH preprocessing costs 60–120 s *inside* the timed run, against a Commit budget of 2.9 s total. Amortised over only 2,000 queries it needs a ~30 ms/query saving to break even — about two orders of magnitude off. Chosen instead: CSR + radix heap + bidirectional + 6–8 ALT landmarks, with runtime-adaptive batching by distinct source/target. |
-| 2 | **Track B is deliberately blend-robust** | The published build/query blend (40/60) is DEFERRED and may be additive, harmonic or geometric. Balanced bets (β = q = 30×) survive all three; unbalanced bets swing the result by up to 2.1×. Query speedup carries ~4.5× the marginal leverage of build speedup under the additive blend. |
-| 3 | **Track E is speed-first, not ratio-first** | The M axis is `our_ratio / 2.41`, and across the entire realistic ratio band (2.6×–4.0×) the M factor only spans 1.0153–1.1066 ≈ **2.2 points**, while the T axis spans ~13. Trading 10% of ratio for 2× compression speed is **+3.2 points net**. Target ratio 3.1–3.4; never chase the last 5%. |
-| 4 | **Source bytes are bought for speed, globally** | Doubling the S axis costs 2.1 points; a 1.5× T gain is worth 3.3. So writing more code is a *net win* everywhere — which is why every plan targets a larger source footprint than the reference, not a smaller one. |
-| 5 | **D = 1 is a free axis and must be defended** | 0.15 of the weight, ~10–17% of K, for std-only Rust with zero vendored bytes. The rule-05 guard and the D-axis checks exist to keep it that way. |
+| 1 | **Contraction Hierarchies are legal for Track D, but this query mix rarely repays them** | CH preprocessing costs 60–120 s *inside* the timed run, against a Commit budget of 2.9 s total. Amortised over only 2,000 queries it needs a ~30 ms/query saving to break even — about two orders of magnitude off. Chosen instead: CSR + radix heap + bidirectional + 6–8 ALT landmarks, with runtime-adaptive batching by distinct source/target. The organizers' framing — legal, but rarely repaid by this query mix — is what PERF.md states, with the arithmetic behind it. |
+| 2 | **Track B is one total wall time, and its queries are readable from the start** | The 40/60 build/query split is gone, so build and query are no longer scored separately and the blend question disappears. The query set is available before the corpus is indexed, which is the track's central structural asymmetry and it is legal. |
+| 3 | **The source-size axis is code lines, and it can only cost** | S = code lines counted by `scc` after the formatter, across the whole repo minus registry packages first published before Oct 1, 2026 by people outside the team. It is priced, not rewarded. Byte-identical copies of the published generators and references are free. |
+| 4 | **D = 1 is a free axis and must be defended** | 0.15 of the weight, and `D = 1 + direct non-stdlib runtime deps` means one dependency ⇒ D = 2 ⇒ 2⁻⁰·¹⁵ = 0.90 on K. The rule-05 guard and the D-axis checks exist to keep it at 1.00. |
 
 **One risk already identified:** if the page cache is charged to the memory
-cgroup on HEL1, Track A's M ratio collapses to ~8.6× and K drops ~2 points.
-There is a scheduled H1 measurement for exactly this, because it changes the
-memory design of the biggest track.
+cgroup on the scoring box, Track A's M ratio collapses and K drops. There is a
+scheduled H1 measurement for exactly this, because it changes the memory design
+of the biggest track.
 
 ---
 
@@ -138,27 +137,42 @@ every K budget in the plan becomes real.
 
 **Pinned already (from the public event page):**
 
-* Scoring: `K = ∏(ref/ours)^w`, weights `T .40 / M .20 / S .15 / D .15 / X .10`,
-  every axis capped at 50×, `speed = 100·ln(K)/ln(25)`, track total
-  `0.65·speed + 0.35·judges`, overall = geometric mean of ≥3 tracks.
-* Reference times: A 41.20 s · B 58.70 s · C 36.90 s · D 72.40 s · E 29.80 s.
-* Timeouts: A 412 · B 587 · C 369 · D 724 · E 298 s.
-* Machine: i5-13500, `--cpuset-cpus=0-11` (6 P-cores / 12 threads), turbo off,
-  `--memory=8g --memory-swap=8g` (**swap off**), `cgroup v2 memory.peak`.
+* Scoring: `K = ∏(ref/ours)^w`, weights `T .50 / M .20 / S .15 / D .15`,
+  `speed = 50·log10(K)`, track total `0.65·speed + 0.35·judges`, overall =
+  geometric mean of ≥3 tracks.
+* Caps: **wall time has no cap**; **memory is capped at 50×**; **source size and
+  dependencies can cost you but never pay.**
+* Reference times (measured on the scoring machine, five runs each): A 32.05 s ·
+  B 56.35 s · C 14.44 s · D 72.69 s.
+* Timeouts: A 321 · B 564 · C 144 · D 727 s.
+* Datasets: A 239 MB / 3.1M lines · B 256 MB / 50,000 queries over a 250 MB
+  corpus · C 204 MB / 3.32M records · D 92 MB / 5M edges. A's reference memory
+  is 228 MB and the reference source size is 56 lines.
+* Machine: Falkenstein (fsn1), i5-13500, `--cpuset-cpus=0-11` (6 P-cores /
+  12 threads), turbo off, `--memory=8g --memory-swap=8g` (**swap off**),
+  `cgroup v2 memory.peak`.
 * Run protocol: 5 runs, discard hi+lo, mean of middle 3; >5% spread re-runs;
   >2% reference drift rescores the batch.
-* Docker contract: read `/data`, write exactly one file to `/out`, exit 0,
-  build with `--network=none`.
+* Docker contract: every `FROM` names an image from
+  `speeddemon.dev/allowlist.json`, **pinned by digest**; nothing else may enter
+  the image (no `COPY --from` of another image, no `ADD` of a URL); read `/data`,
+  write exactly one file to `/out`, exit 0, build with `--network=none`; builds
+  capped at 10 minutes and images at 2 GB.
+* Gates: **three** — correctness, the timeout, the sandbox. The speed floor
+  gate is gone.
+* Prizes: $1,800 total — $800 / $400 / $200 overall, $200 for two write-ups,
+  $50 for the highest K on each track. There is no prize for the smallest source.
+* Ties on the final total are broken by raw K, then by wall time, then by
+  earliest submission commit.
 
 **Still DEFERRED — pin these on Oct 28:**
 
 | Track | The decision that changes the most work |
 |---|---|
 | A | output ordering, percentile rank definition, error-rate format, group key |
-| B | **the build/query blend formula** (additive vs harmonic — a 24% swing), boolean operator precedence, tokenisation |
+| B | boolean operator precedence, tokenisation, and the result format (doc ids vs counts) |
 | C | quoting rules for embedded newlines, mid-file BOM semantics, amount scale, aggregate key |
 | D | distance-only vs path output, unreachable spelling, max distance bound |
-| E | **Mref for the compressed size axis**, the exact time blend (the spec fixes 0.25·C + 0.75·D as the weighting; the precise formula is still DEFERRED), and the container format — because *the compressed file is the hashed artefact* |
 
 ---
 
@@ -174,7 +188,7 @@ sh tooling/install-hooks.sh            # installs the pre-commit gate
 
 ### Oct 28 18:00 UTC — spec freeze
 
-1. Read all five frozen specs end to end.
+1. Read all four frozen specs end to end.
 2. Fill `verification/contract.toml` — every `DEFERRED` becomes a fact.
 3. Replace the TARGET K budgets in `docs/MASTER-PLAN.md` with the real
    `Tref/Mref/Sref`.
@@ -200,15 +214,16 @@ Order of work (from `docs/MASTER-PLAN.md` §5):
 | Scaffold | H0–H2 | repo, Dockerfiles, harness replica, SHA hook, `.speed-demon.toml` |
 | Baseline C then A | H2–H6 | correct scalar CSV machine → SHA-green; then ingest baseline |
 | *Sleep 1* | H6–H11 | 5 h — protected |
-| Baselines D, B, E | H11–H17 | CSR bidirectional → index → raw-block rANS |
-| **Milestone** | **~H17** | **all five SHA-green + deterministic → tag `baseline-green`** |
+| Baselines D, B | H11–H15 | CSR bidirectional → index |
+| Baseline hardening | H15–H17 | determinism sweeps on all four, first live-board pushes |
+| **Milestone** | **~H17** | **all four SHA-green + deterministic → tag `baseline-green`** |
 | Deep A | H18–H28 | 10 h |
 | *Sleep 2* | H28–H33 | 5 h |
 | Deep D | H33–H43 | 10 h |
 | Deep C | H43–H51 | 8 h |
 | *Sleep 3* | H51–H56 | 5 h |
 | Solid B | H56–H61 | 5 h |
-| Targeted E | H61–H64 | 3 h |
+| Extra deep A | H61–H64 | 3 h |
 | Buffer | H64–H66 | catch up the furthest-behind track, finish PERF.md |
 | **LOCKDOWN** | **H66–H72** | **no new ideas — verify only** |
 
@@ -246,7 +261,6 @@ day so the work is bookkeeping rather than archaeology.
 
 ```bash
 python tooling/spec_intake.py --status    # every DEFERRED value + where SPEC.md answers it
-python tooling/spec_intake.py --set B.blend_formula='0.40*rB + 0.60*rQ'
 python tooling/spec_intake.py --check     # the gate; fails while a blocker is unanswered
 python tooling/spec_intake.py --kbudget   # the K budget from the pinned numbers
 ```
@@ -259,16 +273,15 @@ table keeps the old number. If that test fails, the fix is to update
 
 Then, in order:
 
-1. Update the five `tracks/*/.speed-demon.toml` output filenames if the spec
+1. Update the four `tracks/*/.speed-demon.toml` output filenames if the spec
    renamed anything; the lockdown cross-checks them against the contract.
 2. Re-run `python tooling/fix_encoding.py --scan .` after pasting any spec
    text into a file — the PowerShell round-trip that produced the Oct 22
    mojibake is still the default way text gets edited on this host.
 3. Re-read `docs/specs/*.md` against the frozen spec and correct any decision
-   the real spec contradicts. The Track D rejection of Contraction
-   Hierarchies is the one most likely to be affected: it rests on the
-   preprocessing budget, so if the frozen D spec allows untimed
-   preprocessing the arithmetic changes.
+   the real spec contradicts. The Track D Contraction-Hierarchy decision is the
+   one most likely to be affected: it rests on the preprocessing budget, so if
+   the frozen D spec allows untimed preprocessing the arithmetic changes.
 4. `sh tooling/ci.sh` must be all green before the window opens.
 
 ---
@@ -301,7 +314,7 @@ cargo build --release --offline -p sd-harness
 `docker run` flags (`--cpuset-cpus=0-11`, `--memory=8g --memory-swap=8g`,
 `--network=none`, `--read-only`, the 1 GiB tmpfs), peak memory from the
 kernel's cgroup `memory.peak`, 5 runs with the high and low discarded, and
-all four gates reported.
+all three gates reported.
 
 ### On the dev machine
 
@@ -327,7 +340,7 @@ sh tooling/install-hooks.sh                # the pre-commit gate
 |---|---|
 | `tooling/rule05_guard.py` | Committing a solution before kickoff → disqualification from the whole event |
 | `tooling/difftest.py` | Losing 3 hours to a hash mismatch that is actually a trailing newline |
-| `tooling/spec_intake.py` | Pinning 36 frozen values by hand on Oct 28 and getting one wrong |
+| `tooling/spec_intake.py` | Pinning the frozen values by hand on Oct 28 and getting one wrong |
 | `verification/harness` (ledger) | Writing PERF.md from memory instead of from measurements |
 | `verification/harness` (lockdown) | A stub reaching the freeze because nobody checked |
 | `tooling/pgo-build.sh` | Leaving 10–20% of T on the table because the build is free |
@@ -356,7 +369,7 @@ sh tooling/install-hooks.sh                # the pre-commit gate
 `docs/specs/` holds one decision-complete design specification per track,
 each with the same eight sections: Reference Teardown, Axis Budget,
 Algorithm & Data Layout, Hash-Gate Correctness & Determinism, Optimization
-Ladder, X-Scaling Safeguard, Hour Budget, Risk Register & Stop Rule.
+Ladder, Scaling Safeguard, Hour Budget, Risk Register & Stop Rule.
 
 They contain **no solution code** — only design, arithmetic, and decisions.
 That is both the point and the legal position: rule 05 requires the code to
@@ -366,7 +379,6 @@ typing instead of thinking.
 | Spec | Lines | The headline decision |
 |---|---|---|
 | `docs/specs/track-a-ingest.md` | 285 | Two-level radix histogram for exact percentiles without sorting; the timestamp parse is the second-biggest cost and nobody expects it |
-| `docs/specs/track-b-index.md` | 261 | Blend-robust balanced bets; StreamVByte postings; positions are where the memory goes |
+| `docs/specs/track-b-index.md` | 261 | One total wall time with the queries readable from the start; StreamVByte postings; positions are where the memory goes |
 | `docs/specs/track-c-join.md` | 303 | 12-feature hostile-input matrix with a parallel-vs-sequential parity scan before the fast path is enabled |
-| `docs/specs/track-d-traverse.md` | 291 | CH rejected on amortization arithmetic; CSR + radix heap + bidirectional + ALT landmarks |
-| `docs/specs/track-e-compress.md` | 311 | Speed-first: the M axis is only worth 2.2 points across the whole ratio band; per-segment models, byte-plane transposition for the float blob |
+| `docs/specs/track-d-traverse.md` | 291 | Contraction Hierarchies are legal but rarely repay this query mix; CSR + radix heap + bidirectional + ALT landmarks |

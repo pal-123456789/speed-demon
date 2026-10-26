@@ -2,8 +2,8 @@
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.
 Track window: baseline H0–H17 (2h charged to Track A), optimization block H18–H28 (10h charged).
-Reference: T 41.2s · M 2940MB · S 3180B · D 1 · timeout 412s · dataset 3.1M lines / 312MB.
-Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15 × (Xref/X)^0.10, each ratio capped at 50×; speed_score = 100·ln(K)/ln(25), clamped [0,100].
+Reference: T 32.05s · M 228MB · S 56 lines · D 1 · timeout 321s · dataset 3.1M lines / 239MB.
+Scoring reminder: K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15; speed_score = 50·log10(K), clamped [0,100]. Wall time has no cap; memory is capped at 50×; S and D can cost you but never pay.
 
 ---
 
@@ -11,16 +11,19 @@ Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D
 
 **What the reference does (from the frozen brief).** Read lines, split on delimiters, parse timestamps with a date library, push latencies into a growing per-endpoint list, sort each list at the end.
 
-**Measured reference axes.** T = 41.2s, M = 2940MB, S = 3180B, D = 1, X = DEFERRED to Oct 28 frozen spec.
+**Measured reference axes.** T = 32.05s, M = 228MB, S = 56 lines, D = 1.
 
 **Structural facts we can exploit (all from the frozen brief, not invented).**
-- 3.1M records, 312MB → ~100 bytes/record average.
+- 3.1M records, 239MB → ~77 bytes/record average.
 - 1,842 distinct endpoints, heavy Zipf tail → a small dictionary, highly skewed lookup frequencies.
 - Fields: `ts` (RFC3339, microsecond precision), `method` (enum, 7 values), `endpoint` (variable length), `status` (uint16), `latency_us` (uint32, MICROSECONDS — the unit is a trap for anyone reading it as milliseconds).
 - ts is monotonic *per shard* but interleaved *across shards* → within a shard the stream is sorted; across shards it is not. If the dataset is delivered as multiple shard files, per-file order is monotonic and global order is not. Line ordering of the OUTPUT is therefore not derivable from input order; it must be an explicit sort (spec DEFERRED: exact output ordering and float formatting).
-- Reference M = 2940MB = 9.4× the 312MB input size. Whatever the reference allocates, it holds far more than the data. Our design goal is structural, not incremental: **no structure in our design grows with the input except the latency array, and that array is 4 bytes per record (12.4MB for 3.1M records).**
+- Reference M = 228MB against a 239MB input. Whatever the reference allocates, it does not retain
+  the data at full size. Our design goal is structural, not incremental: **no structure in our design
+  grows with the input except the latency array, and that array is 4 bytes per record (12.4MB for
+  3.1M records).**
 
-**Where the 41.2s probably goes (HYPOTHESIS, to be measured in the H1–H2 baseline window; no absolute seconds are claimed).**
+**Where the 32.05s probably goes (HYPOTHESIS, to be measured in the H1–H2 baseline window; no absolute seconds are claimed).**
 
 | Component | Hypothesis share of T | Structural reason |
 |---|---|---|
@@ -33,10 +36,9 @@ Scoring reminder: K = (Tref/T)^0.40 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D
 The organizer hints name the same three hot spots: custom line parsing, percentiles without sorting everything, and the allocator. We treat the allocator hypothesis as the memory story (M axis) and the timestamp hypothesis as the second-biggest time cost.
 
 **Gate implications for this track.**
-- Gate 1 (hash) is binary: a record-ordering difference or a float-formatting difference is a zero. Percentile definition is DEFERRED to the Oct 28 frozen spec (nearest-rank vs interpolated; which index; how 0 endpoints or empty lists are spelled). This is the single largest correctness exposure in the track.
-- Gate 2 (speed floor) only constrains the overall title, not the track score, but a 10× floor means a sub-10× entry is worthless; our Commit anchor is 30×.
-- Gate 3 timeout is 412s. Our target runtime is 1–3s, i.e. >100× headroom. The only realistic timeout failure is a hang caused by a parser bug on malformed input, not slowness.
-- Gate 4 (sandbox) forbids writing to /data (read-only mount) and forbids precomputed answers in the image. Consequence: **scratchless design** — no temp files, no /tmp staging, because a 1GB tmpfs staging copy of the dataset would also inflate `memory.peak` and destroy the M axis.
+- Gate 1 (correctness) is binary: a record-ordering difference or a float-formatting difference is a zero. Percentile definition is DEFERRED to the Oct 28 frozen spec (nearest-rank vs interpolated; which index; how 0 endpoints or empty lists are spelled). This is the single largest correctness exposure in the track.
+- Gate 2 is the timeout: 321s. Our target runtime is 1–3s, i.e. >100× headroom. The only realistic timeout failure is a hang caused by a parser bug on malformed input, not slowness. (There is no speed floor gate any more — the three gates are correctness, the timeout and the sandbox.)
+- Gate 3 (sandbox) forbids writing to /data (read-only mount) and forbids precomputed answers in the image. Consequence: **scratchless design** — no temp files, no /tmp staging, because a 1GB tmpfs staging copy of the dataset would also inflate `memory.peak` and destroy the M axis.
 - Reference drift: the reference is re-run before and after every batch and a >2% drift voids the batch. All our T ratios must be computed against a reference measured in the same session; never against a stale number copied into a spreadsheet. Our own measurement protocol mirrors the official one: 5 runs, discard max and min, mean of middle 3.
 
 ---
@@ -45,35 +47,39 @@ The organizer hints name the same three hot spots: custom line parsing, percenti
 
 **Anchor rows (the campaign's committed targets).**
 
-| Row | T ratio | M ratio | S ratio | D ratio | X ratio |
-|---|---|---|---|---|---|
-| Safe | 20× | 10× | 0.60× | 1.00× | 1.00× |
-| Commit | 30× | 15× | 0.62× | 1.00× | 1.05× |
-| Stretch | 45× | 22× | 0.65× | 1.00× | 1.10× |
+| Row | T ratio | M ratio | S ratio | D ratio |
+|---|---|---|---|---|
+| Safe | 20× | 10× | 0.60× | 1.00× |
+| Commit | 30× | 15× | 0.62× | 1.00× |
+| Stretch | 45× | 22× | 0.65× | 1.00× |
+
+S ratio = `S_ref / S_ours` on the **code-line** axis (S_ref = 56 lines for Track A), and it can only
+cost: a ratio above 1.0 is clamped to 1.0, so an S row above 1 would invent points the scorer does
+not award.
 
 **Full arithmetic for each row.**
 
-- Safe: T 20× ^0.40 = 3.3145; M 10× ^0.20 = 1.5849; S 0.60× ^0.15 = 0.9262; D 1× ^0.15 = 1.0000; X 1.00× ^0.10 = 1.0000.
-  K = 3.3145 × 1.5849 × 0.9262 × 1.0000 × 1.0000 = **4.8656**.
-  speed = 100·ln(4.8656)/ln(25) = 100 × 1.58246/3.21888 = **49.15**.
-  Absolute read: T = 41.2/20 = 2.06s, M = 2940/10 = 294MB.
-- Commit: T 30× ^0.40 = 3.8981; M 15× ^0.20 = 1.7188; S 0.62× ^0.15 = 0.9308; D 1.00×; X 1.05× ^0.10 = 1.0049.
-  K = 3.8981 × 1.7188 × 0.9308 × 1.0000 × 1.0049 = **6.2668**.
-  speed = 100·ln(6.2668)/ln(25) = 100 × 1.83526/3.21888 = **57.02**.
-  Absolute read: T = 41.2/30 = 1.373s, M = 2940/15 = 196MB.
-- Stretch: T 45× ^0.40 = 4.5844; M 22× ^0.20 = 1.8556; S 0.65× ^0.15 = 0.9374; D 1.00×; X 1.10× ^0.10 = 1.0096.
-  K = 4.5844 × 1.8556 × 0.9374 × 1.0000 × 1.0096 = **8.0509**.
-  speed = 100·ln(8.0509)/ln(25) = 100 × 2.08622/3.21888 = **64.80**.
-  Absolute read: T = 41.2/45 = 0.916s, M = 2940/22 = 134MB.
+- Safe: T 20× ^0.50 = 4.4721; M 10× ^0.20 = 1.5849; S 0.60× ^0.15 = 0.9262; D 1× ^0.15 = 1.0000.
+  K = 4.4721 × 1.5849 × 0.9262 × 1.0000 = **6.5650**.
+  speed = 50·log10(6.5650) = 50 × 0.81728 = **40.86**.
+  Absolute read: T = 32.05/20 = 1.602s, M = 228/10 = 22.8MB.
+- Commit: T 30× ^0.50 = 5.4772; M 15× ^0.20 = 1.7188; S 0.62× ^0.15 = 0.9308; D 1.00×.
+  K = 5.4772 × 1.7188 × 0.9308 × 1.0000 = **8.7627**.
+  speed = 50·log10(8.7627) = 50 × 0.94253 = **47.13**.
+  Absolute read: T = 32.05/30 = 1.068s, M = 228/15 = 15.2MB.
+- Stretch: T 45× ^0.50 = 6.7082; M 22× ^0.20 = 1.8556; S 0.65× ^0.15 = 0.9374; D 1.00×.
+  K = 6.7082 × 1.8556 × 0.9374 × 1.0000 = **11.6688**.
+  speed = 50·log10(11.6688) = 50 × 1.06716 = **53.35**.
+  Absolute read: T = 32.05/45 = 0.712s, M = 228/22 = 10.4MB.
 
-**Sensitivity: which axis is worth working hours on.** From ln K = 0.40·ln(T ratio) + 0.20·ln(M ratio) + 0.15·ln(S ratio) + 0.15·ln(D ratio) + 0.10·ln(X ratio):
+**Sensitivity: which axis is worth working hours on.** From ln K = 0.50·ln(T ratio) + 0.20·ln(M ratio) + 0.15·ln(S ratio) + 0.15·ln(D ratio):
 
-- Doubling the T ratio adds 0.40·ln2 = 0.2773 to ln K → K ×1.3195 → speed +6.7 points.
-- Doubling the M ratio adds 0.20·ln2 = 0.1386 → K ×1.1487 → speed +2.9 points.
-- Increasing source size by 1.5× costs 0.15·ln1.5 = 0.0608 → K ×0.9410 → speed −1.5 points.
-- Increasing source size by 2.0× costs 0.15·ln2 = 0.1039 → K ×0.9013 → speed −2.1 points.
-- The D axis: D = 1 + non-stdlib runtime deps + vendored bytes/50,000. Rust std-only ⇒ D = 1.000 exactly ⇒ 1.0000 factor, i.e. 0.15·ln(1) = 0 left on the table. The published reference is also D = 1, so this axis is a tie, not a win. Any dependency (memchr, rayon, a date crate, libc for mmap) would push D above 1 and cost 0.15·ln(D) of K — e.g. one vendored 200KB dependency adds 4 to D, costing 0.15·ln(5) = 0.241 → K ×0.786 → speed −4.9 points. **Decision: std-only, no crates, no vendored source, no FFI.** `core::arch` intrinsics are in-tree and do not change D.
-- **Exchange rate: source bytes are cheap, time is expensive.** A 2× larger source costs 2.1 points; buying 1.5× more T speed (say 20× → 30×) gains 0.40·ln(1.5) = 0.1622 → K ×1.176 → speed +3.3 points. Conclusion: **spend source bytes to buy speed, never the reverse.** The Commit row deliberately sits at S 0.62 (≈1.61× the reference's 3,180 normalized bytes ≈ 5,130 bytes) while the T target is 30×.
+- Doubling the T ratio adds 0.50·ln2 = 0.3466 to ln K → K ×1.4142 → speed +7.5 points.
+- Doubling the M ratio adds 0.20·ln2 = 0.1386 → K ×1.1487 → speed +3.0 points.
+- Increasing source size by 1.5× costs 0.15·ln1.5 = 0.0608 → K ×0.9410 → speed −1.3 points.
+- Increasing source size by 2.0× costs 0.15·ln2 = 0.1039 → K ×0.9013 → speed −2.3 points.
+- The D axis: **D = 1 + the number of direct non-stdlib runtime dependencies in the manifest.** Rust std-only ⇒ D = 1 exactly ⇒ 1.0000 factor, i.e. 0.15·ln(1) = 0 left on the table. The published reference is also D = 1, so this axis is a tie, not a win. One dependency (memchr, rayon, a date crate, libc for mmap) pushes D to 2 and costs 0.15·ln2 = 0.1039 → K ×0.9013 → speed −2.3 points. **Decision: std-only, no crates, no FFI.** `core::arch` intrinsics are in-tree and do not change D.
+- **Exchange rate: source size is cheap, time is expensive.** A 2× larger source costs 2.3 points; buying 1.5× more T speed (say 20× → 30×) gains 0.50·ln(1.5) = 0.2027 → K ×1.2247 → speed +4.4 points. Conclusion: **spend source lines to buy speed, never the reverse.** The Commit row deliberately sits at S 0.62 rather than trying to beat the 56-line reference, because the reference is a *naive Python* implementation and the T target is 30×.
 
 **Why M should land far above the 15× target.** Design peak memory budget (Commit):
 
@@ -89,11 +95,11 @@ The organizer hints name the same three hot spots: custom line parsing, percenti
 That budget is wrong as written: the per-thread pair arrays are the dominant term and they exist only to merge. They can be avoided by having each thread write into a *shared* arena with atomic reservation of per-endpoint blocks is complex; the simpler fix is to have each thread own a contiguous slice of a single global (endpoint-id, latency) array by first computing per-thread per-endpoint counts — but counts require a first pass. Two options, both cheap:
 - **Option 1 (two-pass, no merge):** pass 1 counts records per endpoint per thread (streaming, no latency array), prefix-sum into per-thread per-endpoint slots, pass 2 scatters latencies directly into their final per-endpoint slot. Cost: parsing the file twice (T penalty) but zero merge. Not attractive.
 - **Option 2 (one pass, per-thread arenas, merge at the end):** each thread keeps its own (id, latency) pair array; after the pass, a merge stage groups by endpoint and writes the final arena. Peak = per-thread arrays (297.6MB as above) + arena + scratch. To cut this, store the pair as a single u64 (id in the high 32 bits, latency in the low 32 bits) → 12 × 3.1M × 8B = 297.6MB is exactly what that is. Still 297MB.
-- **Option 3 (preferred):** each thread writes latencies into a per-endpoint *growable* structure but with a **two-level index**: 1,842 endpoint slots, each holding a chunked list of fixed-capacity blocks (e.g. 4,096 latencies per block) allocated from a global bump arena. Per-thread chunks are never merged in the classic sense: a per-endpoint block list is a small array of block pointers; blocks are filled in arrival order; per-endpoint latency order is irrelevant to us because we sort for quantiles anyway. The **latency is the only payload**; the endpoint id lives in the block list index, not in the data. Peak = 3.1M × 4B = 12.4MB of blocks + 1,842 × (block pointer array) + block metadata. With a 4,096-entry block = 16KB, the Zipf head endpoint needs ~blocks of 16KB each; total block overhead is 3.1M×4B plus ≤1 block per endpoint per thread. **Peak ≈ 25.2MB (buffers) + 12.4MB (blocks) + 1.5MB (index) ≈ 40MB.** M ratio = 2940/40 = 73× → capped at 50× → M factor = 50^0.20 = **2.1867**, better than the Commit target of 1.7188.
+- **Option 3 (preferred):** each thread writes latencies into a per-endpoint *growable* structure but with a **two-level index**: 1,842 endpoint slots, each holding a chunked list of fixed-capacity blocks (e.g. 4,096 latencies per block) allocated from a global bump arena. Per-thread chunks are never merged in the classic sense: a per-endpoint block list is a small array of block pointers; blocks are filled in arrival order; per-endpoint latency order is irrelevant to us because we sort for quantiles anyway. The **latency is the only payload**; the endpoint id lives in the block list index, not in the data. Peak = 3.1M × 4B = 12.4MB of blocks + 1,842 × (block pointer array) + block metadata. With a 4,096-entry block = 16KB, the Zipf head endpoint needs ~blocks of 16KB each; total block overhead is 3.1M×4B plus ≤1 block per endpoint per thread. **Peak ≈ 25.2MB (buffers) + 12.4MB (blocks) + 1.5MB (index) ≈ 40MB.** M ratio = 228/40 ≈ 5.7×, so Option 3 alone lands *below* the Commit target of 15× (15.2MB) — the buffers have to come down too (single shared arena, 12 × 1MB) to reach 15×. The 50× cap (228/50 = 4.6MB) is out of reach and is not planned for.
 
-Recomputed M ceiling for the Commit row if M lands at 50×: K = 3.8981 × 2.1867 × 0.9308 × 1.0000 × 1.0049 = 8.4662 → speed = 100·ln(8.4662)/3.21888 = 100 × 2.13624/3.21888 = **66.37**. We therefore plan against the 15× target but treat 50× as the realistic M outcome, and we do NOT build the plan around the extra 0.6 points.
+Recomputed M ceiling for the Commit row if M lands at 50×: K = 5.4772 × 2.1867 × 0.9308 × 1.0000 = 11.1530 → speed = 50·log10(11.1530) = **52.38**. We therefore plan against the 15× target and do NOT build the plan around the extra ~5 points.
 
-**Page-cache caveat (must be measured at H1).** If the read-only dataset's page cache is charged to the container's cgroup, `memory.peak` will include up to 312MB of file-backed pages and the M ratio collapses to ~2940/340 ≈ 8.6× (M factor 1.5442, K ×0.898 → −2.0 points). Mitigation is bounded, non-overlapping per-thread buffers and sequential reads (bounded readahead), and an immediate H1 measurement. If page cache is charged, we do not chase M further; we re-anchor the axis table and take the 2-point loss. This is tracked as risk R-A2.
+**Page-cache caveat (must be measured at H1).** If the read-only dataset's page cache is charged to the container's cgroup, `memory.peak` includes up to 239MB of file-backed pages on top of our own ~40MB, and the M ratio collapses to ≈ 228/279 ≈ 0.82× — i.e. **no M win at all** (M factor 0.9614, K ×0.961 → −0.8 points). Mitigation is bounded, non-overlapping per-thread buffers and sequential reads (bounded readahead), and an immediate H1 measurement. If page cache is charged, we do not chase M further; we re-anchor the axis table and take the 0.8-point loss. This is tracked as risk R-A2.
 
 ---
 

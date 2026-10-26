@@ -40,10 +40,10 @@ TRACKS = {
         "name": "Ingest",
         "task": "Aggregate 3.1M structured log lines (312 MB) into per-endpoint request "
                 "counts, p50/p95/p99 latency, and error rates bucketed by hour.",
-        "ref_time": "41.20 s",
+        "ref_time": "32.05 s",
         "ref_mem": "2,940 MB",
         "ref_src": "3,180 B",
-        "timeout": "412 s",
+        "timeout": "321 s",
         "axis_note": "M is peak RSS (cgroup `memory.peak`). The reference's 2,940 MB comes "
                      "mostly from retaining every latency in a growing per-endpoint list.",
         "approach": """Track A is a parsing problem with two separable costs: turning bytes into
@@ -131,17 +131,18 @@ the M axis with data we never need resident.""",
         "name": "Index",
         "task": "Build an inverted index over a 250 MB text corpus, then answer 50,000 "
                 "boolean and phrase queries. Build time and query time are measured "
-                "separately and combined into a single T, weighted 40/60 toward queries.",
-        "ref_time": "58.70 s",
+                "together, as one total wall time. There is no build/query split any more.",
+        "ref_time": "56.35 s",
         "ref_mem": "(pin from the Oct 28 spec)",
         "ref_src": "(pin from the Oct 28 spec)",
-        "timeout": "587 s",
+        "timeout": "564 s",
         "axis_note": "M is the weakest axis on this track: positional postings dominate the "
                      "footprint, and the compression that saves memory costs query time.",
         "approach": """Track B is two optimisation problems that pull against each other, and the
 scoring formula rewards the one you spend your hours on. The build/query
-split is weighted 40% build and 60% query, but the way those two are combined
-into a single `T` ratio matters enormously: a weighted *time* blend
+split is gone. The whole program is one wall time, so the build and the
+queries are simply both part of the number you are measured on. A weighted
+*time* blend
 (`1 / (0.4/rB + 0.6/rQ)`) is always at most an additive *ratio* blend
 (`0.4*rB + 0.6*rQ`), and it is dominated by the slower phase.
 
@@ -188,7 +189,7 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.""",
         "ladder": [
             ("1", "Correct baseline: authored inverted index, boolean + phrase", "SHA-green"),
             ("2", "Dense term ids, byte-sorted dictionary, no per-token allocation", "removes allocation churn from the build"),
-            ("3", "Parallel tokenise over document ranges + deterministic merge", "the build is the weighted-but-slow phase"),
+            ("3", "Parallel tokenise over document ranges + deterministic merge", "the build is the slow phase"),
             ("4", "Blocked delta postings: StreamVByte vs PForDelta, benchmarked", "memory and query speed"),
             ("5", "Boolean: smallest-posting-first intersection", "intersection order is most of the win"),
             ("6", "Phrase: rarest-term anchor + positional verify", "38% of queries"),
@@ -198,11 +199,11 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.""",
             ("Positions only for the sample's query terms", "overfitting to a query set we were never given — reverted on principle"),
             ("Conventional AND/OR precedence", "SHA mismatch — the reference is left-associative"),
             ("12 workers on the build", "memory-bandwidth bound, no win over 6"),
-            ("A denser codec that decodes slower", "the 60% query weight punishes it"),
+            ("A denser codec that decodes slower", "the query phase is the larger share of the one wall time"),
             ("Skipping stopwords", "changes phrase results"),
         ],
         "risks": [
-            ("The build/query blend formula is not what we assumed", "pin it from the frozen harness before trusting any K; the plan assumes the weighted-time (harmonic) reading"),
+            ("A build/query split creeping back into the design", "the track is one total wall time; optimising the build alone is not the job"),
             ("The boolean operator semantics differ", "differential test every operator combination against the reference"),
             ("Phrase tokenisation differs (punctuation, case, numbers)", "mirror the reference's tokenizer exactly"),
         ],
@@ -223,10 +224,10 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.""",
         "task": "Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, "
                 "embedded newlines, mixed line endings, a UTF-8 BOM on some chunks and "
                 "not others — join it against a lookup table, and emit sorted aggregates.",
-        "ref_time": "36.90 s",
+        "ref_time": "14.44 s",
         "ref_mem": "(pin from the Oct 28 spec)",
         "ref_src": "(pin from the Oct 28 spec)",
-        "timeout": "369 s",
+        "timeout": "144 s",
         "axis_note": "M is easy to win here by streaming: the reference materialises rows the "
                      "aggregate does not need.",
         "approach": """This is the correctness track, and the organizers say plainly that most
@@ -317,10 +318,10 @@ charged to cgroup `memory.peak`.""",
         "task": "Traverse a 5M-edge directed weighted graph and answer 2,000 "
                 "source-target shortest-path queries. Preprocessing is allowed and is "
                 "counted inside the timed run.",
-        "ref_time": "72.40 s",
+        "ref_time": "72.69 s",
         "ref_mem": "(pin from the Oct 28 spec)",
         "ref_src": "(pin from the Oct 28 spec)",
-        "timeout": "724 s",
+        "timeout": "727 s",
         "axis_note": "M has to hold the graph *and* whatever preprocessing we build, inside an "
                      "8 GB ceiling. Preprocessing that doubles memory to save a second of "
                      "query time is a bad trade at this weight.",
@@ -342,12 +343,14 @@ So the plan is a portfolio with a hard rollback:
 2. **ALT** (A* with landmark distances) is a bounded experiment: sweep the
    landmark count and keep it only if it beats plain bidirectional inside
    the time budget.
-3. **Contraction Hierarchies are REJECTED**, on arithmetic rather than on
-   nerve: the preprocessing has to be paid inside the timed run, and at the 1x
-   ratio the shortcut build alone exceeds the whole query budget it is meant to
-   accelerate. No abort gate makes that arithmetic work, so CH is not on the
-   ladder at all. The chosen structure is CSR + a radix heap + bidirectional
-   search + 6-8 ALT landmarks.
+3. **Contraction Hierarchies are legal, but this query mix rarely repays
+   them**, which is the organizers' own wording: the queries are local, so
+   the shortcut build has to be paid inside the timed run and, at the 1x
+   ratio, the build alone exceeds the query budget it is meant to accelerate.
+   No abort gate makes that arithmetic work, so CH is not on the ladder. The
+   point is arithmetic, not taste — CH is a good idea on road-like graphs,
+   and this graph is not one. The chosen structure is CSR + a radix heap +
+   bidirectional search + 6-8 ALT landmarks.
 
 The reverse graph is a *traversal structure*, not a claimed edge: it is
 built from the edge list because the format lists reverse edges separately
@@ -398,14 +401,14 @@ is a failed run, not a slow one.""",
             ("6", "ALT landmark count tuned to 6-8 with per-landmark offsets", "kept only if it wins the 1x AND the 10x ratio"),
         ],
         "failed": [
-            ("A Contraction-Hierarchy build", "REJECTED on amortisation arithmetic: preprocessing inside the timed run costs more than the queries it saves at the 1x ratio, and no abort gate changes that"),
+            ("A Contraction-Hierarchy build", "LEGAL, but this query mix rarely repays it: the searches are local, so preprocessing inside the timed run costs more than the queries it saves. The organizers say the same thing — CH is legal, it just rarely repays on this mix — and our own amortisation arithmetic agrees. Not a moral objection to CH; an arithmetic one"),
             ("Too many ALT landmarks", "memory grows as k*n*4 with per-landmark offsets; past 8 the M axis gets worse faster than the queries get faster"),
             ("32-bit distances", "no proven bound on the maximum path weight — a wrong answer is worse than a slow one"),
             ("Preprocessing justified by sequential query timing", "the queries are parallel; the budget is 12x smaller than it looks"),
         ],
         "risks": [
             ("The output wants a path and our tie-break differs", "pin the contract; run a diamond-graph tie-break suite"),
-            ("The 10x scaling run penalises preprocessing", "test the 10x construction explicitly before keeping CH"),
+            ("A heavy index that never pays for itself", "queries are local, so a big index is not repaid by short searches — measure the break-even before keeping it"),
             ("The edge list contains self-loops or duplicate edges", "handle them explicitly rather than assuming the format excludes them"),
         ],
         "next24": """* Hierarchical hub labelling or a transit-node routing scheme, both of which
@@ -418,115 +421,7 @@ is a failed run, not a slow one.""",
   is much smaller than the graph, and a blocked layout could matter more than
   the search algorithm.
 * Measure the preprocessing break-even empirically instead of analytically,
-  by running the 10x-scaled query set and finding where CH stops paying.""",
-    },
-    "E": {
-        "dir": "E-compress",
-        "name": "Compress",
-        "task": "Losslessly compress a fixed 100 MB mixed corpus — text, logs, JSON, and a "
-                "binary blob. Scored on ratio and decompression throughput together. "
-                "Compression time is measured but weighted at a quarter of decompression time.",
-        "ref_time": "29.80 s",
-        "ref_mem": "2.41x ratio (43.5 MB / 100 MiB)",
-        "ref_src": "(pin from the Oct 28 spec)",
-        "timeout": "298 s",
-        "axis_note": "On this track the M slot holds COMPRESSED SIZE, and the ratio that feeds "
-                     "K is (our ratio) / (the reference's 2.41x) — not the raw ratio. That "
-                     "distinction is worth about 18% of K, and it is the easiest mistake to "
-                     "make on this track.",
-        "approach": """Track E is the one track where the trade-off *is* the subject, and the
-coefficient changes shape: the M slot is compressed size, and decompression
-time is weighted roughly four times compression time. So the arithmetic says
-almost everything about the design:
-
-* **The decoder is what is measured.** Put the complexity in the encoder,
-  where it is weighted at a quarter, and keep the decoder simple, branch-light
-  and parallel.
-* **The ratio is only worth 0.20.** The reference already achieves 2.41x. A
-  ratio of 3.0x is a 1.24x on that axis — worth 1.04 in the product. A 2x
-  speedup on the decoder is worth 1.32 in the product. *Time beats size on
-  this track, and by a lot.*
-* **One decoder for all four segments.** Four segment-specific coders means
-  four chances to be slow; one canonical decoder with a per-segment
-  transform in front of it means the hot path is written and tuned once.
-
-The corpus is four published segments — byte-exact sizes and offsets are in
-`verification/contract.toml` — each rewarding a different model: English prose,
-log lines in the Track A format, nested JSON with repetitive keys, and float32
-sensor frames. Each gets a reversible transform in front of the shared entropy
-coder, and each keeps a raw-block fallback so a segment that the transform does
-not help is stored as-is rather than compressed badly. Detect the boundaries
-from the table rather than assuming a fixed alignment: the published offsets are
-whole-MiB only for the first two.""",
-        "layout": """* **Shared binary range coder**, with an adaptive 12-bit probability model per
-  context — one canonical implementation for every segment, as
-  `docs/specs/track-e-compress.md` decides. A range coder is chosen over rANS
-  and over a bit-by-bit arithmetic coder: the decoder is a multiply, a compare
-  and a renormalisation refill, with no table to keep resident, and it is
-  trivially parallel across blocks.
-
-  (This bullet said "shared rANS decoder" until now. rANS was the older plan;
-  the spec of record rejects ANS on the K objective, and `docs/MASTER-PLAN.md`
-  states that where a track document and the spec disagree, the spec wins. The
-  generator was one of four documents still selling the superseded design.)
-* **prose** — a bounded LZ match finder feeding an order-1/2 context model.
-  The encoder pays for the search; the decoder just replays it.
-* **logs** — the Track A line format, so the field structure is reused:
-  timestamps become deltas, latency becomes a delta, and the method and
-  endpoint fields become dictionary indices. This is the biggest single ratio
-  win, and it comes free from the work already done on Track A.
-* **json** — a lexical tokeniser plus a key dictionary, preserving every
-  escape, every space and every number's exact spelling. No AST: building
-  one costs time and loses information.
-* **blob** — float32 frames transposed to separate byte planes and XOR-deltaed
-  **on the raw `u32` bit pattern**, never with float arithmetic. This
-  preserves NaN payloads, the sign of zero, infinities and subnormals
-  exactly, which float arithmetic would silently destroy.""",
-        "memory": """On this track the scored "memory" is the compressed output size, so the
-compression-time budget trades directly against the M axis. The encoder
-works block by block so the peak RAM stays at a few megabytes above the
-output buffer, and the output buffer is written once.
-
-The round trip must be bit-exact: `decode(encode(x)) == x` for every byte.
-The container header is fixed — magic, version, endianness, segment table,
-block table — with no timestamps, no seeds and no hash-order-dependent
-serialisation, so the output file is a deterministic function of the input.""",
-        "determinism": """* The compressed file *is* the artefact, so it is hashed. It must be
-  byte-identical across runs: fixed block order, fixed table serialisation,
-  no timestamps, no uninitialised padding.
-* 1 worker and 12 workers must produce the same bytes. The encoder is
-  parallel per block, and blocks are written in index order.
-* The float special-value matrix (NaN payloads, +0 vs -0, infinity,
-  subnormals) round-trips exactly, and there is a test for each.""",
-        "ladder": [
-            ("1", "Raw-block container + minimal rANS, exact round trip", "SHA-green"),
-            ("2", "One shared canonical decoder, per-segment dispatch", "the decoder is what is measured"),
-            ("3", "Logs transform reusing the Track A tokenizer", "the biggest ratio lever"),
-            ("4", "prose / json / blob transforms, each with a raw fallback", "per-segment models"),
-            ("5", "Parallel rANS decoder across blocks", "12 threads on 6 P-cores"),
-            ("6", "Encoder-side search improvements that do not slow the decoder", "cheap on the 4x-weighted axis"),
-        ],
-        "failed": [
-            ("A full PPM encoder", "too slow to be worth it on the blended T, and it slowed the decoder as well"),
-            ("Float arithmetic on the blob segment", "destroys NaN payloads and the sign of zero — breaks bit-exactness"),
-            ("A denser coder that decoded slower", "loses on the axis that carries the weight"),
-            ("One model for all four segments", "each segment rewards a different model; the blend was worse than the reference on two of them"),
-        ],
-        "risks": [
-            ("The expected output is the compressed file, so the exact bytes matter", "the container format must be pinned from the frozen spec before any ratio work"),
-            ("The time blend formula is not exactly 0.8/0.2", "pin it; a different blend reorders the whole priority list"),
-            ("The segment offsets differ from the published ones", "the published offsets are 1 MiB aligned; detect rather than assume where it is safe to do so"),
-        ],
-        "next24": """* A proper order-3 context model for the prose segment, with the
-  match-finding cost kept entirely on the encoder side.
-* Adaptive per-segment model selection: measure each candidate model on each
-  segment and pick per block, which is where a real codec earns its ratio.
-* A SIMD rANS decoder — the decode loop is a serial dependency per block, but
-  the blocks are independent, and a wider interleaved decode across four
-  blocks could hide the latency.
-* Write the size/speed Pareto frontier explicitly (ratio against decode
-  MB/s) and publish it; the trade-off is the subject of the track, so
-  showing the frontier is worth more than a single point on it.""",
+  by finding where the preprocessing stops paying for itself.""",
     },
 }
 
@@ -554,17 +449,17 @@ PERF_TEMPLATE = """# PERF.md — Track {track} ({name})
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | {ref_time} | _(fill)_ | _(fill)_ | 0.40 | _(fill)_ |
+| T · wall time | {ref_time} | _(fill)_ | _(fill)_ | 0.50 | _(fill)_ |
 | M · {m_label} | {ref_mem} | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
 | S · source size | {ref_src} | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| X · scaling | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.10 | _(fill)_ |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
 
-`K = (Tref/T)^0.40 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15 x (Xref/X)^0.10`,
-each ratio capped at 50x, `speed score = 100*ln(K)/ln(25)`.
-Recompute with `python tooling/k_calc.py --t _ --m _ --s _ --d 1 --x _`.
+`K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
+Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
+can cost you and never pay. `speed score = 50*log10(K)`, clamped to 0..100, so
+K = 10 is half marks and K = 100 is full marks.
 
 {axis_note}
 
@@ -941,7 +836,7 @@ def main(argv=None) -> int:
     for track, cfg in TRACKS.items():
         tdir = ROOT / "tracks" / cfg["dir"]
 
-        m_label = "compressed size" if track == "E" else "peak memory"
+        m_label = "peak memory"
 
         track_records = [r for r in read_ledger() if r.get("track") == track]
         measured = build_measured_ladder(track, track_records)

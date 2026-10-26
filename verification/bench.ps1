@@ -10,7 +10,7 @@
     /sys/fs/cgroup/<container>/memory.peak, never from `ps` or `time`.
 
 .PARAMETER Track
-    A, B, C, D or E.
+    A, B, C or D.
 
 .PARAMETER Runs
     Scored runs (default 5).
@@ -21,7 +21,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("A","B","C","D","E")]
+    [ValidateSet("A","B","C","D")]
     [string]$Track,
     [int]$Runs = 5,
     [switch]$Docker
@@ -60,7 +60,6 @@ $TrackInfo = @{
     B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
     C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
     D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
-    E = @{ Name = "E-compress"; Timeout = 298; Ref = 29.80; Binary = "speeddemon-e"; Input = "corpus.bin";  Output = "corpus.sd" }
 }
 $info = $TrackInfo[$Track]
 

@@ -24,7 +24,6 @@ that the rules clearly expect to be written inside the window:
   * a CSV field/quote state machine            (Track C)
   * an inverted index or posting lists         (Track B)
   * a graph traversal, Dijkstra/ALT/CH         (Track D)
-  * an entropy coder (rANS/Huffman/LZ)          (Track E)
   * a percentile estimator                     (Track A)
 
 What does NOT count, and is explicitly allowed: the harness, the tooling,
@@ -150,21 +149,6 @@ PATTERNS: list[Pattern] = [
         r"\b(hl_degree|elimination_order|contract_node|hub_label|"
         r"bidirectional_search)\b",
         "Graph preprocessing is Track D's central decision and its solution.",
-    ),
-    # ── Track E: the entropy coder ────────────────────────────────────────
-    Pattern(
-        "entropy-coder",
-        "E",
-        r"\b(rans_encoder|rans_decoder|rans_sym|rans_freq|huffman_table|"
-        r"huffman_encode|bit_packer|arith_decoder|arith_encoder)\b",
-        "The entropy coder is Track E's entire deliverable.",
-    ),
-    Pattern(
-        "lz-coder",
-        "E",
-        r"\b(lz77_encode|lz78_encode|match_finder|hash_chain|deflate_block|"
-        r"lz4_compress)\b",
-        "LZ-style match finding is Track E's optimisation work.",
     ),
     # ── Track A: the percentile estimator ─────────────────────────────────
     Pattern(

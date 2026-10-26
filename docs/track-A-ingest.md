@@ -1,22 +1,27 @@
-# Track A — Ingest (DEEP, target K 7–8)
+# Track A — Ingest (DEEP, target K 9–12)
 
-**Task:** 3.1M structured log lines (312 MB) → per-endpoint counts, p50/p95/p99 latency, hourly
-error counts. Reference ≈ 41.2 s / ~2940 MB peak. 1,842 distinct endpoints, heavy Zipf tail.
-Timeout 412 s. *(These figures are verbatim from the frozen context block.)*
+**Task:** 3.1M structured log lines (239 MB) → per-endpoint counts, p50/p95/p99 latency, hourly
+error counts. Reference ≈ 32.05 s / 228 MB peak. 1,842 distinct endpoints, heavy Zipf tail.
+Timeout 321 s. *(These figures are the published reference numbers.)*
 
-> All K below are **TARGET/EXPECTED** — replace T/M/S refs with the Oct 28 frozen values and remeasure.
+> All K below are **TARGET/EXPECTED** — replace T/M/S refs with the batch-local values and
+> remeasure.
 
 ## Corrected K budget (recompute `∏(ref/ours)^w` on the box)
 
-| Row | T | M | S | D | X | K | Speed |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Safe | 20× | 10× | 0.60× | 1 | 1.00× | **4.87** | 49.2 |
-| Commit | 30× | 15× | 0.62× | 1 | 1.05× | **6.27** | 57.0 |
-| Stretch (headline) | 45× | 22× | 0.65× | 1 | 1.10× | **8.05** | 64.8 |
+`K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15`; speed score = `50·log10(K)`,
+clamped to 0–100. Wall time is uncapped; memory is capped at 50×; S and D can cost but never pay.
 
-Astra's §2.3 Safe/Commit rows (5.15/6.77) under-applied the S^0.15 penalty — use 4.87/6.27.
-**§11 ceiling is ~9, not "9–13."** M 22× (~134 MB) is only reachable if the input is **not**
-mmap-charged to `memory.peak` — favor a buffered streaming read and measure both.
+| Row | T | M | S | D | K | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| Safe | 20× | 10× | 0.60× | 1 | **6.57** | 40.9 |
+| Commit | 30× | 15× | 0.62× | 1 | **8.76** | 47.1 |
+| Stretch (headline) | 45× | 22× | 0.65× | 1 | **11.67** | 53.4 |
+
+**§11 ceiling is not ~9 any more.** T is uncapped, so the old cap argument is void: at T 45×,
+M 50× and S 1.0, K reaches 14.7 (speed 58.3). M 22× (≈10 MB against the 228 MB reference) is only
+reachable if the input is **not** mmap-charged to `memory.peak` — favor a buffered streaming read
+and measure both.
 
 ## Algorithm & data layout
 - **Custom byte scanner** over the frozen line grammar; fixed-width timestamp parse; no general
@@ -48,6 +53,6 @@ intern map (contention > sharding), 12 workers (SMT/cache pressure widens spread
 - [ ] No hash-map iteration in output; byte-identical across ≥10 runs.
 
 ## Memory & risk
-- Target peak well under 8 GB; the win vs the ~2940 MB reference is dropping full-line retention and
+- Target peak well under 8 GB; the win vs the 228 MB reference is dropping full-line retention and
   per-record allocation. **mmap may inflate `memory.peak`** — this is the main M-axis risk.
 - Risk: percentile definition / tie-handling must match the frozen reference exactly (SHA).

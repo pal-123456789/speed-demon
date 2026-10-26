@@ -30,9 +30,9 @@ TRACK="${TRACK:-A}"
 # all. Validation is therefore strict and happens before anything runs.
 TRACK="$(printf '%s' "$TRACK" | tr '[:lower:]' '[:upper:]')"
 case "$TRACK" in
-    A|B|C|D|E) ;;
+    A|B|C|D) ;;
     *)
-        echo "[run] FATAL: unknown TRACK='$TRACK' (expected A..E)" >&2
+        echo "[run] FATAL: unknown TRACK='$TRACK' (expected A..D)" >&2
         exit 1
         ;;
 esac
@@ -42,7 +42,6 @@ case "$TRACK" in
     B) BIN="speeddemon-b" ;;
     C) BIN="speeddemon-c" ;;
     D) BIN="speeddemon-d" ;;
-    E) BIN="speeddemon-e" ;;
 esac
 
 BINPATH="$APP_DIR/bin/$BIN"

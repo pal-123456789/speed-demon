@@ -5,7 +5,6 @@ members = [
     "tracks/B-index",
     "tracks/C-join",
     "tracks/D-traverse",
-    "tracks/E-compress",
     # Verification infrastructure — NOT a submission track.
     # It never enters the scored image and never touches tracks/*/src.
     "verification/harness",

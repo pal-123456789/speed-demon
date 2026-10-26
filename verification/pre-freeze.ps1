@@ -22,7 +22,7 @@
       10. the public repo + OSI licence are in place
 
 .PARAMETER Track
-    A, B, C, D, E or All.
+    A, B, C, D or All.
 
 .PARAMETER SkipCleanBuild
     Skip check 1 (it clones the repo into a temp dir; slow).
@@ -44,7 +44,6 @@ $TrackInfo = @{
     B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
     C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
     D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
-    E = @{ Name = "E-compress"; Timeout = 298; Ref = 29.80; Binary = "speeddemon-e"; Input = "corpus.bin";  Output = "corpus.sd" }
 }
 
 $script:failures = 0
@@ -134,7 +133,7 @@ if (-not $SkipCleanBuild) {
     }
 }
 
-$targets = if ($Track -eq "All") { @("A","B","C","D","E") } else { @($Track.ToUpper()) }
+$targets = if ($Track -eq "All") { @("A","B","C","D") } else { @($Track.ToUpper()) }
 
 foreach ($t in $targets) {
     $info = $TrackInfo[$t]

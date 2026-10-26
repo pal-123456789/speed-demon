@@ -18,11 +18,12 @@ S  source size, weight 0.15
    normalisation — is superseded and no longer approximates the scored value.
 
 D  dependency weight, weight 0.15
-   D = 0.90 ^ (direct dependencies declared in your manifest)
-   "one dependency gives a factor of 0.90". This replaces
-   `1 + deps + vendored_bytes/50000`, which charged ~2.0 for one dependency.
-   The reference has none, so D_ref = 1 and this repo still sits at 1.0 — but
-   the arithmetic is now the real one.
+   D = 1 + (direct non-stdlib runtime dependencies in your manifest)
+   "The vendored-bytes term is gone." This replaces
+   `1 + deps + vendored_bytes/50000`, which counted vendored source twice, and
+   the short-lived `0.90^deps` reading, which was never the rule. The
+   reference declares none, so D_ref = 1 and this repo still sits at 1.0. One
+   dependency gives D = 2, a factor of 2^-0.15 = 0.90 on K.
 
 Usage
 -----
@@ -54,7 +55,6 @@ TRACK_DIRS = {
     "B": "B-index",
     "C": "C-join",
     "D": "D-traverse",
-    "E": "E-compress",
 }
 
 # The published reference source size for Track A (the event page states
@@ -62,9 +62,10 @@ TRACK_DIRS = {
 # the Oct 28 frozen spec.
 REF_SOURCE_BYTES = {"A": 3180}
 
-# The D formula from the Oct 28 rule change: one direct dependency is 0.90.
-# Must match `D_FACTOR_PER_DEP` in verification/harness/src/contract.rs.
-D_FACTOR_PER_DEP = 0.90
+# The D formula from the Oct 28 rule change: D = 1 + the number of direct
+# non-stdlib runtime dependencies. Must match `d_value` in
+# verification/harness/src/contract.rs.
+D_BASE = 1.0
 
 # ── S axis ────────────────────────────────────────────────────────────────
 
@@ -249,16 +250,16 @@ def measure_source(track_dir: Path) -> dict:
 # ── D axis ────────────────────────────────────────────────────────────────
 
 def measure_dependencies(track_dir: Path) -> dict:
-    """D = 0.90 ^ (direct dependencies declared in the manifest).
+    """D = 1 + (direct non-stdlib runtime dependencies in the manifest).
 
-    Changed before the Oct 28 freeze (docs/RULE-CHANGES-oct28.md §2): "D counts
-    direct dependencies declared in your manifest, so ordinary libraries cost a
-    predictable amount: one dependency gives a factor of 0.90."
+    Changed before the Oct 28 freeze (docs/RULE-CHANGES-oct28.md): "D = 1 + the
+    number of direct non-stdlib runtime dependencies declared in your manifest.
+    The vendored-bytes term is gone."
 
-    This replaces `D = 1 + deps + vendored_bytes / 50000`, which charged about
-    2.0 for a single dependency — more than twice the real penalty — and which
-    no longer describes how the axis is scored. Vendored bytes are still
-    reported for information, but they are not in the formula.
+    This replaces `1 + deps + vendored_bytes/50000`, which counted vendored
+    source a second time, and the short-lived `0.90^deps` reading, which was
+    never the rule the organizers published. Vendored bytes are still reported
+    for information, but they are not in the formula.
     """
     cargo = track_dir / "Cargo.toml"
     deps = []
@@ -289,7 +290,7 @@ def measure_dependencies(track_dir: Path) -> dict:
                 if f.is_file():
                     vendored_bytes += f.stat().st_size
 
-    d = D_FACTOR_PER_DEP ** len(deps)
+    d = D_BASE + len(deps)
     return {
         "declared_dependencies": len(deps),
         "dependencies": deps,
@@ -343,7 +344,7 @@ def report(track: str, as_json: bool) -> dict:
         print(f"     vendored bytes   : {d['vendored_bytes']}  (reported only — "
               f"not in the formula since the Oct 28 change)")
         print(f"     D                : {d['D']:.4f}  "
-              f"(0.90^deps, capped at 1.00; contributes {min(1.0, d['D'])**0.15:.4f} to K)")
+              f"(1 + direct deps; contributes {(1.0 / d['D'])**0.15:.4f} to K)")
     return result
 
 

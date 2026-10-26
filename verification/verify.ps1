@@ -12,7 +12,7 @@
                       correct run in this track (a local proxy for the
                       organizer's leaderboard floor).
       G3 TIMEOUT      wall time must stay under 10x the reference time
-                      (A 412s / B 587s / C 369s / D 724s / E 298s).
+                      (A 412s / B 587s / C 369s / D 724s).
       G4 SANDBOX      exactly one file in /out, no writes outside /tmp, and
                       the output must not contain the scaffold sentinel.
 
@@ -20,7 +20,7 @@
     lowest, mean of the middle three.
 
 .PARAMETER Track
-    A, B, C, D, E or All.
+    A, B, C, D or All.
 
 .PARAMETER Runs
     Number of scored runs (default 5).
@@ -48,7 +48,6 @@ $TrackInfo = @{
     B = @{ Name = "B-index";    Timeout = 587; Ref = 58.70; Binary = "speeddemon-b"; Input = "corpus.txt";  Output = "index.txt" }
     C = @{ Name = "C-join";     Timeout = 369; Ref = 36.90; Binary = "speeddemon-c"; Input = "records.csv"; Output = "join.txt" }
     D = @{ Name = "D-traverse"; Timeout = 724; Ref = 72.40; Binary = "speeddemon-d"; Input = "graph.txt";  Output = "traverse.txt" }
-    E = @{ Name = "E-compress"; Timeout = 298; Ref = 29.80; Binary = "speeddemon-e"; Input = "corpus.bin";  Output = "corpus.sd" }
 }
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -105,7 +104,7 @@ function Get-TrimmedMean {
 }
 
 # ── main ───────────────────────────────────────────────────────────────────
-$targets = if ($Track -eq "All") { @("A","B","C","D","E") } else { @($Track.ToUpper()) }
+$targets = if ($Track -eq "All") { @("A","B","C","D") } else { @($Track.ToUpper()) }
 $overallOk = $true
 $summary = @()
 

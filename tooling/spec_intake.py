@@ -94,13 +94,6 @@ CATALOGUE = {
         "ref_peak_mem_mb": ("the M axis denominator", "SPEC D, reference table", False),
         "ref_source_bytes": ("the S axis denominator", "SPEC D, reference table", False),
     },
-    "E": {
-        "ref_compressed_bytes": ("the M axis denominator", "SPEC E, reference table", False),
-        "ref_source_bytes": ("the S axis denominator", "SPEC E, reference table", False),
-        "time_blend": ("how compression and decompression times combine", "SPEC E, scoring section", True),
-        "container_format": ("the wrapper around the compressed bytes", "SPEC E, output section", True),
-        "output_hash_source": ("what exactly the SHA gate hashes", "SPEC E, output section", True),
-    },
 }
 
 
@@ -214,7 +207,7 @@ def cmd_check(sections) -> int:
 
     # K anchors need the reference numbers.
     g = sections.get("global", {})
-    for track in "ABCDE":
+    for track in "ABCD":
         sec = sections.get(track, {})
         ref_time = sec.get("ref_time_s", "")
         if DEFERRED in ref_time.upper() or not ref_time:
@@ -247,20 +240,26 @@ def cmd_check(sections) -> int:
     return 0
 
 
+def cap_of(g) -> float:
+    """The memory cap, from the contract's `axis_cap`."""
+    return float(g.get("axis_cap", "50").strip('"'))
+
+
 def cmd_kbudget(sections) -> int:
     g = sections.get("global", {})
+    # Four axes. The X (scaling) axis was removed before the freeze and its
+    # weight moved to wall time.
     weights = {
-        "T": float(g.get("weight_t", "0.40").strip('"')),
+        "T": float(g.get("weight_t", "0.50").strip('"')),
         "M": float(g.get("weight_m", "0.20").strip('"')),
         "S": float(g.get("weight_s", "0.15").strip('"')),
         "D": float(g.get("weight_d", "0.15").strip('"')),
-        "X": float(g.get("weight_x", "0.10").strip('"')),
     }
-    cap = float(g.get("axis_cap", "50").strip('"'))
-    anchor = float(g.get("k_anchor", "25").strip('"'))
+    # Per-axis caps: wall time uncapped, memory 50x, S and D 1.0.
+    caps = {"T": None, "M": cap_of(g), "S": 1.0, "D": 1.0}
 
-    print(f"{'TRACK':<6} {'Tref(s)':>8} {'Mref':>10} {'Sref(B)':>9} {'T@Commit':>9} {'K':>7} {'speed':>7}")
-    for track in "ABCDE":
+    print(f"{'TRACK':<6} {'Tref(s)':>8} {'Mref':>10} {'Sref(L)':>9} {'T@Commit':>9} {'K':>7} {'speed':>7}")
+    for track in "ABCD":
         sec = sections.get(track, {})
         ref_time = sec.get("ref_time_s", "")
         if not ref_time or DEFERRED in ref_time.upper():
@@ -275,32 +274,36 @@ def cmd_kbudget(sections) -> int:
                     return float(v.strip('"'))
             return None
 
-        ref_mem = num("ref_peak_mem_mb", "ref_compressed_bytes")
-        ref_src = num("ref_source_bytes")
+        ref_mem = num("ref_peak_mem_mb")
+        # S is measured in CODE LINES now, not bytes.
+        ref_src = num("ref_source_lines")
 
         # The Commit anchor from docs/specs/: each track's own commitment
-        # row, not a generic one. E's M ratio is (our ratio 3.10 / 2.41).
+        # row, not a generic one.
         anchors = {
             "A": (30.0, 15.0),
             "B": (30.0, 12.0),
             "C": (30.0, 12.0),
             "D": (25.0, 8.0),
-            "E": (25.0, 1.2863),
         }
         t_ratio, m_ratio = anchors[track]
 
         if ref_src:
-            # Assume our source lands near 5,400 normalised bytes (the
-            # Nightshade anchor); refine after the first measurement.
-            s_ratio = min(ref_src / 5400.0, cap)
+            # Assume our source lands near 5,400 code lines (the Nightshade
+            # anchor); refine after the first measurement.
+            s_ratio = min(ref_src / 5400.0, 1.0)
         else:
             s_ratio = 0.62
-        ratios = [t_ratio, m_ratio, s_ratio, 1.0, 1.05]
+        ratios = {"T": t_ratio, "M": m_ratio, "S": s_ratio, "D": 1.0}
         contribs = []
-        for r, w in zip(ratios, weights.values()):
-            contribs.append(min(r, cap) ** w)
+        for axis, w in weights.items():
+            r = ratios[axis]
+            cap = caps[axis]
+            if cap is not None:
+                r = min(r, cap)
+            contribs.append(max(0.0, r) ** w)
         k = math.prod(contribs)
-        speed = 100.0 * math.log(k) / math.log(anchor) if k > 0 else 0.0
+        speed = 50.0 * math.log10(k) if k > 0 else 0.0
         speed = max(0.0, min(speed, 100.0))
         print(f"{track:<6} {ref_time:>8.2f} "
               f"{(f'{ref_mem:.0f}' if ref_mem else 'DEFERRED'):>10} "

@@ -46,12 +46,12 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$ALL" = "0" ] && [ -z "$TRACK" ]; then
-  echo "usage: sh tooling/pgo-build.sh --track A|B|C|D|E | --all [--clean]" >&2
+  echo "usage: sh tooling/pgo-build.sh --track A|B|C|D | --all [--clean]" >&2
   exit 2
 fi
 
 if [ "$ALL" = "1" ]; then
-  TRACKS="A B C D E"
+  TRACKS="A B C D"
 else
   TRACKS="$TRACK"
 fi

@@ -45,7 +45,7 @@ export PYTHONIOENCODING="utf-8"
 export PYTHONUTF8="1"
 
 FAST=0
-TRACKS="A,B,C,D,E"
+TRACKS="A,B,C,D"
 while [ $# -gt 0 ]; do
   case "$1" in
     --fast) FAST=1 ;;

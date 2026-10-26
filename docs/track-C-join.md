@@ -1,9 +1,9 @@
-# Track C — Join (DEEP, the DQ track, target K 6–7)
+# Track C — Join (DEEP, the DQ track, target K 8–9)
 
 **Task:** parse a **hostile ~204 MB CSV** (quoted commas, escaped quotes `""`, embedded LF/CRLF
 inside quoted fields, mixed line endings, a mid-file BOM), columns `id,name,note,region_id,amount`;
-**join + sorted aggregates**. Reference ≈ 36.9 s. Timeout 369 s. **Most disqualifications happen
-here — correctness first, always.** *(Figures verbatim from the frozen context block.)*
+**join + sorted aggregates**. Reference ≈ 14.44 s. Timeout 144 s. **Most disqualifications happen
+here — correctness first, always.** *(These figures are the published reference numbers.)*
 
 > Join key = `region_id` and amount scale are **INFERENCE, not fact** — defer the lookup schema,
 > aggregate key, output format, comparator, and amount scale to the frozen spec. All K are
@@ -11,16 +11,20 @@ here — correctness first, always.** *(Figures verbatim from the frozen context
 
 ## Corrected K budget (recompute `∏(ref/ours)^w` on the box)
 
-| Row | T | M | S | D | X | K | Speed |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Safe | 20× | 10× | 0.60× | 1 | 1.00× | **4.87** | 49.2 |
-| Commit | 30× | 12× | 0.62× | 1 | 1.10× | **6.02** | 55.8 |
-| Stretch | 35× | 12× | 0.62× | 1 | 1.10× | **6.40** | 57.7 |
+`K = (Tref/T)^0.50 × (Mref/M)^0.20 × (Sref/S)^0.15 × (Dref/D)^0.15`; speed score = `50·log10(K)`,
+clamped to 0–100. Wall time is uncapped; memory is capped at 50×; S and D can cost but never pay.
+
+| Row | T | M | S | D | K | Speed |
+|---|---:|---:|---:|---:|---:|---:|
+| Safe | 20× | 10× | 0.60× | 1 | **6.57** | 40.9 |
+| Commit | 30× | 12× | 0.62× | 1 | **8.38** | 46.2 |
+| Stretch | 35× | 12× | 0.62× | 1 | **9.05** | 47.8 |
 
 Astra's §2.2 bands carried ~1% rounding noise (mixed direction); the Exceptional row was
-*conservative*. **§11 "6–9" is well-calibrated** — K=9 is the optimistic edge but inside the ~10
-physical cap. Realistic band **K≈5–7** commit/stretch, ~8 exceptional. Track C memory can genuinely
-go high (it streams, never materializes all rows) — unlike Track B.
+*conservative*. The old "K 9 is the optimistic edge but inside the ~10 physical cap" reading is void
+— **T is uncapped now**, so the ceiling is set by effort, not by a cap. Realistic band **K≈8–9**
+commit/stretch. Track C memory can genuinely go high (it streams, never materializes all rows) —
+unlike Track B.
 
 ## Algorithm & data layout
 - **Scalar 4-state CSV machine** (`FieldStart / Unquoted / Quoted / AfterQuote`) is the **permanent

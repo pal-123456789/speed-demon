@@ -890,64 +890,56 @@ fn cmd_plan(opts: &Opts) -> Result<(), String> {
         }
         None => all.values().collect(),
     };
-    println!("K BUDGET  (K = (Tref/T)^0.40 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15 x (Xref/X)^0.10)");
-    println!("Every ratio is capped at 50x. speed = 100*ln(K)/ln(25).\n");
+    println!("K BUDGET  (K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15)");
+    println!("Wall time is uncapped; memory is capped at 50x; S and D are capped at 1.0. speed = 50*log10(K).\n");
     for track in selected {
         println!("--- Track {} ({}) ---", track.id, track.dir);
         println!(
-            "  reference: {:.2}s  timeout {:.0}s  M axis: {}",
+            "  reference: {:.2}s  timeout {:.0}s  M axis: peak memory",
             track.ref_time_s,
-            track.timeout_s,
-            if track.m_is_compressed_size {
-                "compressed size"
-            } else {
-                "peak memory"
-            }
+            track.timeout_s
         );
         // The ladder is per-track. A single hardcoded set printed Track A's
         // ratios under Track E, whose M axis is a compression ratio capped
         // near 1.9 — i.e. it advertised an M of 10x-22x on the one track where
         // that is arithmetically impossible.
-        let rows: &[(f64, f64, f64, f64)] = match track.id {
+        // (T ratio, M ratio, S ratio). There is no X axis any more — it was
+        // removed before the freeze and its weight moved to wall time. D is
+        // 1.0 on every track because this repository declares no runtime
+        // dependencies.
+        let rows: &[(f64, f64, f64)] = match track.id {
             'A' => &[
-                (20.0, 10.0, 0.60, 1.00),
-                (30.0, 15.0, 0.62, 1.05),
-                (45.0, 22.0, 0.65, 1.10),
+                (20.0, 10.0, 0.60),
+                (30.0, 15.0, 0.62),
+                (45.0, 22.0, 0.65),
             ],
             'B' => &[
-                (20.0, 8.0, 0.62, 1.00),
-                (30.0, 12.0, 0.62, 1.05),
-                (50.0, 20.0, 0.60, 1.20),
+                (20.0, 8.0, 0.62),
+                (30.0, 12.0, 0.62),
+                (50.0, 20.0, 0.60),
             ],
             'C' => &[
-                (20.0, 8.0, 0.62, 1.00),
-                (30.0, 12.0, 0.60, 1.05),
-                (45.0, 18.0, 0.58, 1.10),
+                (20.0, 8.0, 0.62),
+                (30.0, 12.0, 0.60),
+                (45.0, 18.0, 0.58),
             ],
             'D' => &[
-                (15.0, 6.0, 0.70, 1.00),
-                (25.0, 8.0, 0.66, 1.05),
-                (40.0, 12.0, 0.62, 1.10),
+                (15.0, 6.0, 0.70),
+                (25.0, 8.0, 0.66),
+                (40.0, 12.0, 0.62),
             ],
-            // Track E: the M ratio is (our ratio)/2.41, so 1.0-1.9 is the
-            // whole realistic band.
-            'E' => &[
-                (10.0, 1.02, 0.62, 1.00),
-                (25.0, 1.28, 0.60, 1.05),
-                (50.0, 1.87, 0.58, 1.10),
-            ],
-            _ => &[(1.0, 1.0, 1.0, 1.0)],
+            _ => &[(1.0, 1.0, 1.0)],
         };
-        for (t, m, s, x) in rows {
-            let (k, c) = contract::coefficient(*t, *m, *s, 1.0, *x);
+        for (t, m, s) in rows {
+            let (k, c) = contract::coefficient(*t, *m, *s, 1.0);
             println!(
-                "  T {t:>5.1}x  M {m:>5.1}x  S {s:>5.2}x  X {x:>5.2}x  ->  \
-                 K {k:>6.3}   speed {:>5.1}   (T {:.3} M {:.3} S {:.3} X {:.3})",
+                "  T {t:>5.1}x  M {m:>5.1}x  S {s:>5.2}x  D  1.00x  ->  \
+                 K {k:>6.3}   speed {:>5.1}   (T {:.3} M {:.3} S {:.3} D {:.3})",
                 contract::speed_score(k),
                 c[0],
                 c[1],
                 c[2],
-                c[4]
+                c[3]
             );
         }
         println!();
@@ -1058,23 +1050,26 @@ fn cmd_contract(_opts: &Opts) -> Result<(), String> {
     let all = contract::tracks();
     println!("FROZEN HEL1 CONTRACT");
     println!(
-        "weights: T {:.2}  M {:.2}  S {:.2}  D {:.2}  X {:.2}  (sum {:.2})",
+        "weights: T {:.2}  M {:.2}  S {:.2}  D {:.2}  (sum {:.2})",
         contract::W_T,
         contract::W_M,
         contract::W_S,
         contract::W_D,
-        contract::W_X,
-        contract::W_T + contract::W_M + contract::W_S + contract::W_D + contract::W_X
+        contract::W_T + contract::W_M + contract::W_S + contract::W_D
     );
-    println!("axis cap: {}x", contract::AXIS_CAP);
+    println!(
+        "axis caps: memory {}x, S {}x, D {}x, wall time uncapped",
+        contract::AXIS_CAP, contract::S_FACTOR_CAP, contract::D_FACTOR_CAP
+    );
+    println!("speed score = 50*log10(K), clamped to 0..100");
     println!();
     println!(
-        "{:<3} {:<10} {:>9} {:>9} {:>9} {:>9} {:>9} {:<18}",
-        "ID", "DIR", "REF(s)", "TIMEOUT", "REF(MB)", "REF(B)", "M=size", "INPUT"
+        "{:<3} {:<10} {:>9} {:>9} {:>9} {:>9} {:<18}",
+        "ID", "DIR", "REF(s)", "TIMEOUT", "REF(MB)", "REF(L)", "INPUT"
     );
     for t in all.values() {
         println!(
-            "{:<3} {:<10} {:>9.2} {:>9.0} {:>9} {:>9} {:>9} {:<18}",
+            "{:<3} {:<10} {:>9.2} {:>9.0} {:>9} {:>9} {:<18}",
             t.id,
             t.dir,
             t.ref_time_s,
@@ -1082,10 +1077,9 @@ fn cmd_contract(_opts: &Opts) -> Result<(), String> {
             t.ref_mem_mb
                 .map(|v| format!("{v:.0}"))
                 .unwrap_or_else(|| "DEFERRED".into()),
-            t.ref_src_bytes
+            t.ref_src_lines
                 .map(|v| format!("{v:.0}"))
                 .unwrap_or_else(|| "DEFERRED".into()),
-            if t.m_is_compressed_size { "yes" } else { "no" },
             t.input
         );
     }

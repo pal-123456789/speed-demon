@@ -37,10 +37,3 @@ version = "0.1.0"
 dependencies = [
  "speeddemon-core",
 ]
-
-[[package]]
-name = "speeddemon-e"
-version = "0.1.0"
-dependencies = [
- "speeddemon-core",
-]

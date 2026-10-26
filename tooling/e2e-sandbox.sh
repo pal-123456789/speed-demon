@@ -89,14 +89,6 @@ seed() {
                 printf '0 1\n1 2\n2 3\n3 4\n4 0\n1 3\n'
             } > "$d/graph.txt"
             ;;
-        E)
-            # A compressible corpus: repeated structured records.
-            i=0
-            while [ $i -lt 300 ]; do
-                printf 'record,%04d,alpha,beta,gamma,delta,epsilon,zeta\n' "$i"
-                i=$((i + 1))
-            done > "$d/corpus.bin"
-            ;;
     esac
 }
 
@@ -113,7 +105,7 @@ echo "  dispatcher : $DISPATCH"
 echo "  binaries   : $BIN_DIR"
 echo ""
 
-for tid in A B C D E; do
+for tid in A B C D; do
     echo "[track $tid]"
     data="$TMP/data-$tid"
     out="$TMP/out-$tid"

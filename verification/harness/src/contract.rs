@@ -16,31 +16,22 @@ pub struct Track {
     pub input: &'static str,
     /// The single output filename written to /out.
     pub output: &'static str,
-    /// Reference wall time on HEL1, seconds.
+    /// Reference wall time on the scoring machine (fsn1), seconds.
     pub ref_time_s: f64,
-    /// Reference peak memory on HEL1, MB (None where unpublished).
+    /// Reference peak memory, MB (None where unpublished).
     pub ref_mem_mb: Option<f64>,
-    /// Reference source size, bytes (None where unpublished).
-    pub ref_src_bytes: Option<f64>,
+    /// Reference source size, CODE LINES (None where unpublished). S is
+    /// counted in lines by scc, not in bytes.
+    pub ref_src_lines: Option<f64>,
     /// Hard timeout = 10 x reference time, seconds.
     pub timeout_s: f64,
-    /// The M axis holds compressed size rather than peak memory.
-    pub m_is_compressed_size: bool,
 }
 
 impl Track {
-    /// The reference M value that feeds the M axis ratio.
-    ///
-    /// For four tracks the M axis is peak memory, so the reference value is
-    /// the reference's own peak. For Track E the M axis is *compressed
-    /// size*, and the ratio is (our ratio) / (the reference's 2.41x), so the
-    /// reference's own M ratio against itself is exactly 1.0.
+    /// The reference M value that feeds the M axis ratio: the reference's own
+    /// peak memory. Every remaining track uses peak memory for M.
     pub fn ref_mb(&self) -> Option<f64> {
-        if self.m_is_compressed_size {
-            Some(1.0)
-        } else {
-            self.ref_mem_mb
-        }
+        self.ref_mem_mb
     }
 }
 
@@ -53,11 +44,14 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "A-ingest",
             input: "access.log",
             output: "ingest.txt",
-            ref_time_s: 41.20,
-            ref_mem_mb: Some(2940.0),
-            ref_src_bytes: Some(3180.0),
-            timeout_s: 412.0,
-            m_is_compressed_size: false,
+            // "Reference numbers are now measured on the scoring machine, five
+            // runs each: Track A 32.05 s, B 56.35 s, C 14.44 s, D 72.69 s.
+            // Timeouts are 10 times those."
+            ref_time_s: 32.05,
+            ref_mem_mb: Some(228.0),
+            // The reference's source size is published: 56 lines.
+            ref_src_lines: Some(56.0),
+            timeout_s: 321.0,
         },
     );
     m.insert(
@@ -67,11 +61,10 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "B-index",
             input: "corpus.txt",
             output: "index.txt",
-            ref_time_s: 58.70,
+            ref_time_s: 56.35,
             ref_mem_mb: None,
-            ref_src_bytes: None,
-            timeout_s: 587.0,
-            m_is_compressed_size: false,
+            ref_src_lines: None,
+            timeout_s: 564.0,
         },
     );
     m.insert(
@@ -81,11 +74,10 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "C-join",
             input: "records.csv",
             output: "join.txt",
-            ref_time_s: 36.90,
+            ref_time_s: 14.44,
             ref_mem_mb: None,
-            ref_src_bytes: None,
-            timeout_s: 369.0,
-            m_is_compressed_size: false,
+            ref_src_lines: None,
+            timeout_s: 144.0,
         },
     );
     m.insert(
@@ -95,81 +87,101 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "D-traverse",
             input: "graph.txt",
             output: "traverse.txt",
-            ref_time_s: 72.40,
+            ref_time_s: 72.69,
             ref_mem_mb: None,
-            ref_src_bytes: None,
-            timeout_s: 724.0,
-            m_is_compressed_size: false,
-        },
-    );
-    m.insert(
-        'E',
-        Track {
-            id: 'E',
-            dir: "E-compress",
-            input: "corpus.bin",
-            output: "corpus.sd",
-            ref_time_s: 29.80,
-            ref_mem_mb: None,
-            ref_src_bytes: None,
-            timeout_s: 298.0,
-            m_is_compressed_size: true,
+            ref_src_lines: None,
+            timeout_s: 727.0,
         },
     );
     m
 }
 
-/// The scoring weights. They sum to exactly 1.0.
-pub const W_T: f64 = 0.40;
+/// The scoring weights, as frozen before kickoff. They sum to exactly 1.0.
+///
+/// "New formula: K = (T_ref/T)^0.50 × (M_ref/M)^0.20 × (S_ref/S)^0.15 ×
+/// (D_ref/D)^0.15. The scaling axis X is gone, and its weight moved to wall
+/// time." — the organizers' list of changes before the Oct 28 freeze.
+///
+/// The X axis (scaling) is REMOVED. There is no fifth ratio, no fifth
+/// contribution, and no fifth weight: the old 0.40/0.20/0.15/0.15/0.10 split
+/// is dead.
+pub const W_T: f64 = 0.50;
 pub const W_M: f64 = 0.20;
 pub const W_S: f64 = 0.15;
 pub const W_D: f64 = 0.15;
-pub const W_X: f64 = 0.10;
 
-/// Every ratio is capped at 50x.
+/// The reference's D. The reference implementation declares no dependencies.
+pub const D_REF: f64 = 1.0;
+
+/// Memory is the only ratio with a cap: "Memory is capped at 50×."
+///
+/// Wall time has NO cap ("Wall time has no cap. It is never pathological, so
+/// a faster program always earns a higher K"), and S and D are capped at 1.0
+/// because they "can cost you but never pay".
 pub const AXIS_CAP: f64 = 50.0;
 
-/// The S axis can only cost. Announced before the Oct 28 freeze: "Its factor
-/// is capped at 1.0, so it no longer rewards the tersest language."
+/// A finite guard for the uncapped wall-time ratio. It is not a scoring cap:
+/// 1e9× faster is not reachable, and without it a zero-time run would make K
+/// infinite and the speed score NaN.
+pub const T_RATIO_GUARD: f64 = 1.0e9;
+
+/// The S axis can only cost: "Source size and dependencies are capped at 1.0:
+/// they can cost you but never pay."
 ///
-/// See docs/RULE-CHANGES-oct28.md. Being smaller than the reference earns
-/// nothing; being larger still costs. Without this cap a hypothetical row with
-/// an S ratio above 1.0 would award points the scorer does not give.
+/// Being smaller than the reference earns nothing; being larger still costs.
+/// Without this cap a hypothetical row with an S ratio above 1.0 would award
+/// points the scorer does not give.
 pub const S_FACTOR_CAP: f64 = 1.0;
 
-/// D counts DIRECT dependencies declared in the manifest: one dependency is a
-/// factor of 0.90. This replaces the superseded
-/// `D = 1 + (runtime deps) + (vendored bytes / 50000)`.
-pub const D_FACTOR_PER_DEP: f64 = 0.90;
+/// The D axis can only cost. D = 1 + (direct non-stdlib runtime dependencies),
+/// and D_ref = 1, so the ratio is 1/(1+n) and is always at most 1.0.
+pub const D_FACTOR_CAP: f64 = 1.0;
 
-/// The D ratio implied by a manifest declaring `n` direct dependencies.
-pub fn d_ratio(n_deps: u32) -> f64 {
-    D_FACTOR_PER_DEP.powi(n_deps as i32)
+/// D = 1 + the number of direct non-stdlib runtime dependencies declared in
+/// the manifest. "The vendored-bytes term is gone."
+pub fn d_value(n_deps: u32) -> f64 {
+    D_REF + n_deps as f64
 }
 
-/// speed_score = 100 * ln(K) / ln(25), clamped to [0, 100].
+/// The D ratio implied by a manifest declaring `n` direct dependencies.
+/// Zero dependencies gives 1.0; one gives 0.5, which contributes
+/// 0.5^0.15 = 0.901 to K.
+pub fn d_ratio(n_deps: u32) -> f64 {
+    D_REF / d_value(n_deps)
+}
+
+/// speed_score = 50 * log10(K), clamped to [0, 100].
+///
+/// "Speed score = 50 × log10(K), clamped to 0 to 100: K = 10 is half marks and
+/// K = 100 is full marks." This replaces the old 100·ln(K)/ln(25) curve, whose
+/// anchor was K = 25.
 pub fn speed_score(k: f64) -> f64 {
     if k <= 0.0 {
         return 0.0;
     }
-    (100.0 * k.ln() / 25f64.ln()).clamp(0.0, 100.0)
+    (50.0 * k.log10()).clamp(0.0, 100.0)
 }
 
 /// Compute K from raw per-axis ratios. Returns (K, per-axis contributions).
-pub fn coefficient(t: f64, m: f64, s: f64, d: f64, x: f64) -> (f64, [f64; 5]) {
-    let ratios = [t, m, s, d, x];
-    let weights = [W_T, W_M, W_S, W_D, W_X];
-    let mut contrib = [0.0f64; 5];
-    let mut k = 1.0f64;
-    for i in 0..5 {
-        let mut capped = ratios[i].clamp(0.0, AXIS_CAP);
-        // Axis 2 is S. The rule change caps its FACTOR, not just its ratio.
-        if i == 2 {
-            capped = capped.min(S_FACTOR_CAP);
-        }
-        contrib[i] = capped.powf(weights[i]);
-        k *= contrib[i];
-    }
+///
+/// The ratios are (T_ref/T, M_ref/M, S_ref/S, D_ref/D) — "Every ratio below is
+/// your number divided into the reference's."
+pub fn coefficient(t: f64, m: f64, s: f64, d: f64) -> (f64, [f64; 4]) {
+    // Wall time: no cap, only the finite guard.
+    let t_ratio = t.clamp(0.0, T_RATIO_GUARD);
+    // Memory: capped at 50x.
+    let m_ratio = m.clamp(0.0, AXIS_CAP);
+    // Source size and dependencies: capped at 1.0 — they can only cost.
+    let s_ratio = s.clamp(0.0, S_FACTOR_CAP);
+    let d_ratio = d.clamp(0.0, D_FACTOR_CAP);
+
+    let contrib = [
+        t_ratio.powf(W_T),
+        m_ratio.powf(W_M),
+        s_ratio.powf(W_S),
+        d_ratio.powf(W_D),
+    ];
+    let k = contrib.iter().product();
     (k, contrib)
 }
 
@@ -178,85 +190,137 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reproduces_the_published_nightshade_example() {
-        // From the event page: Team Nightshade, Track A.
-        let (k, c) = coefficient(31.4504, 14.0, 0.5889, 1.0, 1.0612);
-        assert!((k - 6.2569).abs() < 0.001, "K was {k}");
-        assert!((c[0] - 3.972).abs() < 0.001, "T contribution was {}", c[0]);
-        assert!((c[1] - 1.695).abs() < 0.001, "M contribution was {}", c[1]);
-        assert!((c[2] - 0.924).abs() < 0.001, "S contribution was {}", c[2]);
+    fn reproduces_the_published_worked_example() {
+        // The event page's worked example, recomputed under the new formula
+        // and marked illustrative: Team Nightshade, Track A.
+        //   T 25.0391x  M 5.70x  S 0.5138x  D 1.00x
+        //   K = 6.41, speed score = 40.4
+        let (k, c) = coefficient(25.0391, 5.7, 0.5138, 1.0);
+        assert!((k - 6.41).abs() < 0.01, "K was {k}");
+        assert!((c[0] - 5.004).abs() < 0.001, "T contribution was {}", c[0]);
+        assert!((c[1] - 1.416).abs() < 0.001, "M contribution was {}", c[1]);
+        assert!((c[2] - 0.905).abs() < 0.001, "S contribution was {}", c[2]);
         assert!((c[3] - 1.000).abs() < 0.001);
-        assert!((c[4] - 1.006).abs() < 0.001);
         assert!(
-            (speed_score(k) - 56.97).abs() < 0.05,
+            (speed_score(k) - 40.4).abs() < 0.05,
             "speed was {}",
             speed_score(k)
         );
     }
 
     #[test]
+    fn the_old_five_axis_nightshade_number_is_no_longer_reproducible() {
+        // The pre-freeze formula (five axes, 0.40/0.20/0.15/0.15/0.10, speed
+        // 100*ln(K)/ln(25)) produced K = 6.2569 and speed 56.97 for the old
+        // example. Under the frozen formula that same input is a different
+        // number, and a harness still producing 56.97 is running the OLD
+        // rules. This test pins the new answer: K = 8.7810, speed 47.18.
+        let (k, _) = coefficient(31.4504, 14.0, 0.5889, 1.0);
+        assert!((k - 8.7810).abs() < 0.01, "K was {k}");
+        assert!((speed_score(k) - 47.18).abs() < 0.05, "speed was {}", speed_score(k));
+
+        // And the OLD number must not be what comes out, or this test has
+        // proved nothing.
+        assert!((k - 6.2569).abs() > 0.1, "the old K is still reproducible");
+    }
+
+    #[test]
     fn weights_sum_to_one() {
-        let sum = W_T + W_M + W_S + W_D + W_X;
+        let sum = W_T + W_M + W_S + W_D;
         assert!((sum - 1.0).abs() < 1e-12);
     }
 
     #[test]
-    fn every_axis_is_capped_at_fifty() {
-        let (k, c) = coefficient(1e9, 1e9, 1e9, 1e9, 1e9);
-        // T, M, D and X saturate at 50; S saturates at 1.0 because its factor
-        // is capped (docs/RULE-CHANGES-oct28.md §1). So the ceiling is
-        // 50^(0.40+0.20+0.15+0.10) * 1.0^0.15, not 50^1.0.
-        let expect = 50f64.powf(W_T + W_M + W_D + W_X);
-        assert!((k - expect).abs() < 1e-9, "K was {k}, expected {expect}");
-        assert!((c[2] - 1.0).abs() < 1e-12, "S contribution was {}", c[2]);
-        assert!((c[0] - 50f64.powf(W_T)).abs() < 1e-9);
+    fn memory_is_capped_at_fifty_but_wall_time_is_not() {
+        // "Memory is capped at 50×. Wall time is not."
+        let (k, c) = coefficient(1e9, 1e9, 1e9, 1e9);
+        // T saturates only at the finite guard; M at 50; S and D at 1.0.
+        assert!((c[1] - 50f64.powf(W_M)).abs() < 1e-9, "M contribution was {}", c[1]);
+        assert!((c[0] - 1e9f64.powf(W_T)).abs() < 1e-6, "T contribution was {}", c[0]);
+        assert!((c[2] - 1.0).abs() < 1e-12);
+        assert!((c[3] - 1.0).abs() < 1e-12);
+        let expect = 1e9f64.powf(W_T) * 50f64.powf(W_M);
+        assert!((k - expect).abs() < 1e-3, "K was {k}, expected {expect}");
+    }
+
+    #[test]
+    fn a_faster_program_always_earns_more() {
+        // "Wall time is never pathological, so a faster program always earns a
+        // higher K." A cap on T would break this.
+        let (k_slow, _) = coefficient(2.0, 1.0, 1.0, 1.0);
+        let (k_fast, _) = coefficient(4.0, 1.0, 1.0, 1.0);
+        assert!(k_fast > k_slow, "{k_fast} !> {k_slow}");
+        let (k_huge, _) = coefficient(1000.0, 1.0, 1.0, 1.0);
+        assert!(k_huge > k_fast);
     }
 
     #[test]
     fn source_size_can_only_cost() {
-        // Announced before the Oct 28 freeze: "Its factor is capped at 1.0, so
-        // it no longer rewards the tersest language." A submission whose source
-        // is SMALLER than the reference (ratio > 1) must earn nothing on S.
-        let (k_small, c_small) = coefficient(1.0, 1.0, 4.0, 1.0, 1.0);
+        // "Source size and dependencies are capped at 1.0: they can cost you
+        // but never pay." A submission whose source is SMALLER than the
+        // reference (ratio > 1) must earn nothing on S.
+        let (k_small, c_small) = coefficient(1.0, 1.0, 4.0, 1.0);
         assert!((c_small[2] - 1.0).abs() < 1e-12, "S awarded {}", c_small[2]);
         assert!((k_small - 1.0).abs() < 1e-12, "K awarded {k_small}");
 
         // Being larger still costs, and the cap must not flatten that.
-        let (_, c_big) = coefficient(1.0, 1.0, 0.25, 1.0, 1.0);
+        let (_, c_big) = coefficient(1.0, 1.0, 0.25, 1.0);
         assert!(c_big[2] < 0.95, "S penalty vanished: {}", c_big[2]);
     }
 
     #[test]
     fn one_dependency_costs_ten_percent() {
-        // "one dependency gives a factor of 0.90"
+        // "D = 1 + the number of direct non-stdlib runtime dependencies
+        // declared in your manifest. ... One dependency gives 2^-0.15 = 0.90,
+        // about 10% off K before any other work."
+        assert!((d_value(0) - 1.0).abs() < 1e-12);
+        assert!((d_value(1) - 2.0).abs() < 1e-12);
+        assert!((d_value(3) - 4.0).abs() < 1e-12);
         assert!((d_ratio(0) - 1.0).abs() < 1e-12);
-        assert!((d_ratio(1) - 0.90).abs() < 1e-12);
-        assert!((d_ratio(2) - 0.81).abs() < 1e-12);
-        // This repo declares zero dependencies, so D = 1.0 either way — but the
-        // formula is now the real one, not the superseded
-        // `1 + deps + vendored/50000` which charged ~2.0 for one dependency.
-        assert!((d_ratio(0) - 1.0).abs() < 1e-12);
+        assert!((d_ratio(1) - 0.5).abs() < 1e-12);
+
+        // The published contribution for one dependency.
+        let (_, c) = coefficient(1.0, 1.0, 1.0, d_ratio(1));
+        assert!((c[3] - 0.90).abs() < 0.005, "D contribution was {}", c[3]);
+
+        // The vendored-bytes term is gone: vendored source does NOT change D.
+        // (D is a function of the manifest's dependency COUNT only.)
+        assert!((d_value(0) - 1.0).abs() < 1e-12);
     }
 
     #[test]
     fn speed_curve_anchors() {
-        assert!((speed_score(25.0) - 100.0).abs() < 1e-9);
-        assert!((speed_score(5.0) - 50.0).abs() < 1e-9);
+        // "Speed score = 50 × log10(K), clamped to 0 to 100: K = 10 is half
+        // marks and K = 100 is full marks."
+        assert!((speed_score(100.0) - 100.0).abs() < 1e-9);
+        assert!((speed_score(10.0) - 50.0).abs() < 1e-9);
         assert!((speed_score(1.0)).abs() < 1e-9);
         assert!(speed_score(0.5).abs() < 1e-9);
+        // Past K = 100 the score is clamped, but raw K still breaks ties.
+        assert!((speed_score(1000.0) - 100.0).abs() < 1e-9);
     }
 
     #[test]
     fn track_table_is_complete() {
         let t = tracks();
-        assert_eq!(t.len(), 5);
-        for id in ['A', 'B', 'C', 'D', 'E'] {
+        // Four tracks. Track E was cut before the freeze.
+        assert_eq!(t.len(), 4);
+        for id in ['A', 'B', 'C', 'D'] {
             let tr = &t[&id];
+            // Timeouts are 10 x reference time, rounded to the nearest integer.
             assert!(
-                (tr.timeout_s - tr.ref_time_s * 10.0).abs() < 0.1,
-                "track {id}"
+                (tr.timeout_s - (tr.ref_time_s * 10.0).round()).abs() < 1.0,
+                "track {id}: timeout {timeout_s} vs ref {ref_time_s}*10={expected}",
+                timeout_s = tr.timeout_s,
+                ref_time_s = tr.ref_time_s,
+                expected = (tr.ref_time_s * 10.0).round()
             );
         }
+        // Track E must be gone, not merely absent from the loop above.
+        assert!(
+            !t.contains_key(&'E'),
+            "Track E was cut before the freeze but is still in the track table"
+        );
     }
 
     // ── contract.toml is the single source of truth ──────────────────────
@@ -330,7 +394,7 @@ mod tests {
         let doc = read_contract();
         let table = tracks();
 
-        for id in ['A', 'B', 'C', 'D', 'E'] {
+        for id in ['A', 'B', 'C', 'D'] {
             let sec = doc
                 .get(&id.to_string())
                 .unwrap_or_else(|| panic!("contract.toml has no [{id}] section"));
@@ -384,7 +448,6 @@ mod tests {
             ("weight_m", W_M),
             ("weight_s", W_S),
             ("weight_d", W_D),
-            ("weight_x", W_X),
         ];
         for (key, ours) in weight_pairs {
             let theirs: f64 = g[key]
@@ -398,68 +461,27 @@ mod tests {
         let cap: f64 = g["axis_cap"].parse().unwrap();
         assert!((cap - AXIS_CAP).abs() < 1e-9, "axis_cap drifted");
 
-        // ── Track E segment geometry ──────────────────────────────────────
-        // The offsets are a hard-coded list in the contract and were WRONG
-        // (json boundary 256 KiB late, blob boundary 236,000 B early, two
-        // entries not whole MiB). Nothing caught it: the agreement test above
-        // only compared ref_time, timeout, and filenames, so a coder built from
-        // the bad list would have silently used a non-published geometry.
-        // These assertions recompute the offsets from the published sizes and
-        // demand internal consistency, so the list cannot drift again.
-        let e = &doc["E"];
-        let offsets: Vec<u64> = e["segment_offsets"]
-            .split(',')
-            .map(|s| {
-                s.trim()
-                    .parse()
-                    .unwrap_or_else(|err| panic!("[E] segment_offsets entry {s:?}: {err}"))
-            })
-            .collect();
-        let sizes: Vec<u64> = e["segment_sizes"]
-            .split(',')
-            .map(|s| {
-                s.trim()
-                    .parse()
-                    .unwrap_or_else(|err| panic!("[E] segment_sizes entry {s:?}: {err}"))
-            })
-            .collect();
-
-        assert_eq!(
-            offsets.len(),
-            sizes.len() + 1,
-            "[E] segment_offsets must have one more entry than segment_sizes \
-             (n sizes delimit n+1 boundaries)"
+        // The X axis is GONE. A `weight_x` key left in the contract would mean
+        // somebody is still scoring a fifth axis, so its absence is asserted.
+        assert!(
+            !g.contains_key("weight_x"),
+            "[global] still has weight_x — the X axis was removed before the freeze"
         );
-        assert_eq!(
-            offsets.first(),
-            Some(&0u64),
-            "[E] the first segment must start at 0"
+        assert!(
+            !doc.contains_key("E"),
+            "contract.toml still has an [E] section — Track E was cut before the freeze"
         );
-
-        // Rebuild the offsets from the sizes; they must reproduce exactly.
-        let mut derived = vec![0u64];
-        for sz in &sizes {
-            derived.push(derived.last().unwrap() + sz);
-        }
-        assert_eq!(
-            offsets, derived,
-            "[E] segment_offsets are not the running sum of segment_sizes — \
-             the published geometry has drifted"
+        // The three gates.
+        let gates = g["gates"].clone();
+        assert!(
+            gates.contains("correctness") && gates.contains("timeout") && gates.contains("sandbox"),
+            "[global] gates must be exactly correctness, timeout, sandbox — got {gates}"
         );
-
-        const MIB: u64 = 1024 * 1024;
-        assert_eq!(
-            *offsets.last().unwrap(),
-            100 * MIB,
-            "[E] the four segments must sum to exactly 100 MiB"
+        assert!(
+            !gates.contains("speed"),
+            "[global] gates still list a speed gate — the speed floor gate was removed"
         );
-        for o in &offsets {
-            assert_eq!(
-                o % MIB,
-                0,
-                "[E] offset {o} is not 1 MiB aligned; the spec publishes every \
-                 boundary as a whole MiB"
-            );
-        }
+        // Track E (Compress) was removed before the freeze. The old segment-
+        // geometry assertions for it have been deleted with the track.
     }
 }
