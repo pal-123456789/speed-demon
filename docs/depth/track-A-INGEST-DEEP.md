@@ -1,5 +1,19 @@
 # TRACK A · INGEST — INSANE-LEVEL DEEP DIVE
 
+> **MODEL-DERIVED UPGRADES (external model, see `97-MODEL-OUTPUT-DIGEST.md` §3):**
+> (1) **the timestamp needs NO parse** — the hour bucket is the first 13 bytes;
+> an MRU cache on two overlapping u64 loads (~5 cycles) with a 1024-slot table
+> on miss; fixed-width ISO keys sort bytewise (zero calendar math unless a
+> non-`Z` offset shows up). (2) **Percentiles via selection, not sort** —
+> crossover at n ≈ 12–16 (select ≈ 20 cyc/elt vs sort ≈ 5.5·log2 n); P²/t-digest
+> are both inexact AND not merge-deterministic → they fail the SHA gate, never
+> use them. (3) Error rate = u64 counts, integer formatting
+> (q=(e·10^D)/t, round up if 2r>t), ties routed through f64 — match the
+> reference's EXPRESSION order. (4) Memory ledger ≈ 23–25 MB; pre-size, never
+> let Vec double. (5) The latency fixture set (units/f32/u32-max, nearest-rank
+> groups n=1/2/20/100, tie e=1/t=160, error classes) is in
+> `gen-fixtures.py --track A --adversarial`.
+
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-a-ingest.md`.
 > **Engine:** latency/epoch aggregator → SLO monitoring. **Ladder goal:** L3.
 > **Contract anchors:** ref T 32.05 s, M 228 MB, S 56 lines, D 1, timeout 321 s;

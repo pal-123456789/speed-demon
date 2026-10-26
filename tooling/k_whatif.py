@@ -85,6 +85,66 @@ def sensitivity(ratios: dict, pct: float) -> dict:
 TRACKS = ["A", "B", "C", "D"]
 
 
+BETA = 4.892  # track points per doubling of T (0.65 * 50 * 0.5 * log10(2))
+
+
+def waterfill(base: dict, doubling: dict, floor: dict, hours: float) -> dict:
+    """Analytic KKT allocation (model digest §2).
+
+    P_t(h) = P0_t + BETA * r_t * (1 - exp(-h / (H_t * r_t)))   (r = doublings left)
+    marginal_t(h) = (BETA / H_t) * exp(-h / (H_t * r_t))
+    KKT: marginal / P == lambda for every funded track -> bisect lambda so the
+    funded hours sum to `hours`. The corner lemma says exactly one track gets
+    zero hours; we try every 3-of-4 drop (plus the no-drop case) and keep the
+    best geometric mean.
+    """
+    tracks = TRACKS
+
+    def solve_lambda(funded, lam):
+        h = {}
+        for t in funded:
+            H, r, P0 = doubling[t], floor[t], base[t]
+            # u = exp(-h/(H r));  u * (BETA/H + lam*BETA*r) = lam * (P0 + BETA*r)
+            denom = BETA / H + lam * BETA * r
+            u = lam * (P0 + BETA * r) / denom
+            if u >= 1.0 or u <= 0.0:
+                h[t] = 0.0
+            else:
+                h[t] = -H * r * math.log(u)
+        return h
+
+    best = None
+    subsets = list(itertools.combinations(tracks, 3)) + [tuple(tracks)]
+    for funded in subsets:
+        lo, hi = 1e-9, 1e6
+        for _ in range(60):
+            lam = (lo + hi) / 2
+            h = solve_lambda(funded, lam)
+            # h_t is decreasing in lambda: raise lam when we overshoot hours
+            if sum(h.values()) > hours:
+                lo = lam
+            else:
+                hi = lam
+        h = solve_lambda(funded, (lo + hi) / 2)
+        # renormalize the residual to exactly `hours` proportionally
+        s = sum(h.values())
+        if s > 0:
+            h = {t: v * hours / s for t, v in h.items()}
+        P = {}
+        for t in funded:
+            H, r, P0 = doubling[t], floor[t], base[t]
+            d = r * (1.0 - math.exp(-h[t] / (H * r))) if h[t] > 0 else 0.0
+            P[t] = P0 + BETA * d
+        gm = math.exp(sum(math.log(max(P[t], 1e-9)) for t in funded) / len(funded))
+        cand = {"subset": sorted(funded), "hours": h, "totals": P, "geomean": gm}
+        if best is None or gm > best["geomean"]:
+            best = cand
+    if best is None:
+        raise ValueError("waterfill: no tracks")
+    best["drop"] = [t for t in tracks if t not in best["subset"]]
+    return best
+
+
 def dispatch(base: dict, pph: dict, hours: float, diminish: float = 0.97) -> dict:
     """Greedy hour allocation across the tracks, maximizing the geometric
     mean of the BEST THREE resulting speed scores (the overall title rule).
@@ -146,11 +206,39 @@ def main() -> int:
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument("--selfcheck", action="store_true", help="assert the Nightshade example still reproduces K=6.41, speed=40.4")
     p.add_argument("--dispatch", action="store_true", help="allocate H hours across the tracks (best-3 rule)")
+    p.add_argument("--waterfill", action="store_true", help="analytic KKT allocation (P8: base/doubling/floor)")
     p.add_argument("--hours", type=float, default=72.0, help="hours to allocate (--dispatch)")
-    p.add_argument("--base", nargs="+", metavar="T=V", help="current speed score per track, e.g. A=35 B=30 C=20 D=12 (--dispatch)")
+    p.add_argument("--base", nargs="+", metavar="T=V", help="current speed score per track, e.g. A=35 B=30 C=20 D=12 (--dispatch) or current TOTAL points (--waterfill)")
     p.add_argument("--pph", nargs="+", metavar="T=V", help="points per hour per track, e.g. A=1.0 B=0.8 C=0.6 D=0.4 (--dispatch)")
+    p.add_argument("--doubling", nargs="+", metavar="T=V", help="hours per T-doubling per track, e.g. A=6 B=5 C=9 D=8 (--waterfill)")
+    p.add_argument("--floor", nargs="+", metavar="T=V", help="doublings left before the floor per track, e.g. A=4 B=4 C=6 D=6 (--waterfill; default 20)")
     p.add_argument("--diminish", type=float, default=0.97, help="returns decay per hour on the same track (default 0.97)")
     args = p.parse_args()
+
+    if args.waterfill:
+        if not args.base or not args.doubling:
+            p.error("--waterfill needs --base 'T=V' (total points) and --doubling 'T=V' (hours per doubling)")
+        base = _parse_pairs(args.base)
+        doubling = _parse_pairs(args.doubling)
+        floor = _parse_pairs(args.floor) if args.floor else {t: 20.0 for t in TRACKS}
+        plan = waterfill(base, doubling, floor, args.hours)
+        if args.json:
+            print(json.dumps(plan, indent=2))
+            return 0
+        print("\n72h WATER-FILL (analytic KKT; P0 = TOTAL track points, "
+              "beta = 4.892 pts/doubling)")
+        print("=" * 70)
+        for t in TRACKS:
+            h = plan["hours"].get(t, 0.0)
+            P = plan["totals"].get(t, base.get(t, 0.0))
+            role = "DROPPED" if t in plan["drop"] else "COUNTED"
+            print(f"  track {t}: {h:5.1f} h   total {base[t]:5.2f} -> {P:5.2f}   [{role}]")
+        print(f"\n  best-3 geometric mean of totals: {plan['geomean']:.2f}")
+        print(f"  drop candidate: {', '.join(plan['drop'])}")
+        print("  (= the corner lemma: exactly one track gets zero hours;")
+        print("    re-solve every 8h from MEASURED doubling/floors.)")
+        print()
+        return 0
 
     if args.dispatch:
         if not args.base or not args.pph:

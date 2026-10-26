@@ -119,7 +119,17 @@ def gen_track_a(rows: int, seed: int, out_dir: Path) -> None:
 
 
 def gen_track_a_adversarial(out_dir: Path) -> None:
-    """Tiny A corpus: the published sample plus the parsing traps."""
+    """Tiny A corpus: the published sample plus the parsing traps and the
+    MODEL-DERIVED fixture set (docs/depth/97-MODEL-OUTPUT-DIGEST.md §3):
+
+    * unit trap + f32-round + u32-max latencies (999, 1000, 1001, 16777217,
+      4294967295) — all in one endpoint/hour group;
+    * nearest-rank vs floor-index groups n = 1, 2, 20, 100 with
+      latency = 1000 * rank — nearest-rank gives p95=19000/p50=10000 at n=20,
+      a floor-index reference would give 20000/11000;
+    * the formatting tie case e = 1, t = 160 (1 error in 160 requests);
+    * error classes: only 5xx counts (500, 599 yes; 400, 600 no).
+    """
     path = out_dir / "access.log"
     rows = [
         EVENTS_A_SAMPLE,
@@ -132,9 +142,25 @@ def gen_track_a_adversarial(out_dir: Path) -> None:
         # a maximal-length latency (u32 max: 4294967295 microseconds)
         "2026-10-30T18:07:32.000000Z DELETE /v3/items 200 4294967295\n",
     ]
+    # ── model fixture: unit trap + f32 rounding + u32 max (one group) ─────
+    for i, lat in enumerate((999, 1000, 1001, 16777217, 4294967295)):
+        rows.append(f"2026-10-30T18:08:{i:02d}.000000Z GET /fx/units 200 {lat}\n")
+    # ── model fixture: nearest-rank vs floor-index groups (lat = 1000*rank) ─
+    for name, n in (("n1", 1), ("n2", 2), ("n20", 20), ("n100", 100)):
+        for r in range(1, n + 1):
+            rows.append(f"2026-10-30T18:09:00.000000Z GET /fx/{name} 200 {1000 * r}\n")
+    # ── model fixture: formatting tie e=1, t=160 ──────────────────────────
+    for i in range(160):
+        status = 500 if i == 0 else 200
+        rows.append(f"2026-10-30T18:10:00.000000Z GET /fx/tie {status} 100\n")
+    # ── model fixture: error classes — only 5xx counts ────────────────────
+    for i, status in enumerate((500, 599, 400, 600)):
+        rows.append(f"2026-10-30T18:11:{i:02d}.000000Z GET /fx/err {status} 50\n")
+    # ── a second hour so hour bucketing is exercised ──────────────────────
+    rows.append("2026-10-30T19:00:00.000000Z GET /fx/hour2 200 1234\n")
     path.write_text("".join(rows), encoding="utf-8", newline="")
-    print(f"  A: adversarial corpus ({len(rows)} records: unit trap, boundary "
-          f"statuses, tz forms) -> {path}")
+    print(f"  A: adversarial corpus ({len(rows)} records: published sample, "
+          f"unit trap, nearest-rank groups, tie case, error classes) -> {path}")
 
 
 # ── Track B ───────────────────────────────────────────────────────────────

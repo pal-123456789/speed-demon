@@ -109,6 +109,7 @@ kcalc:
 whatif:
 	$(PY) tooling/k_whatif.py --selfcheck
 	$(PY) tooling/k_whatif.py --track A --t-abs 1.07 --m-abs 15 --lines 150
+	$(PY) tooling/k_whatif.py --waterfill --hours 60 --base A=47 B=43.75 C=39.2 D=35.3 --doubling A=6 B=5 C=9 D=8
 
 pin TRACK=A:
 	sh tooling/pin-hash.sh $(TRACK)

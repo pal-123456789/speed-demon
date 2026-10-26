@@ -1,5 +1,19 @@
 # TRACK B · INDEX — INSANE-LEVEL DEEP DIVE
 
+> **MODEL-DERIVED UPGRADES (external model, see `97-MODEL-OUTPUT-DIGEST.md` §4):**
+> (1) **PHRASE QUERIES NEED NO POSITIONS** — an Aho–Corasick automaton over
+> term ids runs in the tokenize pass; each phrase becomes a pseudo-term with its
+> own posting list (PHRASE query = single list lookup; position storage drops
+> to zero). (2) **Tiered postings** — tiny (<128, u32 array), mid (128-posting
+> blocks + block_max + u16 offsets), dense (D-bit bitmap); blocks beat
+> delta-varint (varint's skip table is just a worse block layout). (3) **The
+> left-associative correctness pitfall:** `A AND B OR C AND D` =
+> `(((A∩B)∪C)∩D)` — AND-over-OR precedence is a SHA-zero; evaluate as a left
+> fold with distribute (A∪B)∩C = (A∩C)∪(B∩C). (4) Only QUERY terms get
+> postings (term ids by first appearance in the query file). (5) Memory budget
+> ≈ 100–150 MB; wave-of-24-slab build; chunks of 64 queries, heavy-first,
+> slot-ordered emission. Model's T estimate ≈ 0.3–0.5 s vs the 56.35 s ref.
+
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-b-index.md`.
 > **Engine:** inverted-index full-text search (boolean + phrase) → Elasticsearch-lite.
 > **Ladder goal:** L3. **Contract anchors:** ref **56.35 s ONE total wall time**
