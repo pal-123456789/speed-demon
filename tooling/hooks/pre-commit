@@ -33,28 +33,38 @@ fail() {
 # ---- 0. rule 05 compliance -------------------------------------------------
 # Before kickoff, this is the most important check in the file: a commit
 # containing a track solution can disqualify the whole submission.
-if command -v python3 >/dev/null 2>&1; then
-    if ! python3 tooling/rule05_guard.py >/tmp/sd-rule05.log 2>&1; then
+PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+if [ -n "$PY" ]; then
+    if ! "$PY" tooling/rule05_guard.py >/tmp/sd-rule05.log 2>&1; then
         cat /tmp/sd-rule05.log >&2
         fail "rule 05 guard blocked this commit"
     fi
 fi
 
 # ---- 1. formatting --------------------------------------------------------
+HMANIFEST="verification/harness/Cargo.toml"
 if command -v cargo >/dev/null 2>&1; then
-    if ! cargo fmt --all -- --check 2>/dev/null; then
-        echo "  formatting drift — run: cargo fmt --all" >&2
+    if ! cargo fmt --manifest-path "$HMANIFEST" -- --check 2>/dev/null; then
+        echo "  formatting drift — run: cargo fmt --manifest-path $HMANIFEST" >&2
         fail "rustfmt check failed"
     fi
 
+    # the prep kit is copy-in material: it must stay formatted too
+    if [ -d prep ] && command -v rustfmt >/dev/null 2>&1; then
+        if ! rustfmt --edition 2021 --check prep/*.rs 2>/dev/null; then
+            echo "  formatting drift in prep/ — run: rustfmt --edition 2021 prep/*.rs" >&2
+            fail "rustfmt check failed (prep)"
+        fi
+    fi
+
     # ---- 2. clippy --------------------------------------------------------
-    if ! cargo clippy --all-targets --offline -- -D warnings 2>/dev/null; then
+    if ! cargo clippy --manifest-path "$HMANIFEST" --all-targets --offline -- -D warnings 2>/dev/null; then
         echo "  clippy warnings are errors here — fix them or justify them" >&2
         fail "clippy failed"
     fi
 
     # ---- 3. offline build -------------------------------------------------
-    if ! cargo build --release --offline 2>/dev/null; then
+    if ! cargo build --release --offline --manifest-path "$HMANIFEST" 2>/dev/null; then
         fail "offline release build failed"
     fi
 fi
@@ -62,21 +72,29 @@ fi
 # ---- 4. per-track gate ----------------------------------------------------
 # The Rust harness is preferred: it is the same implementation that runs on
 # the scoring box, where PowerShell does not exist.
-HARNESS="target/release/sd-harness"
-STAGED="$(git diff --cached --name-only | grep -E '^tracks/[A-E]-' | cut -d/ -f2 | sort -u || true)"
-for dir in $STAGED; do
-    case "$dir" in
-        A-ingest)   T=A ;;
-        B-index)    T=B ;;
-        C-join)     T=C ;;
-        D-traverse) T=D ;;
-        E-compress) T=E ;;
+HARNESS="verification/harness/target/release/sd-harness"
+if [ ! -x "$HARNESS" ] && [ -x "$HARNESS.exe" ]; then
+    HARNESS="$HARNESS.exe"
+fi
+STAGED="$(git diff --cached --name-only | grep -E '^track-[A-D]/' | cut -d/ -f2 | sed 's/^track-//' | sort -u || true)"
+if [ -n "$STAGED" ] && [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
+    echo "  (per-track gate skipped: this host builds Windows PE binaries;"
+    echo "   the e2e suite + ci.sh cover determinism/SHA here)"
+    STAGED=""
+fi
+for T in $STAGED; do
+    case "$T" in
+        A|B|C|D) ;;
         *) continue ;;
     esac
-    echo "  running the gate for track $T ($dir)"
+    echo "  running the gate for track $T"
     RAN=0
     if [ -x "$HARNESS" ]; then
-        if "$HARNESS" verify --track "$T" --no-docker >/tmp/sd-gate-$T.log 2>&1; then
+        BIN="$ROOT/track-$T/run"
+        if [ ! -x "$BIN" ]; then
+            BIN="$ROOT/track-$T/run.exe"
+        fi
+        if "$HARNESS" verify --track "$T" --no-docker --bin "$BIN" >/tmp/sd-gate-$T.log 2>&1; then
             RAN=1
         else
             cat /tmp/sd-gate-$T.log >&2

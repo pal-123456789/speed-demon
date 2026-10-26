@@ -12,7 +12,8 @@ set -u
 cd "${1:-.}" || exit 1
 missing=0
 for f in tooling/ci.sh tooling/install-hooks.sh tooling/pin-base-image.sh \
-         tooling/check-exec-bits.sh tooling/hooks/pre-commit \
+         tooling/check-exec-bits.sh tooling/bench-rung.sh tooling/h0-launch.sh \
+         tooling/hooks/pre-commit \
          track-A/build.sh track-B/build.sh track-C/build.sh track-D/build.sh
 do
     mode=$(git ls-files -s "$f" 2>/dev/null | awk '{print $1}')

@@ -114,6 +114,12 @@ whatif:
 pin TRACK=A:
 	sh tooling/pin-hash.sh $(TRACK)
 
+rung TRACK=A:
+	sh tooling/bench-rung.sh $(TRACK)
+
+h0:
+	sh tooling/h0-launch.sh
+
 fmt:
 	-cargo fmt --manifest-path $(HMANIFEST) --all
 
