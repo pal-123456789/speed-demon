@@ -34,18 +34,24 @@ if hasattr(sys.stdout, "reconfigure"):
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# The organizers' spec slug per track (for the README's spec link).
+SPEC_SLUG = {"A": "a-ingest", "B": "b-index", "C": "c-join", "D": "d-traverse"}
+
 TRACKS = {
     "A": {
         "dir": "track-a",
         "name": "Ingest",
-        "task": "Aggregate 3.1M structured log lines (312 MB) into per-endpoint request "
+        "task": "Aggregate 3.1M structured log lines (239 MB) into per-endpoint request "
                 "counts, p50/p95/p99 latency, and error rates bucketed by hour.",
         "ref_time": "32.05 s",
-        "ref_mem": "2,940 MB",
-        "ref_src": "3,180 B",
+        "ref_mem": "228 MB",
+        "ref_src": "56 lines",
         "timeout": "321 s",
-        "axis_note": "M is peak RSS (cgroup `memory.peak`). The reference's 2,940 MB comes "
-                     "mostly from retaining every latency in a growing per-endpoint list.",
+        "axis_note": "M is the container's cgroup v2 `memory.peak`, read on the host after the "
+                     "run (not `ru_maxrss`). The reference's 228 MB comes mostly from retaining "
+                     "every latency in a growing per-endpoint list. /data is pre-warmed outside "
+                     "our cgroup, so reading it is free for M; our own allocations, /tmp writes "
+                     "and the output file's first-touched pages are what count.",
         "approach": """Track A is a parsing problem with two separable costs: turning bytes into
 fields, and turning fields into aggregates. The reference pays for both in the
 expensive way — a general-purpose split, a date-library timestamp parse, a
@@ -468,6 +474,20 @@ K = 10 is half marks and K = 100 is full marks.
 
 ---
 
+## 1b. Board runs — the official optimisation log
+
+The starter's `PERF.md` defines this table, and the judges check that every
+run ID exists and that each change moved the numbers the way this file says it
+did. One row per live-board push, in step order. The board caps a run at 3x
+the reference (final scoring 10x).
+
+| Step | Change | Run ID | T (s) | M (MB) | Points |
+|---|---|---|---|---|---|
+| 0 | The reference, unchanged | — | {ref_time} | {ref_mem} | 0 |
+| 1 | | | | | |
+
+---
+
 ## 2. The ladder
 
 ### 2a. What was measured
@@ -569,6 +589,9 @@ Commit hash of this measurement: `_(fill)`.
 README_TEMPLATE = """# Track {track} — {name}
 
 **{task}**
+
+The task, the input files and the exact output format are in the
+[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/{spec}.md).
 
 ---
 
@@ -866,6 +889,7 @@ def main(argv=None) -> int:
             track=track,
             name=cfg["name"],
             task=cfg["task"],
+            spec=SPEC_SLUG[track],
             approach=cfg["approach"],
             layout=cfg["layout"],
             memory=cfg["memory"],

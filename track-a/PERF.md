@@ -18,13 +18,13 @@
 
 ## 1. The task
 
-Aggregate 3.1M structured log lines (312 MB) into per-endpoint request counts, p50/p95/p99 latency, and error rates bucketed by hour.
+Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p50/p95/p99 latency, and error rates bucketed by hour.
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
 | T · wall time | 32.05 s | _(fill)_ | _(fill)_ | 0.50 | _(fill)_ |
-| M · peak memory | 2,940 MB | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
-| S · source size | 3,180 B | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
+| M · peak memory | 228 MB | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
+| S · source size | 56 lines | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
 | **K** | | | | | **_(fill)_** |
 | **speed score** | | | | | **_(fill)_ / 100** |
@@ -34,10 +34,24 @@ Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
 can cost you and never pay. `speed score = 50*log10(K)`, clamped to 0..100, so
 K = 10 is half marks and K = 100 is full marks.
 
-M is peak RSS (cgroup `memory.peak`). The reference's 2,940 MB comes mostly from retaining every latency in a growing per-endpoint list.
+M is the container's cgroup v2 `memory.peak`, read on the host after the run (not `ru_maxrss`). The reference's 228 MB comes mostly from retaining every latency in a growing per-endpoint list. /data is pre-warmed outside our cgroup, so reading it is free for M; our own allocations, /tmp writes and the output file's first-touched pages are what count.
 
 > These numbers are **not filled in yet**, on purpose. They are only written
 > down once the harness has produced them. A target is not a result.
+
+---
+
+## 1b. Board runs — the official optimisation log
+
+The starter's `PERF.md` defines this table, and the judges check that every
+run ID exists and that each change moved the numbers the way this file says it
+did. One row per live-board push, in step order. The board caps a run at 3x
+the reference (final scoring 10x).
+
+| Step | Change | Run ID | T (s) | M (MB) | Points |
+|---|---|---|---|---|---|
+| 0 | The reference, unchanged | — | 32.05 s | 228 MB | 0 |
+| 1 | | | | | |
 
 ---
 

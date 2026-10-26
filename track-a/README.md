@@ -1,6 +1,9 @@
 # Track A — Ingest
 
-**Aggregate 3.1M structured log lines (312 MB) into per-endpoint request counts, p50/p95/p99 latency, and error rates bucketed by hour.**
+**Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p50/p95/p99 latency, and error rates bucketed by hour.**
+
+The task, the input files and the exact output format are in the
+[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/a-ingest.md).
 
 ---
 

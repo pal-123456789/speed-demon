@@ -2,6 +2,9 @@
 
 **Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, embedded newlines, mixed line endings, a UTF-8 BOM on some chunks and not others — join it against a lookup table, and emit sorted aggregates.**
 
+The task, the input files and the exact output format are in the
+[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/c-join.md).
+
 ---
 
 ## Approach

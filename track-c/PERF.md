@@ -41,6 +41,20 @@ M is easy to win here by streaming: the reference materialises rows the aggregat
 
 ---
 
+## 1b. Board runs — the official optimisation log
+
+The starter's `PERF.md` defines this table, and the judges check that every
+run ID exists and that each change moved the numbers the way this file says it
+did. One row per live-board push, in step order. The board caps a run at 3x
+the reference (final scoring 10x).
+
+| Step | Change | Run ID | T (s) | M (MB) | Points |
+|---|---|---|---|---|---|
+| 0 | The reference, unchanged | — | 14.44 s | (pin from the Oct 28 spec) | 0 |
+| 1 | | | | | |
+
+---
+
 ## 2. The ladder
 
 ### 2a. What was measured

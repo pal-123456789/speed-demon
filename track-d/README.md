@@ -2,6 +2,9 @@
 
 **Traverse a 5M-edge directed weighted graph and answer 2,000 source-target shortest-path queries. Preprocessing is allowed and is counted inside the timed run.**
 
+The task, the input files and the exact output format are in the
+[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/d-traverse.md).
+
 ---
 
 ## Approach

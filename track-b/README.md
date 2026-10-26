@@ -2,6 +2,9 @@
 
 **Build an inverted index over a 250 MB text corpus, then answer 50,000 boolean and phrase queries. Build time and query time are measured together, as one total wall time. There is no build/query split any more.**
 
+The task, the input files and the exact output format are in the
+[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/b-index.md).
+
 ---
 
 ## Approach
