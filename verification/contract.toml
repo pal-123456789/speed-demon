@@ -141,27 +141,24 @@ ref_peak_mem_mb = 228
 ref_source_lines = 56
 timeout_s = 321
 # FILENAME: the spec fixes the dataset filenames; only the schema is public.
-input_file = "access.log"
-output_file = "ingest.txt"
-# Output contract (events-page PRE-PINS, fetched Oct 27 — still verify against
-# the frozen spec's exact formatting):
-#   - grouping key: ENDPOINT, bucketed by HOUR  ("per-endpoint request counts,
-#     p50/p95/p99 latency, and error rates bucketed by hour")
-#   - percentiles: p50, p95, p99 (the list is published)
-#   - error class: status 5xx ("5xx counts toward the error rate")
-#   - line ordering: by endpoint id (sorted bytes) or by first-seen order?  [frozen spec]
-#   - percentile definition: nearest-rank on the sorted list? which index?    [frozen spec]
-#   - error rate: fraction or percentage? how many decimals? trailing zeros?  [frozen spec]
-#   - separator: single space or tab? trailing newline present?              [frozen spec]
-#   - hour bucket format: RFC3339 hour, or an integer hour index?            [frozen spec]
-group_key = "endpoint per hour bucket (events page: 'per-endpoint request counts ... bucketed by hour')"
-percentiles = "p50/p95/p99 (events page, pre-freeze)"
-error_class = "status 5xx (events page: '5xx counts toward the error rate')"
-sort_order = "DEFERRED"
-percentile_rule = "DEFERRED"
-error_rate_format = "DEFERRED"
-field_separator = "DEFERRED"
-trailing_newline = "DEFERRED"
+input_file = "requests.log"
+output_file = "summary.txt"
+# Output contract — RESOLVED from the published reference (starter template,
+# read Oct 27): group (UTC hour, endpoint); p50/p95/p99 NEAREST RANK with
+# rank = ceil(p*n/100) = (p*n+99)//100; errors = count of 5xx + ppm =
+# errs*1_000_000//count (integer floor); sorted by (hour, endpoint), endpoint
+# bytewise; single-space separator; trailing newline on every line; hour
+# rendered "%Y-%m-%dT%H:00:00Z"; method ignored.
+group_key = "endpoint per hour bucket (reference)"
+percentiles = "p50/p95/p99 nearest-rank (reference: rank=(p*n+99)//100)"
+error_class = "status 5xx (reference)"
+sort_order = "(UTC hour, endpoint) bytewise (reference)"
+percentile_rule = "nearest-rank ceil(p*n/100) (reference)"
+error_rate_format = "errs count + ppm=errs*1000000//count (reference)"
+field_separator = "single space (reference)"
+trailing_newline = "yes, one per line (reference)"
+hour_format = "%Y-%m-%dT%H:00:00Z (reference)"
+input_format = "ts method endpoint status latency_us, one per line, LF (reference)"
 
 # ── Track B — Index ───────────────────────────────────────────────────────
 [B]
@@ -176,9 +173,9 @@ ref_query_time_s = "NOT_APPLICABLE"
 ref_peak_mem_mb = "DEFERRED"
 ref_source_lines = "DEFERRED"
 timeout_s = 564
-corpus_file = "corpus.txt"
+corpus_file = "docs.txt"
 queries_file = "queries.txt"     # published name: QUERIES.TXT
-output_file = "index.txt"
+output_file = "results.txt"
 # The build/query blend is GONE. The formula used to be a 40/60 weighted
 # blend of two ratios; it is now a single wall time for the whole program.
 blend_formula = "REMOVED"
@@ -186,18 +183,16 @@ blend_formula = "REMOVED"
 # readable from the start, and the task is to answer these 50,000") — plan the
 # index around them. Mix: 62% BOOL, 38% PHRASE "..." (adjacent tokens, exact
 # order, stopwords retained). Corpus ~256 MB / 50,000 queries.
-# Boolean semantics: left-associative, no parentheses. How does the
-# reference treat NOT? Does it bind tighter than AND? Pin it.
+# Boolean semantics — RESOLVED from the reference: left-associative, applied
+# left to right as set ops AND=intersection, OR=union, NOT=set difference;
+# no precedence, no parentheses. PHRASE = docs containing every term, then an
+# exact adjacency scan of the re-tokenized text (no positions kept).
 boolean_associativity = "left"
-boolean_precedence = "DEFERRED"
-# Phrase semantics: tokenisation rule, whether stopwords are indexed
-# (the page says stopwords are RETAINED), whether matching is on the raw
-# byte stream or on a normalised token stream.
-tokenizer = "DEFERRED"
+boolean_precedence = "left-to-right set ops AND/OR/NOT (reference)"
+tokenizer = "maximal runs of ASCII [a-z0-9] after ASCII-lowercasing; bytes >= 0x80 are separators (reference)"
 stopwords_indexed = true
-# Result output: per-query line? doc ids space separated? how many ids per
-# query (all, or a cap)?
-result_format = "DEFERRED"
+result_format = "per query line: count sum up-to-10-smallest-ids, space-joined; empty -> '0 0' (reference)"
+corpus_format = "docs.txt: id<TAB>text, ids 0..N-1 in order (reference)"
 
 # ── Track C — Join ────────────────────────────────────────────────────────
 [C]
@@ -207,32 +202,28 @@ ref_peak_mem_mb = "DEFERRED"
 ref_source_lines = "DEFERRED"
 timeout_s = 144
 records_file = "records.csv"     # published name: RECORDS.CSV
-lookup_file = "DEFERRED"         # the lookup table's name is not public
-output_file = "join.txt"
+lookup_file = "regions.csv"      # region_id,country header (reference)
+output_file = "aggregates.txt"
 # Events page (fetch Oct 27): 5 fixed columns WITH a header row
-# (id,name,note,region_id,amount — visible in the sample bytes), 3.32M records,
-# "emit sorted aggregates". Hostile features confirmed by the sample: CRLF and
-# bare LF mixed, escaped quotes (""), embedded commas and newlines inside
-# quoted fields, trailing space inside quotes, negative amounts, empty quoted
-# fields, and a U+FEFF BOM at the file start AND mid-file at chunk boundaries.
-# The QUOTING RULES are the whole task. Pin every one:
-#   - a quoted field containing a bare LF: is the LF kept in the value?
-#   - is a CRLF inside a quoted field kept as CRLF or normalised to LF?
-#   - a BOM mid-file: is it stripped, kept, or does it make the field
-#     start with U+FEFF?
-#   - trailing spaces inside quotes: kept (sample suggests yes)
-#   - an unquoted field containing a quote: legal or not?
-#   - what terminates a record: LF, CRLF, or either?
-quoting = "DEFERRED"
-bom_handling = "DEFERRED"
-newline_in_quotes = "DEFERRED"
-# Amount handling: scale (2 decimals?), rounding mode, negative zero.
-amount_scale = "DEFERRED"
-amount_rounding = "DEFERRED"
-# Aggregate: sum of amount per group? which group key? which sort order?
-aggregate_key = "DEFERRED"
-sort_order = "DEFERRED"
-output_number_format = "DEFERRED"
+# (id,name,note,region_id,amount), 3.32M records, "emit sorted aggregates".
+# Quoting — RESOLVED from the reference (Python csv, excel dialect):
+# comma separator, double-quote quoting, "" escape, QUOTE_MINIMAL; both CRLF
+# and LF terminate records; CR/LF inside quoted fields kept verbatim; U+FEFF
+# stripped from the start of the FIRST FIELD of every record (file start or
+# after a terminator; the first field is never quoted). Amounts are exactly
+# 2 decimals, regex (-?)([0-9]+)\.([0-9]{2}) — no rounding. Aggregation per
+# country via the regions join (unknown region -> "_UNMATCHED"): count,
+# id_sum, amount_sum, amount_min, amount_max, distinct names, name bytes
+# (utf-8), note bytes (utf-8); sorted by country (code-point = UTF-8 byte
+# order); space-joined; one line per country + trailing newline.
+quoting = "python csv excel dialect: comma, double-quote, \"\" escape (reference)"
+bom_handling = "U+FEFF stripped from the first field of every record (reference)"
+newline_in_quotes = "kept verbatim (reference)"
+amount_scale = "exactly 2 decimals, regex (-?)([0-9]+)\\.([0-9]{2}) (reference)"
+amount_rounding = "none (amounts are already 2dp) (reference)"
+aggregate_key = "country via regions.csv join; unknown -> _UNMATCHED (reference)"
+sort_order = "by country string, code-point order (reference)"
+output_number_format = "space-joined: key count id_sum amount_sum amount_min amount_max distinct_names name_bytes note_bytes (reference)"
 
 # ── Track D — Traverse ────────────────────────────────────────────────────
 [D]
@@ -242,16 +233,17 @@ ref_peak_mem_mb = "DEFERRED"
 ref_source_lines = "DEFERRED"
 timeout_s = 727
 graph_file = "graph.txt"         # published name: GRAPH.TXT
-queries_file = "DEFERRED"
-output_file = "traverse.txt"
-# Distance only, or the full path? If distance only, tie-breaks are moot.
-output_contract = "DEFERRED"
-unreachable_spelling = "DEFERRED"
-# Is the edge list guaranteed to contain both directions, or must we build
-# the reverse graph ourselves? (The page says reverse edges are listed
-# SEPARATELY when they exist — so the reverse graph must be built.)
+queries_file = "queries.txt"     # 's t' per line (reference)
+output_file = "distances.txt"
+# Output contract — RESOLVED from the reference: DISTANCE-ONLY, one integer
+# per query line, in query order; unreachable prints -1; s == t is 0; weights
+# are u32 (0 allowed); distances are unbounded in the reference (Python int)
+# so the implementation must carry u64 internally; a per-query Dijkstra with
+# early exit at the target.
+output_contract = "distance-only, one line per query (reference)"
+unreachable_spelling = "-1 (reference)"
 weights_are = "uint32"
-max_distance_bound = "DEFERRED"   # needed to prove u32 is safe
+max_distance_bound = "unbounded in the reference — carry u64 internally (reference)"
 # Events page (fetch Oct 27): graph is 92 MB / 5M edges. Queries are LOCAL and
 # drawn at a BOUNDED search distance — "fast parsing, a compact layout and a
 # lean search loop decide this track"; "Contraction hierarchies are legal, but

@@ -47,7 +47,7 @@ seed() {
                         $((i % 24)) $((i % 60)) $((i % 17)) $((10 + i % 400))
                     i=$((i + 1))
                 done
-            } > "$d/access.log"
+            } > "$d/requests.log"
             ;;
         B)
             {
@@ -56,7 +56,7 @@ seed() {
                     printf 'document %d alpha beta gamma delta epsilon\n' "$i"
                     i=$((i + 1))
                 done
-            } > "$d/corpus.txt"
+            } > "$d/docs.txt"
             printf 'alpha\nbeta\ngamma\ndelta\n' > "$d/queries.txt"
             ;;
         C)
@@ -90,7 +90,7 @@ echo "=== END-TO-END SANDBOX TEST ==="
 echo "  per-track binaries in track-*/run"
 echo ""
 
-for tid in A B C D; do
+for tid in a b c d; do
     echo "[track $tid]"
     data="$TMP/data-$tid"
     out="$TMP/out-$tid"

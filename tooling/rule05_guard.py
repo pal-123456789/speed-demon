@@ -80,7 +80,7 @@ class Pattern:
 
 # Infrastructure and design are legal before kickoff. Only these directories
 # are scanned for solution code.
-SCAN_ROOTS = ("track-A", "track-B", "track-C", "track-D")
+SCAN_ROOTS = ("track-a", "track-b", "track-c", "track-d")
 
 # Paths never scanned: the verification harness, the tooling, the docs.
 SCAN_EXEMPT_PREFIXES = (

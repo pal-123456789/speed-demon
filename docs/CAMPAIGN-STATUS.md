@@ -52,7 +52,7 @@ every run.
 
 | Component | State | Evidence |
 |---|---|---|
-| 4 self-contained track folders (track-A..track-D) | **GREEN** | `sh track-*/build.sh` from a clean clone — all four produce `./run` offline |
+| 4 self-contained track folders (track-a..track-d) | **GREEN** | `sh track-*/build.sh` from a clean clone — all four produce `./run` offline |
 | Track scaffolds (rustc-only, rule-05-safe) | **GREEN** | every `src/main.rs` is a stub; `rule05_guard` scans all four folders |
 | **`verification/harness`** — the scoring-box replica | **GREEN** | 20/20 tests: pure-Rust SHA-256 (known vectors, held-out sample), JSONL ledger, lockdown, contract table *and contract.toml agreement*. `cgroup.rs` has **no unit test** — it is exercised only by live container runs |
 | `rustfmt` + `clippy -D warnings` | **GREEN** | both run as best-effort gates in `tooling/ci.sh` (skip only when the component is not installed); the pre-commit hook also enforces them once installed |
@@ -183,7 +183,7 @@ every K budget in the plan becomes real.
 ### Before Oct 28 (now) — done
 
 ```bash
-sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh
+sh track-a/build.sh && sh track-b/build.sh && sh track-c/build.sh && sh track-d/build.sh
 cargo test --offline --manifest-path verification/harness/Cargo.toml # 20/20 harness
 sh tooling/install-hooks.sh            # installs the pre-commit gate
 ```
@@ -201,10 +201,10 @@ sh tooling/install-hooks.sh            # installs the pre-commit gate
 
 ```bash
 # pin the expected hashes (one line each: "<sha256>  <output-file>")
-# NOTE: already pinned from the scaffolds' deterministic output — track-A/..D/
+# NOTE: already pinned from the scaffolds' deterministic output — track-a/..D/
 # verification/expected/*.sha256 exist; replacing a pin after H0 requires the
 # SHA gate to go green again with the real implementation.
-echo "<sha256>" > track-A/verification/expected/ingest.txt.sha256
+echo "<sha256>" > track-a/verification/expected/summary.txt.sha256
 
 # and confirm the gate is live
 powershell -File verification/verify.ps1 -Track A
@@ -311,8 +311,8 @@ cargo build --release --offline -p sd-harness
 ./target/release/sd-harness ledger
 ./target/release/sd-harness plan
 ./target/release/sd-harness lockdown
-./target/release/sd-harness prewarm --file /srv/speeddemon/data/track-A/access.log
-./target/release/sd-harness hash    --file out/ingest.txt
+./target/release/sd-harness prewarm --file /srv/speeddemon/data/track-a/requests.log
+./target/release/sd-harness hash    --file out/summary.txt
 ```
 
 `bench` reproduces the organizer's protocol exactly: the verbatim

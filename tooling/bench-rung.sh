@@ -16,13 +16,14 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 t="${1:-}"
-case "$t" in A|B|C|D) ;; *) echo "usage: bench-rung.sh A|B|C|D [--label NAME]" >&2; exit 2;; esac
+case "$t" in A|B|C|D|a|b|c|d) ;; *) echo "usage: bench-rung.sh A|B|C|D [--label NAME]" >&2; exit 2;; esac
+t="$(echo "$t" | tr '[:upper:]' '[:lower:]')"
 label="${3:-rung}"
 RUNS="${RUNS:-5}"
 
 bin="$ROOT/track-$t/run"
 data="$ROOT/verification/data/track-$t"
-want=""; case "$t" in A) want=ingest.txt;; B) want=index.txt;; C) want=join.txt;; D) want=traverse.txt;; esac
+want=""; case "$t" in a) want=summary.txt;; b) want=results.txt;; c) want=aggregates.txt;; d) want=distances.txt;; esac
 
 echo "== rung $label, track $t =="
 

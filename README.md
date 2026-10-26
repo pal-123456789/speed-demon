@@ -15,10 +15,10 @@ D:\SpeedDemon-Campaign\
 ├── Makefile                    # `make verify`, `make bench`, `make freeze-check`, `make ci`
 ├── LICENSE                     # MIT (OSI-approved, public at freeze)
 ├── .gitignore                  # excludes track-*/run, run.pdb, .exe build artifacts
-├── track-A/                    # Track A — Ingest  (ref 32.05 s, timeout 321 s, S_ref 56 lines)
-├── track-B/                    # Track B — Index   (ref 56.35 s, timeout 564 s)
-├── track-C/                    # Track C — Join    (ref 14.44 s, timeout 144 s) — DQ minefield
-├── track-D/                    # Track D — Traverse (ref 72.69 s, timeout 727 s)
+├── track-a/                    # Track A — Ingest  (ref 32.05 s, timeout 321 s, S_ref 56 lines)
+├── track-b/                    # Track B — Index   (ref 56.35 s, timeout 564 s)
+├── track-c/                    # Track C — Join    (ref 14.44 s, timeout 144 s) — DQ minefield
+├── track-d/                    # Track D — Traverse (ref 72.69 s, timeout 727 s)
 │   (each: Dockerfile, build.sh, README.md, PERF.md, .speed-demon.toml, src/, verification/expected/)
 ├── verification/               # fsn1 harness replica, 3 gates, bench, lockdown, contract.toml, sample data
 ├── tooling/                    # k_calc, measure_axes, gen-fixtures, gen_docs, ci.sh, hooks, base-image.txt

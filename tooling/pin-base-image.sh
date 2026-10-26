@@ -46,7 +46,7 @@ PINNED="${IMAGE}@${DIGEST}"
 echo "pinning to $PINNED"
 
 FILES="$ROOT/Dockerfile"
-for t in A B C D; do
+for t in a b c d; do
   FILES="$FILES $ROOT/track-$t/Dockerfile"
 done
 

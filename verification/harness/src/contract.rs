@@ -41,9 +41,9 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'A',
         Track {
             id: 'A',
-            dir: "track-A",
-            input: "access.log",
-            output: "ingest.txt",
+            dir: "track-a",
+            input: "requests.log",
+            output: "summary.txt",
             // "Reference numbers are now measured on the scoring machine, five
             // runs each: Track A 32.05 s, B 56.35 s, C 14.44 s, D 72.69 s.
             // Timeouts are 10 times those."
@@ -58,9 +58,9 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'B',
         Track {
             id: 'B',
-            dir: "track-B",
-            input: "corpus.txt",
-            output: "index.txt",
+            dir: "track-b",
+            input: "docs.txt",
+            output: "results.txt",
             ref_time_s: 56.35,
             ref_mem_mb: None,
             ref_src_lines: None,
@@ -71,9 +71,9 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'C',
         Track {
             id: 'C',
-            dir: "track-C",
+            dir: "track-c",
             input: "records.csv",
-            output: "join.txt",
+            output: "aggregates.txt",
             ref_time_s: 14.44,
             ref_mem_mb: None,
             ref_src_lines: None,
@@ -84,9 +84,9 @@ pub fn tracks() -> BTreeMap<char, Track> {
         'D',
         Track {
             id: 'D',
-            dir: "track-D",
+            dir: "track-d",
             input: "graph.txt",
-            output: "traverse.txt",
+            output: "distances.txt",
             ref_time_s: 72.69,
             ref_mem_mb: None,
             ref_src_lines: None,

@@ -157,7 +157,7 @@ fi
 # no cargo, no registry, no network. That exact path is what the image uses, so
 # it gets its own gate.
 step "SCORED BUILD PATH (per-track build.sh: rustc direct, offline)"
-if sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh \
+if sh track-a/build.sh && sh track-b/build.sh && sh track-c/build.sh && sh track-d/build.sh \
    >/tmp/sd-scorebuild.txt 2>&1; then
   RUNS="$(ls track-?/run 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$RUNS" = "4" ]; then
@@ -267,7 +267,7 @@ fi
 # (the binary executes fine), only the ELF assertion is N/A. WSL would be a
 # real Linux kernel — the strongest available substitute for the scoring box.
 step "END-TO-END SANDBOX (all 4 track binaries, real Linux)"
-if [ -x track-A/run ]; then
+if [ -x track-a/run ]; then
   if sh tooling/e2e-sandbox.sh >/tmp/sd-e2e.txt 2>&1; then
     ok "all 4 tracks: binary runs, 1 file out, determinism, failure modes"
   else
@@ -279,7 +279,7 @@ elif command -v wsl.exe >/dev/null 2>&1 || command -v wsl >/dev/null 2>&1; then
   # Translate the repo path to its /mnt/<drive>/... form for the WSL side.
   WSL_ROOT="$("$WSL_BIN" -e sh -c 'wslpath -a "$1" 2>/dev/null' _ "$PWD" 2>/dev/null | tr -d '\r')"
   if [ -n "${WSL_ROOT:-}" ] &&
-     "$WSL_BIN" -e sh -c "cd '$WSL_ROOT' && sh track-A/build.sh && sh track-B/build.sh && sh track-C/build.sh && sh track-D/build.sh && sh tooling/e2e-sandbox.sh" >/tmp/sd-e2e.txt 2>&1; then
+     "$WSL_BIN" -e sh -c "cd '$WSL_ROOT' && sh track-a/build.sh && sh track-b/build.sh && sh track-c/build.sh && sh track-d/build.sh && sh tooling/e2e-sandbox.sh" >/tmp/sd-e2e.txt 2>&1; then
     ok "all 4 tracks via WSL: build, run, 1 file out, determinism"
   else
     grep -E 'FAIL|passed,|FATAL' /tmp/sd-e2e.txt 2>/dev/null | sed 's/^/  /'
@@ -332,10 +332,11 @@ for t in $(echo "$TRACKS" | tr ',' ' '); do
   else
     # The Rust harness is the canonical gate runner: the same code runs on
     # the scoring box, where PowerShell does not exist.
-    if [ -x "$REPO/track-$tt/run" ]; then
-      BIN="$REPO/track-$tt/run"
+    t_lc="$(echo "$tt" | tr '[:upper:]' '[:lower:]')"
+    if [ -x "$REPO/track-$t_lc/run" ]; then
+      BIN="$REPO/track-$t_lc/run"
     else
-      BIN="$REPO/track-$tt/run.exe"
+      BIN="$REPO/track-$t_lc/run.exe"
     fi
     if "$HARNESS" verify --track "$tt" --no-docker --bin "$BIN" >/tmp/sd-track-$tt.txt 2>&1; then
       ok "track $tt gates passed"

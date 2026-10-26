@@ -22,6 +22,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TRACKS="${1:-all}"
+TRACKS="$(echo "$TRACKS" | tr '[:upper:]' '[:lower:]')"
 N="${N:-3}"
 THREADS="${THREADS:-1 2 3 6 12 24}"
 CHUNKS="${CHUNKS:-4093 65537 1048576}"
@@ -30,7 +31,7 @@ pass=0
 fail=0
 
 if [ "$TRACKS" = "all" ]; then
-    TRACKS="A B C D"
+    TRACKS="a b c d"
 fi
 
 for t in $TRACKS; do

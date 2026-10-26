@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 TRACKS = {
     "A": {
-        "dir": "track-A",
+        "dir": "track-a",
         "name": "Ingest",
         "task": "Aggregate 3.1M structured log lines (312 MB) into per-endpoint request "
                 "counts, p50/p95/p99 latency, and error rates bucketed by hour.",
@@ -127,7 +127,7 @@ the M axis with data we never need resident.""",
   bottleneck and is therefore the one place a surprise is still possible.""",
     },
     "B": {
-        "dir": "track-B",
+        "dir": "track-b",
         "name": "Index",
         "task": "Build an inverted index over a 250 MB text corpus, then answer 50,000 "
                 "boolean and phrase queries. Build time and query time are measured "
@@ -219,7 +219,7 @@ same reason as Track A: mapped pages are charged to cgroup `memory.peak`.""",
   measurement says is actually limiting.""",
     },
     "C": {
-        "dir": "track-C",
+        "dir": "track-c",
         "name": "Join",
         "task": "Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, "
                 "embedded newlines, mixed line endings, a UTF-8 BOM on some chunks and "
@@ -313,7 +313,7 @@ charged to cgroup `memory.peak`.""",
   rather than assuming, and document the result either way.""",
     },
     "D": {
-        "dir": "track-D",
+        "dir": "track-d",
         "name": "Traverse",
         "task": "Traverse a 5M-edge directed weighted graph and answer 2,000 "
                 "source-target shortest-path queries. Preprocessing is allowed and is "

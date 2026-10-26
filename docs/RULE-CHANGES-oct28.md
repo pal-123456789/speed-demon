@@ -99,7 +99,7 @@ Build-time training (PGO, a JVM AOT cache, native-image) is allowed on generated
 fixtures; it is an in-window decision once real code exists. Two checks follow:
 * the build must not read `/data` (fixtures are generated, never the dataset), and
 * **the image must not ship cached outputs** — no track *output* file
-  (`ingest.txt`, `index.txt`, `join.txt`, `traverse.txt`) may be present in the
+  (`summary.txt`, `results.txt`, `aggregates.txt`, `distances.txt`) may be present in the
   final image.
 
 ## 6. M — unchanged, and already what we do

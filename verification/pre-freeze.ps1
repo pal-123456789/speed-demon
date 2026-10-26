@@ -40,10 +40,10 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
 $TrackInfo = @{
-    A = @{ Name = "track-A"; Timeout = 321; Ref = 32.05; Binary = "run"; Input = "access.log";  Output = "ingest.txt" }
-    B = @{ Name = "track-B"; Timeout = 564; Ref = 56.35; Binary = "run"; Input = "corpus.txt";  Output = "index.txt" }
-    C = @{ Name = "track-C"; Timeout = 144; Ref = 14.44; Binary = "run"; Input = "records.csv"; Output = "join.txt" }
-    D = @{ Name = "track-D"; Timeout = 727; Ref = 72.69; Binary = "run"; Input = "graph.txt";  Output = "traverse.txt" }
+    A = @{ Name = "track-a"; Timeout = 321; Ref = 32.05; Binary = "run"; Input = "requests.log";  Output = "summary.txt" }
+    B = @{ Name = "track-b"; Timeout = 564; Ref = 56.35; Binary = "run"; Input = "docs.txt";  Output = "results.txt" }
+    C = @{ Name = "track-c"; Timeout = 144; Ref = 14.44; Binary = "run"; Input = "records.csv"; Output = "aggregates.txt" }
+    D = @{ Name = "track-d"; Timeout = 727; Ref = 72.69; Binary = "run"; Input = "graph.txt";  Output = "distances.txt" }
 }
 
 $script:failures = 0

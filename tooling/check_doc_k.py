@@ -143,10 +143,10 @@ if __name__ == "__main__":
             "docs/specs/track-b-index.md",
             "docs/specs/track-c-join.md",
             "docs/specs/track-d-traverse.md",
-            "docs/track-A-ingest.md",
-            "docs/track-B-index.md",
-            "docs/track-C-join.md",
-            "docs/track-D-traverse.md",
+            "docs/track-a-ingest.md",
+            "docs/track-b-index.md",
+            "docs/track-c-join.md",
+            "docs/track-d-traverse.md",
             "README.md",
         ]
     sys.exit(main(args))

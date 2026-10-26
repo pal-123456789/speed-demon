@@ -1,7 +1,7 @@
 .PHONY: help verify bench freeze-check fmt clippy kcalc test axes fixtures docs \
         guard harness ci plan prewarm hash build spec clean
 
-# The tracks are self-contained rustc-only folders (track-A..track-D); the
+# The tracks are self-contained rustc-only folders (track-a..track-d); the
 # verification harness is a standalone Rust package at verification/harness;
 # the tooling is Python. The `harness` targets are the ones that matter on
 # fsn1, where there is no PowerShell and no Python.

@@ -84,7 +84,7 @@ impl Lockdown {
 /// one-line key lookup is sufficient and keeps the harness dependency-free.
 /// Count the DIRECT dependencies a track's Cargo.toml declares.
 ///
-/// The D-axis gate used to read `declared_dependencies` out of the track's
+/// The D-axis gate used to read `dependency_count` out of the track's
 /// hand-maintained `.speed-demon.toml` and believe it. That is the same
 /// defect this whole audit is about: a self-declared number treated as
 /// evidence. This counts what the manifest actually says, so the two can be
@@ -137,8 +137,8 @@ fn toml_value(path: &Path, key: &str) -> Option<String> {
                 // Strip an inline comment OUTSIDE quotes, then unquote.
                 // `trim_matches('"')` on the raw value left the comment glued
                 // to the string, so a legal TOML file with
-                //   output_file = "ingest.txt"   # the scored artefact
-                // produced the "value" `ingest.txt"       # the scored artefact`
+                //   output_file = "summary.txt"   # the scored artefact
+                // produced the "value" `summary.txt"       # the scored artefact`
                 // and three spurious FAILs. `contract.rs` already parsed this
                 // correctly; the two readers now agree on the dialect.
                 let raw = v.trim();
@@ -220,23 +220,23 @@ pub fn run(root: &Path, tracks: &BTreeMap<char, Track>, selected: &[char]) -> Lo
         // The D-axis honesty, from the track's own declaration. The track
         // folder has no Cargo.toml by design: it builds with rustc directly,
         // so zero manifest dependencies is a fact, not a claim. If a
-        // Cargo.toml ever appears it must be reflected in declared_dependencies.
+        // Cargo.toml ever appears it must be reflected in dependency_count.
         let manifest = dir.join(".speed-demon.toml");
-        let declared = toml_value(&manifest, "declared_dependencies")
+        let declared = toml_value(&manifest, "dependency_count")
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(-1);
         let actual = count_direct_dependencies(&dir.join("Cargo.toml")).unwrap_or(0) as i64;
         if actual == declared && declared == 0 {
             let factor = contract::d_ratio(actual as u32);
             ld.pass(
-                "D axis: declared_dependencies == 0",
+                "D axis: dependency_count == 0",
                 &format!("declared={declared}, D factor {factor:.4}"),
             );
         } else {
             // The declared number and reality disagree (or a manifest with
             // dependencies appeared): one of them is wrong, so the check fails.
             ld.fail(
-                "D axis: declared_dependencies == 0",
+                "D axis: dependency_count == 0",
                 &format!(
                     "declared={declared}, manifest has {actual} direct dep(s); \
                      D = 1 + deps, so the declaration must match reality"
@@ -504,18 +504,18 @@ mod tests {
     #[test]
     fn a_placeholder_hash_is_not_a_pin() {
         let root = std::env::temp_dir().join(format!("sd-pin-{}", std::process::id()));
-        let dir = root.join("track-A");
+        let dir = root.join("track-a");
         let expected = dir.join("verification").join("expected");
         fs::create_dir_all(&expected).unwrap();
-        let pin = expected.join("ingest.txt.sha256");
+        let pin = expected.join("summary.txt.sha256");
         fs::write(&pin, "TODO-fill-this-in\n").unwrap();
-        assert_eq!(read_pinned_hash(&dir, "ingest.txt"), None);
+        assert_eq!(read_pinned_hash(&dir, "summary.txt"), None);
         fs::write(
             &pin,
-            "  f34f78e97f1a00000000000000000000000000000000000000000000000000ab  ingest.txt\n",
+            "  f34f78e97f1a00000000000000000000000000000000000000000000000000ab  summary.txt\n",
         )
         .unwrap();
-        assert!(read_pinned_hash(&dir, "ingest.txt").is_some());
+        assert!(read_pinned_hash(&dir, "summary.txt").is_some());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -526,18 +526,15 @@ mod tests {
         let p = dir.join("x.toml");
         fs::write(
             &p,
-            "output_file = \"ingest.txt\"   # the scored artefact\ndeclared_dependencies = 0  # none\n",
+            "output_file = \"summary.txt\"   # the scored artefact\ndependency_count = 0  # none\n",
         )
         .unwrap();
         assert_eq!(
             toml_value(&p, "output_file").as_deref(),
-            Some("ingest.txt"),
+            Some("summary.txt"),
             "an inline comment must not become part of the value"
         );
-        assert_eq!(
-            toml_value(&p, "declared_dependencies").as_deref(),
-            Some("0")
-        );
+        assert_eq!(toml_value(&p, "dependency_count").as_deref(), Some("0"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -546,11 +543,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sd-toml-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let p = dir.join("x.toml");
-        fs::write(&p, "# comment\ntrack = \"A\"\ndeclared_dependencies = 0\n").unwrap();
-        assert_eq!(
-            toml_value(&p, "declared_dependencies").as_deref(),
-            Some("0")
-        );
+        fs::write(&p, "# comment\ntrack = \"A\"\ndependency_count = 0\n").unwrap();
+        assert_eq!(toml_value(&p, "dependency_count").as_deref(), Some("0"));
         assert_eq!(toml_value(&p, "track").as_deref(), Some("A"));
         assert_eq!(toml_value(&p, "nope"), None);
         let _ = fs::remove_dir_all(&dir);

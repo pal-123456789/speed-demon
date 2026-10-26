@@ -104,10 +104,10 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
-- `track-A-INGEST-DEEP.md` — the latency/percentile engine, every feature.
-- `track-B-INDEX-DEEP.md` — the inverted-index search engine, every feature.
-- `track-C-JOIN-DEEP.md` — the hostile-CSV join, the quoting oracle, every parse detail.
-- `track-D-TRAVERSE-DEEP.md` — the shortest-path engine, every algorithm.
+- `track-a-INGEST-DEEP.md` — the latency/percentile engine, every feature.
+- `track-b-INDEX-DEEP.md` — the inverted-index search engine, every feature.
+- `track-c-JOIN-DEEP.md` — the hostile-CSV join, the quoting oracle, every parse detail.
+- `track-d-TRAVERSE-DEEP.md` — the shortest-path engine, every algorithm.
 - `99-EVENTS-PAGE-PINS.md` — everything the LIVE official page pre-pins before
   the Oct 28 freeze, with URL citations (fetch date Oct 27) — A's percentile
   list/group key/error class, C's columns + sorted output, D's bounded-distance

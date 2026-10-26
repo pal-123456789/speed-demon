@@ -25,7 +25,7 @@ echo "  head: $(git rev-parse --short HEAD 2>/dev/null)"
 
 # 2. build all four tracks
 echo "== 2. build all tracks (rustc, offline) =="
-for t in A B C D; do
+for t in a b c d; do
   sh "track-$t/build.sh" >/tmp/sd-h0-build-$t.log 2>&1 \
     && echo "  ok track-$t" || { echo "  FAIL track-$t"; tail -5 /tmp/sd-h0-build-$t.log; exit 1; }
 done
@@ -41,7 +41,7 @@ python tooling/gen-fixtures.py --all >/dev/null 2>&1 && echo "  ok generators ra
 
 # 5. copy the generic infrastructure in (rule-05-safe: generic primitives)
 echo "== 5. generic kit =="
-for t in A B C D; do
+for t in a b c d; do
   cp prep/bump.rs prep/lines.rs prep/parse_u32.rs prep/itoa.rs "track-$t/src/" 2>/dev/null
 done
 echo "  copied prep/{bump,lines,parse_u32,itoa}.rs into track-*/src (S now counts them)"
@@ -49,7 +49,7 @@ echo "  copied prep/{bump,lines,parse_u32,itoa}.rs into track-*/src (S now count
 # 6. re-pin expected hashes from the CURRENT binaries (scaffolds are
 #    deterministic; the first real implementation re-pins again deliberately)
 echo "== 6. hash pins =="
-for t in A B C D; do sh tooling/pin-hash.sh "$t" >/dev/null 2>&1 && echo "  ok track-$t"; done
+for t in a b c d; do sh tooling/pin-hash.sh "$t" >/dev/null 2>&1 && echo "  ok track-$t"; done
 
 # 7. pointer to the runbook
 echo ""

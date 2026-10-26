@@ -261,7 +261,7 @@ machine (no SIMD, no cleverness) and deferring all C speed work to the H43 deep 
 ## 7. Deliverables system (judge 35%) — corrected
 
 - **Monorepo**, public at freeze with a root OSI license. One directory per track
-  (`track-A` … `track-D`), each a self-contained build context: `Dockerfile`, `build.sh`,
+  (`track-a` … `track-d`), each a self-contained build context: `Dockerfile`, `build.sh`,
   `.speed-demon.toml`, `README.md`, `PERF.md`, `src/`, `verification/expected/`. No shared
   core crate. A judge should understand a track without leaving its directory.
 - **Dockerfile:** every `FROM` must name an image from `speeddemon.dev/allowlist.json`, **pinned by
@@ -355,7 +355,7 @@ buffer. (4) At H64 freeze scope: whatever isn't green stays at its last green ba
 Detailed, corrected build guides (algorithm, data layout, optimization ladder, determinism
 checklist, memory budget, risks) live beside this file:
 
-- `track-A-ingest.md` · `track-B-index.md` · `track-C-join.md` · `track-D-traverse.md`
+- `track-a-ingest.md` · `track-b-index.md` · `track-c-join.md` · `track-d-traverse.md`
 - **INSANE-LEVEL depth arsenal** — per-track feature inventories (P0/P1/P2), the
   optimization ladder, determinism traps, edge-case matrices, and the H0 runbooks:
   `docs/depth/00-INDEX.md` and `docs/depth/track-{A,B,C,D}-*-DEEP.md`.

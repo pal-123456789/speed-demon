@@ -553,3 +553,72 @@ Weight by 1/total; **stop a track below ~0.4 pts/h, within ~1.5× of its floor,
 or when a rung needs ≥ 10% more code for < 3% time** — move the hour to the
 next-best rung or the write-up. If the fourth track beats your third at any
 point, it takes its place.
+---
+
+## 12. STARTER ORACLE RESOLUTIONS — the DEFERRED ledger is closed (Oct 27)
+
+The organizers' starter template (hackathon-raptors/speed-demon-starter)
+ships the NAIVE REFERENCE implementations for all four tracks. Reading them
+resolves the output contract completely — spec_intake now reports
+0 blocking DEFERRED values. The board contract also became precise:
+
+**Board contract (from the starter + Discord):**
+- Folders: track-a .. track-d (lowercase — renamed to match).
+- .speed-demon.toml is BOARD-PARSED with exactly these keys:
+  track = "a", team, language, dependency_count (the D-axis key —
+  harness updated to read dependency_count).
+- Output filenames: summary.txt (A), results.txt (B), aggregates.txt (C),
+  distances.txt (D) — renamed everywhere.
+- One repo per team, speed-demon branch; the board builds every track-*
+  folder; an unchanged folder is the reference itself (reported unchanged).
+- Board time cap = 3x the reference; final scoring = 10x. Optimize under 3x
+  for live-board numbers; 10x is the real gate.
+- check.py (starter): builds with --network=none, runs under the board's
+  sandbox, prints the output sha256; --expected <hash> fails on a wrong
+  answer. Our pin-hash.sh + e2e + context-replay cover the same contract.
+- Generators are PUBLIC (hackathon-raptors/speed-demon-2026): seed 1 at
+  full scale = the board dataset, sample = 10%. Expected sample hashes
+  publish Oct 30 06:00.
+
+**Track A (from a_ingest.py):** input requests.log; group (UTC hour,
+endpoint); p50/p95/p99 NEAREST RANK, rank = ceil(p*n/100) = (p*n+99)//100,
+index rank-1; errors = 5xx count + ppm = errs*1_000_000//count (integer
+floor); sorted by (hour, endpoint) (endpoint bytewise); single-space
+separator; trailing newline every line; hour rendered %Y-%m-%dT%H:00:00Z;
+method ignored; latency_us int. Input is LF-only.
+
+**Track B (from b_index.py):** inputs docs.txt (id<TAB>text, ids 0..N-1 in
+order — a violation raises) + queries.txt; output results.txt. Token =
+maximal run of ASCII [a-z0-9] after ASCII-lowercasing (bytes >= 0x80 are
+separators). Queries: BOOL t1 OP t2 ... / PHRASE "t1 t2 t3". BOOLEAN =
+left-to-right set ops (AND=intersection, OR=union, NOT=difference, no
+precedence). PHRASE = docs containing every term, then an exact adjacency
+scan of the re-tokenized text (no positions kept). Result line: count sum
+up-to-10-smallest-ids, space-joined; empty -> 0 0. Stopwords retained.
+
+**Track C (from c_join.py):** inputs records.csv + regions.csv (header
+region_id,country); output aggregates.txt. Quoting = Python csv module,
+excel dialect (comma sep, double-quote, "" escape, QUOTE_MINIMAL; CRLF and
+LF both terminate; CR/LF inside quotes kept). U+FEFF stripped from the start
+of the FIRST FIELD of every record (file start or after a terminator; the
+first field is never quoted). Amounts: exactly 2 decimals
+((-?)([0-9]+).([0-9]{2})), no rounding. Join region_id->country; unknown ->
+_UNMATCHED. Per-country aggregate: count id_sum amount_sum amount_min
+amount_max distinct_names name_bytes note_bytes (name/note bytes = UTF-8
+length); sorted by country (code-point = UTF-8 byte order); space-joined,
+one line per country, trailing newline.
+
+**Track D (from d_traverse.py):** inputs graph.txt (n m header, u v w u32,
+not sorted by u, ids dense 0-indexed, directed, reverse edges listed
+separately) + queries.txt (s t per line); output distances.txt.
+Distance-only, one integer per query line in query order; unreachable = -1;
+s == t = 0. Reference is per-query Dijkstra with early exit at the target;
+distances are Python ints (unbounded) -> implementation must carry u64
+internally. Parallel edges and zero weights fine.
+
+**Consequences for the in-window code:** the percentile "definition" debate
+is settled (nearest-rank ceil); the error rate is integer ppm, not a float;
+B needs NO positions (adjacency scan) and NO stopword list; C's oracle must
+reproduce the Python csv dialect + the per-record BOM strip; D is
+distance-only with -1. The deep dives' P0 tables are now pinned facts, not
+guesses.

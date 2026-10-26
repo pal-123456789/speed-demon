@@ -18,7 +18,8 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TRACKS="${1:-A B C D}"
+TRACKS="${1:-a b c d}"
+TRACKS="$(echo "$TRACKS" | tr '[:upper:]' '[:lower:]')"
 pass=0
 fail=0
 
@@ -58,8 +59,8 @@ for t in $TRACKS; do
         data="$tmp/data"
         mkdir -p "$data"
         case "$t" in
-            A) printf '2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177\n' >"$data/access.log" ;;
-            B) printf 'in the matter of trixclar\n' >"$data/corpus.txt" ;;
+            A) printf '2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177\n' >"$data/requests.log" ;;
+            B) printf 'in the matter of trixclar\n' >"$data/docs.txt" ;;
             C) printf 'id,name,note,region_id,amount\r\n1,"Kaphar, Titus","said ""no"" twice",7,1420.00\r\n' >"$data/records.csv" ;;
             D) printf '4 3\n0 1 10\n1 2 20\n2 3 30\n' >"$data/graph.txt" ;;
         esac

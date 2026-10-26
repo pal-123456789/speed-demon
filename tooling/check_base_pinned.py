@@ -42,7 +42,7 @@ IMAGE_SIZE_CAP_MB = 2048
 # The scored output filenames. None of them may be baked into the image: the
 # rule says the image may not ship cached outputs, and a pre-computed answer
 # would also defeat the SHA gate on the holdout.
-OUTPUT_FILES = ("ingest.txt", "index.txt", "join.txt", "traverse.txt")
+OUTPUT_FILES = ("summary.txt", "results.txt", "aggregates.txt", "distances.txt")
 
 
 class Result:

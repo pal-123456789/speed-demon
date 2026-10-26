@@ -13,12 +13,13 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 t="${1:-}"
+t="$(echo "$t" | tr '[:upper:]' '[:lower:]')"
 case "$t" in
-    A) want=ingest.txt  ;;
-    B) want=index.txt   ;;
-    C) want=join.txt    ;;
-    D) want=traverse.txt ;;
-    *) echo "usage: pin-hash.sh A|B|C|D" >&2; exit 2 ;;
+    a) want=summary.txt  ;;
+    b) want=results.txt   ;;
+    c) want=aggregates.txt    ;;
+    d) want=distances.txt ;;
+    *) echo "usage: pin-hash.sh a|b|c|d" >&2; exit 2 ;;
 esac
 
 data="$ROOT/verification/data/track-$t"

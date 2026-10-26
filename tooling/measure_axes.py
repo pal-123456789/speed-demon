@@ -51,10 +51,10 @@ if hasattr(sys.stdout, "reconfigure"):
 ROOT = Path(__file__).resolve().parent.parent
 
 TRACK_DIRS = {
-    "A": "track-A",
-    "B": "track-B",
-    "C": "track-C",
-    "D": "track-D",
+    "A": "track-a",
+    "B": "track-b",
+    "C": "track-c",
+    "D": "track-d",
 }
 
 # The published reference source size for Track A: 56 CODE LINES (the S unit

@@ -27,7 +27,7 @@ WHAT IT DOES
 
 Usage
 -----
-    python tooling/gen-fixtures.py --track C --rows 20000 --seed 7 --out verification/data/track-C
+    python tooling/gen-fixtures.py --track C --rows 20000 --seed 7 --out verification/data/track-c
     python tooling/gen-fixtures.py --all --out verification/data
     python tooling/gen-fixtures.py --track C --adversarial   # tiny edge-case corpus
 """
@@ -97,7 +97,7 @@ def gen_track_a(rows: int, seed: int, out_dir: Path) -> None:
 
     base = 1_767_225_600  # 2026-01-01T00:00:00Z
     hour_ms = 3_600_000_000
-    path = out_dir / "access.log"
+    path = out_dir / "requests.log"
     with path.open("w", encoding="utf-8", newline="\n") as f:
         # the published bytes first, so the sample is IN the corpus
         f.write(EVENTS_A_SAMPLE)
@@ -130,7 +130,7 @@ def gen_track_a_adversarial(out_dir: Path) -> None:
     * the formatting tie case e = 1, t = 160 (1 error in 160 requests);
     * error classes: only 5xx counts (500, 599 yes; 400, 600 no).
     """
-    path = out_dir / "access.log"
+    path = out_dir / "requests.log"
     rows = [
         EVENTS_A_SAMPLE,
         # boundary statuses (100..599, three digits), latency unit trap,
@@ -182,16 +182,16 @@ WORDS = ("writ habeas corpus bail bond recognizance indemnity forfeiture "
 
 
 def gen_track_b(docs: int, seed: int, out_dir: Path) -> None:
-    """A text corpus + a queries file (BOOL / PHRASE prefixed)."""
+    """docs.txt (id<TAB>text, ids 0..N-1 in order) + queries.txt."""
     rng = random.Random(seed)
-    path = out_dir / "corpus.txt"
+    path = out_dir / "docs.txt"
     vocab = list(dict.fromkeys(WORDS)) + [f"term{i}" for i in range(500)]
     with path.open("w", encoding="utf-8", newline="\n") as f:
         # published terms first, so phrase/BOOL queries have real postings
-        f.write(" ".join(EVENTS_B_WORDS) + "\n")
-        for _ in range(docs):
+        f.write(f"0\t{' '.join(EVENTS_B_WORDS)}\n")
+        for i in range(1, docs + 1):
             n = rng.randint(20, 120)
-            f.write(" ".join(rng.choice(vocab) for _ in range(n)) + "\n")
+            f.write(f"{i}\t{' '.join(rng.choice(vocab) for _ in range(n))}\n")
 
     qpath = out_dir / "queries.txt"
     nq = 500
@@ -216,16 +216,17 @@ def gen_track_b(docs: int, seed: int, out_dir: Path) -> None:
 
 def gen_track_b_adversarial(out_dir: Path) -> None:
     """Tiny B corpus: the published query/corpus bytes plus semantic traps."""
-    path = out_dir / "corpus.txt"
+    path = out_dir / "docs.txt"
     # every published term appears; a doc where the 4 queries all match;
     # a doc with CRLF; a doc with 1-byte tokens and an all-stopword phrase.
+    # The reference requires ids 0..N-1 in order: id<TAB>text per line.
     path.write_text(
-        "bond bond bond tebaickplea\n"
-        "in the matter of trixclar\n"
-        "ceeproust drolslemdio\n"
-        "fyslut cliceen surety\n"
-        "a the of in\r\n"
-        "x y z\n",
+        "0\tbond bond bond tebaickplea\n"
+        "1\tin the matter of trixclar\n"
+        "2\tceeproust drolslemdio\n"
+        "3\tfyslut cliceen surety\n"
+        "4\ta the of in\r\n"
+        "5\tx y z\n",
         encoding="utf-8", newline="",
     )
     qpath = out_dir / "queries.txt"
@@ -241,6 +242,24 @@ def gen_track_b_adversarial(out_dir: Path) -> None:
 
 # ── Track C ───────────────────────────────────────────────────────────────
 
+# The reference's join side: regions.csv (region_id,country). Records use
+# region ids 1..20; anything else lands in _UNMATCHED.
+COUNTRIES = ["France", "Spain", "Germany", "Italy", "Portugal", "Netherlands",
+             "Belgium", "Austria", "Poland", "Sweden", "Denmark", "Finland",
+             "Norway", "Ireland", "Greece", "Czechia", "Hungary", "Romania",
+             "Bulgaria", "Croatia"]
+
+
+def write_regions(out_dir: Path) -> None:
+    """regions.csv — the reference reads this as the join table."""
+    path = out_dir / "regions.csv"
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write("region_id,country\n")
+        for i, c in enumerate(COUNTRIES, start=1):
+            f.write(f"{i},{c}\n")
+    print(f"  C: regions.csv ({len(COUNTRIES)} countries) -> {path}")
+
+
 NAMES = ["Kaphar, Titus", "Betts", "", "trailing space ", 'quote " inside',
          "comma, quote \"\" and newline\ntogether", "unicode é ü ß",
          "tab\there", "semi;colon"]
@@ -251,6 +270,7 @@ NOTES = ['said "no" twice', "a note that\nspans two lines", "", "plain",
 def gen_track_c(rows: int, seed: int, out_dir: Path) -> None:
     """A HOSTILE CSV exercising every documented edge case."""
     rng = random.Random(seed)
+    write_regions(out_dir)
     path = out_dir / "records.csv"
     with path.open("wb") as f:
         # a BOM at the very start
@@ -284,6 +304,7 @@ def gen_track_c(rows: int, seed: int, out_dir: Path) -> None:
 def gen_track_c_adversarial(out_dir: Path) -> None:
     """A tiny corpus of hand-crafted edge cases — the differential tester's
     ammunition. Every case here corresponds to a published sample feature."""
+    write_regions(out_dir)
     path = out_dir / "records.csv"
     cases = [
         b"\xef\xbb\xbfid,name,note,region_id,amount\r\n",
@@ -306,7 +327,7 @@ def gen_track_c_adversarial(out_dir: Path) -> None:
 
 # The published graph bytes from the events page (verbatim header+edges).
 def gen_track_d(nodes: int, edges: int, seed: int, out_dir: Path) -> None:
-    """'n m' header then 'u v w' edges, NOT sorted by u."""
+    """'n m' header then 'u v w' edges (NOT sorted by u) + queries.txt."""
     rng = random.Random(seed)
     path = out_dir / "graph.txt"
     with path.open("w", encoding="utf-8", newline="\n") as f:
@@ -316,7 +337,11 @@ def gen_track_d(nodes: int, edges: int, seed: int, out_dir: Path) -> None:
             v = rng.randrange(nodes)
             w = rng.randint(1, 10000)
             f.write(f"{u} {v} {w}\n")
-    print(f"  D: {nodes} nodes, {edges} edges -> {path}")
+    qpath = out_dir / "queries.txt"
+    with qpath.open("w", encoding="utf-8", newline="\n") as f:
+        for _ in range(2000):
+            f.write(f"{rng.randrange(nodes)} {rng.randrange(nodes)}\n")
+    print(f"  D: {nodes} nodes, {edges} edges, 2000 queries -> {path}, {qpath}")
 
 
 def gen_track_d_adversarial(out_dir: Path) -> None:
@@ -375,7 +400,7 @@ def main() -> int:
     targets = ["A", "B", "C", "D"] if (args.all or args.track in (None, "all")) else [args.track]
 
     for t in targets:
-        out_dir = Path(args.out) / f"track-{t}"
+        out_dir = Path(args.out) / f"track-{t.lower()}"
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n[track {t}]")
         if t == "A":

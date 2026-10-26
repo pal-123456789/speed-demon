@@ -29,7 +29,7 @@ hostile fixture (gen-fixtures --track C) BEFORE writing the Rust parser, and
 against the real sample at Oct 30.
 
 Usage:
-    python tooling/csv-boundary-check.py --file verification/data/track-C/records.csv
+    python tooling/csv-boundary-check.py --file verification/data/track-c/records.csv
     python tooling/csv-boundary-check.py --file X --chunks 1,2,17,300,65536,1048576
     python tooling/csv-boundary-check.py --all      # run on generated C fixtures
 """
@@ -293,14 +293,14 @@ def main() -> int:
     if args.all:
         tmp = tempfile.TemporaryDirectory()
         fx = gen_fixture(Path(tmp.name))
-        paths = [fx / "track-C" / "records.csv"]
+        paths = [fx / "track-c" / "records.csv"]
         # the full hostile corpus lives in the same dir; check both adversarial
         # and the 3000-row generator output (the generator overwrote it — the
         # adversarial was written second, so regenerate full separately)
         subprocess.run([sys.executable, str(ROOT / "tooling" / "gen-fixtures.py"),
                         "--track", "C", "--rows", "3000", "--seed", "7",
                         "--out", str(fx)], check=True, capture_output=True)
-        paths.append(fx / "track-C" / "records.csv")
+        paths.append(fx / "track-c" / "records.csv")
     elif args.file:
         paths = [Path(args.file)]
     else:
