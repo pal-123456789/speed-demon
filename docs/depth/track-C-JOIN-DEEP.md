@@ -1,5 +1,19 @@
 # TRACK C · JOIN — INSANE-LEVEL DEEP DIVE
 
+> **MODEL-DERIVED UPGRADES (external model, see `97-MODEL-OUTPUT-DIGEST.md` §7):**
+> (1) The quoting ORACLE is now a six-state transition table (FS/UQ/IQ/QC/AC/CRP)
+> with documented [S]-defaults — the authoritative spec for the scalar parser
+> and the ground truth for `tooling/csv-boundary-check.py`. (2) Record
+> boundaries via the **quote-parity prepass**: "inside quotes" == odd `"` count;
+> per-chunk first0/first1 + a sequential state pass → cuts; dual-hypothesis
+> fallback (2× parse) if a literal `"` in unquoted fields is legal. (3) Money:
+> i64 cents, round on the MAGNITUDE then apply the sign, sums in i128, no
+> floats, `unsigned_abs()` formatting (i64::MIN-safe), and the four-rounding
+> table that decides the hash. (4) Join is size-driven: ≤100k-row lookup →
+> aggregate first then join; dense keys → direct array; else hash join (radix
+> partition, load 0.4, ~67 MB, prefetched probes, AtomicI64 aggregates,
+> NEVER CAS-insert, sort_unstable emission with full-key tie-break).
+
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-c-join.md`.
 > **Engine:** hostile-CSV ETL join + money-safe group aggregation → billing pipeline.
 > **Ladder goal:** L3. **Contract anchors:** ref **T 14.44 s**, timeout 144 s;

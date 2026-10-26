@@ -340,8 +340,20 @@ def gen_track_d_adversarial(out_dir: Path) -> None:
     ]
     header = f"100 11\n"
     path.write_text(header + "".join(edges), encoding="utf-8", newline="")
-    print(f"  D: adversarial graph (published bytes, self-loops, parallel "
-          f"edges, zero weight, unsorted) -> {path}")
+    qpath = out_dir / "queries.txt"
+    queries = [
+        "0 1\n",      # direct edge (parallel: the cheaper 5 wins)
+        "0 5\n",      # long path 0->1->0->1->4->5, ties for 0->1
+        "2 2\n",      # same node: distance 0
+        "3 5\n",      # 3->4->5
+        "7 8\n",      # unreachable (isolated pair)
+        "99 5\n",     # 99->0->...->5
+        "4 3\n",      # no reverse edge 4->3 (directed!)
+        "8 7\n",      # unreachable the other way
+    ]
+    qpath.write_text("".join(queries), encoding="utf-8", newline="")
+    print(f"  D: adversarial graph + queries (published bytes, self-loops, "
+          f"parallel edges, zero weight, unreachable, directed-gap) -> {path}, {qpath}")
 
 
 # ── main ──────────────────────────────────────────────────────────────────

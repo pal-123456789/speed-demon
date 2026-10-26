@@ -1,5 +1,22 @@
 # TRACK D · TRAVERSE — INSANE-LEVEL DEEP DIVE
 
+> **MODEL-DERIVED UPGRADES (external model, see `97-MODEL-OUTPUT-DIGEST.md` §6):**
+> (1) **Two-pass CSR build, no edge buffering** — pass 1 parses u only +
+> `deg.fetch_add`, scan → cursor = row ends, pass 2 `fetch_sub` places
+> `(w<<32)|v` packed u64 edges (40 MB) with `off: [u32; n+1]`; ~30–40 ms total.
+> (2) **Radix heap** (33 buckets, u64 `key<<32|node` items, eager normalization)
+> + the **meet condition with proof**: exit when `tf + tb >= mu`, μ updated
+> UNCONDITIONALLY per relaxed edge (`if O.dist[v] finite: mu = min(mu, nd +
+> O.dist[v])` even when nd didn't improve); "settled by both sides" is NOT a
+> valid exit. (3) **Overflow:** u64 labels unconditionally safe; `d+w` and
+> `tf+tb` overflow u32 even for small D → u64 registers; prune at
+> Rcap=min(R,2^32−1) with a rerun flag. (4) **Symmetric-reverse shortcut:** if
+> Σ mix(u,v,w) == Σ mix(v,u,w) (wrapping u64), the forward CSR serves as the
+> backward view (save 44 MB). (5) Per-thread open-addressing scratch (2^16
+> slots/direction, 12 MB total vs 96 MB dense), 12 threads (SMT pays on
+> latency-bound loops), prefetch `edge[off[v]]` on label improvement.
+> (6) SIMD on the search loop: skip (degree ≈ 5; no scatter for labels).
+
 > Pre-kickoff design. No solution code. Companion to `docs/specs/track-d-traverse.md`.
 > **Engine:** weighted shortest-path over millions of edges → road-network routing.
 > **Ladder goal:** L3. **Contract anchors:** ref **T 72.69 s** (highest ref in the

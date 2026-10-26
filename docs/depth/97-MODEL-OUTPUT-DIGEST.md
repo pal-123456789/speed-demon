@@ -190,3 +190,198 @@ count.
   block; merge in block order; integer/fixed-point math or a fixed-shape
   reduction tree for floats; own open-addressing table with a fixed hash, sort
   at the end.
+
+---
+
+## 6. Track D — the model's engine (P5)
+
+**Shape check:** 92 MB / 5M edges ≈ 18.4 B/line → ids ≈ 6 digits (n ≈ 10^6),
+weights 4–5 digits, avg degree ≈ 5. Verify against the header. Search loop is
+**memory-latency-bound, not SIMD**; reference ≈ 30 ms/query ≈ 10^4–10^5
+relaxations/query. CH preprocessing of 10^6 nodes costs seconds against a total
+budget of tenths of a second → confirmed deprioritized.
+
+**(a) Parse + CSR, two passes, no edge buffering.**
+- Fixed 1 MiB chunks (thread-count-independent), start snapped past the next
+  `\n`, atomic-counter dispatch, 1 MiB buffer per thread (12 MB total).
+- **SWAR digit decode** (no per-byte branches, ~12–15 cycles/number):
+  `bad = ((x+0x4646464646464646)|(x-0x3030303030303030)) & 0x8080...`;
+  `len = tz(bad)>>3`; left-pad; the ×2561 / ×6553601 / ×42949672960001
+  multiply-shift pairs → ~40 cycles/line, ~11 ms across ~7.5 effective cores.
+- **Pass 1 (parallel):** parse u only, `deg[u].fetch_add(1)`; scan →
+  `cursor[u] = prefix(deg)` (row END positions, 4 MB AtomicU32 reused).
+- **Pass 2 (parallel):** parse (u,v,w); `pos = cursor[u].fetch_sub(1)-1`;
+  `edge[pos] = (w<<32)|v`. Row order from atomics is nondeterministic —
+  harmless (only heap tie-order changes, never distances).
+- **Why two passes:** buffering edges = 40–60 MB extra ≈ 2.2× memory ≈ 1.17 on
+  K = 1.37× on T; pass 1 parses 1 of 3 numbers → ~5 ms. `vec![0u64; m]`
+  (calloc/lazy) written through one raw-pointer wrapper; each slot written
+  exactly once. Safe alt: `Vec<AtomicU64>` (+5 ms init).
+
+**(b) Layout:** `off: [u32; n+1]` (4 MB) + `edge: [u64; m]` = `(w<<32)|v` (40 MB).
+Sorted AoS = 60 MB; split to[]/wt[] touch 2 streams/row — both worse. **SIMD on
+the search loop: skip** (degree 5 → lanes empty; AVX2 has no scatter for label
+writes; gathers add latency) — expect 0–10%. AVX2's place is the parser.
+**Prefetch:** on label improvement, read `off[v]` and `_mm_prefetch(edge[off[v]])`
+→ row lands in L2 by pop time if the frontier stays ≲ 20k lines (benchmark).
+**Reverse edges:** if the edge multiset is symmetric, the forward CSR serves as
+the backward view (save 44 MB + ~20 ms) — verify in pass 2 via
+`Σ mix(u,v,w) == Σ mix(v,u,w)` as wrapping u64 sums (collision ~2^-64);
+else build a transposed CSR by counting sort on v.
+
+**(c) Bidirectional Dijkstra — radix heap + the meet condition (with proof):**
+- Keys u32, items u64 `key<<32|node`; 33 buckets; bucket = 0 if `key == last`
+  else `32 - lz(key^last)`; redistribute the first non-empty bucket's min on
+  pop; normalize eagerly (`top == last` → O(1) peek); lazy deletion with
+  stale-skip; keep Vec capacities across queries.
+- **Loop:** `mu = R+1` (or 2^64−2); `tf = F.top`, `tb = B.top`; if
+  `tf + tb >= mu: break`; pop the smaller frontier; relax
+  `nd = d + w` in **u64 registers**; `if nd < S.dist[v]`: update + push +
+  prefetch; **if O.dist[v] finite: mu = min(mu, nd + O.dist[v]) — UNCONDITIONAL,
+  even when nd did not improve.**
+- **Proof (sketch):** if the loop exits with tf + tb ≥ μ then μ = D: μ is a real
+  walk length ≥ D; every x with d(s,x) < tf is forward-settled and every x with
+  d(x,t) < tb backward-settled; if μ > D, a shortest path P* forces a later pop
+  to compute L_j + w + (D − L_{j+1}) = D ≤ μ, contradiction. Consequences:
+  (1) the μ update MUST be unconditional per edge — tying it to "nd improved"
+  breaks the proof on ties; (2) "stop when a node is first settled by both
+  sides" is NOT a valid exit rule; (3) stale entries only shrink tf → safe.
+
+**(d) Overflow:** u64 labels are unconditionally safe (D ≤ (n−1)·w_max < 2^64).
+u32 needs (n−1)·w_max < 2^32 — 10^6 × 10^5 breaks it. **Two sums overflow u32
+even when D is small:** `d + w` and `d_f + w + d_b` and `tf + tb` — compute in
+u64 registers (free on x86-64). Drop labels with nd > Rcap = min(R, 2^32−1);
+stored labels + heap keys then fit u32 (8 B items). **Exactness:** if D ≤ Rcap
+the proof runs unchanged on the restricted graph. **Detection:** set a flag when
+the prune fires on the 2^32−1 cap (not the semantic R); if flagged and μ > Rcap,
+rerun that query with u64 labels (type-generic instantiation).
+
+**(e) Parallel queries:** each thread claims queries 4-at-a-time from an atomic
+counter; per-thread scratch = **open-addressing table per direction**
+(slot `node<<32|dist`, empty u64::MAX, Fibonacci hash, 2^16 slots = 512 KB,
+load ≤ 0.5, reset via touched-slot list O(visited)); 12 threads × 2 × 0.5 MB =
+**12 MB vs 96 MB for dense u32[n]** (≈1.4× T-equivalents saved) and stays
+L2-resident. Manual itoa, one write. **Use 12 threads** (latency-bound loops
+gain from SMT) — benchmark 6 vs 12.
+**Totals:** ~44 MB CSR + 12 MB chunk buffers + 12 MB scratch ≈ **70 MB** (115 MB
+if the transpose is needed); parse+build ≈ 30–40 ms. If the query phase exceeds
+~70% of T, spend remaining hours on the search loop, not the parser.
+
+## 7. Track C — the model's engine (P4)
+
+**(a) Byte-exact oracle — the transition table (defaults for each [S] marked):**
+classes Q=`"` C=`,` N=LF R=CR O=other; actions E=end field, Rec=end field+record,
+L=literal quote from `""`.
+
+| State | Q | C | N | R | O |
+|---|---|---|---|---|---|
+| FS | →IQ | E→FS | Rec→FS (blank-line [S]) | →CRP | →UQ |
+| UQ | →UQ literal [S] | E→FS | Rec→FS | →CRP | →UQ |
+| IQ | →QC | →IQ | →IQ | →IQ | →IQ |
+| QC | L→IQ | E→FS | Rec→FS | →CRP | →AC [S] |
+| AC | →AC [S] | E→FS | Rec→FS | →CRP | →AC [S] |
+| CRP | bare CR [S] | bare CR [S] | Rec→FS (CRLF) | bare CR [S] | bare CR [S] |
+
+- LF/CR inside quotes are data, kept verbatim; `""`→one literal quote; `""""`→one
+  quote; trailing space in quotes is data (numeric columns [S]: trim/reject);
+  bare CR default = record end (re-dispatch from FS); BOM at 0 skipped once;
+  **mid-file BOM default = ordinary data** (if [S] strips: in FS, skip EF BB BF);
+  EOF rules per state; header run through the same machine, record 0 dropped.
+- Only columns 0, 3, 4 are interpreted; name/note are "scan to next `"`" —
+  nothing is unescaped or copied.
+
+**(b) Splitting at record boundaries — quote-parity prepass:**
+"inside quotes" == "odd number of `"` seen" (exact while `"` never appears in
+UQ/AC). Per fixed chunk (e.g. 2 MiB, thread-count-independent): track par, and
+first0/first1 = first terminator seen at par 0 / par 1; sequential pass threads
+S=start-state and picks first0/first1 accordingly → cuts = byte AFTER the
+terminator. Edges safe (prepass reads ASCII only; CRLF peek past edge; BOM
+wholly inside a range). If a literal `"` in UQ is legal ([S]), parse each range
+from BOTH hypotheses and keep the one the previous range's end state selects
+(2× work). **Differential fuzz:** 1/2/12/13 threads × chunk sizes 1..~300 bytes
+so an edge lands on every byte of every BOM/CRLF/`""` (implemented now in
+`tooling/csv-boundary-check.py`).
+
+**(c) Money parse (i64 cents):** digits → u64 (≤16 digits needs no checks;
+checked beyond), frac2 = first 2 fractional digits (pad zeros), d3 = 3rd digit,
+sticky = any nonzero after d3; mag = checked(int·100+frac2); round on the
+MAGNITUDE then apply the sign; accumulate sums in i128. **Negative zero:**
+integers have none — print the sign only when total < 0 and format with
+`unsigned_abs()` (avoids i64::MIN trap). Rounding table ([S] decides the hash):
+
+| input | half-away | half-even | truncate | half-up |
+|---|---|---|---|---|
+| 0.125 | 0.13 | 0.12 | 0.12 | 0.13 |
+| −0.125 | −0.13 | −0.12 | −0.12 | −0.12 |
+| 0.005 | 0.01 | 0.00 | 0.00 | 0.01 |
+| −0.005 | −0.01 | 0.00 | 0.00 | 0.00 |
+
+Half-away needs only d3 ≥ 5; half-even needs sticky + last-digit parity.
+
+**(d) Join — size-driven, not dogma:** if the lookup is ≤ ~100k rows, aggregate
+by region_id FIRST, then join the tiny aggregate once. Inspect the lookup's key
+shape for free while parsing it: dense 0..R−1 → direct array (13 MB @u32, beats
+everything); both files sorted → merge join with galloping (the ONLY outright
+sort-merge win). Otherwise **hash join wins on T and M**: open addressing, linear
+probe, fixed Fibonacci multiplier, load 0.4, 2^23 slots ≈ 67 MB (8 B/slot);
+shrink the value to a dense group index; **build deterministically** — radix
+partition by the top 6 hash bits into 64 partitions, pass A parallel appends,
+pass B one thread per partition consuming ranges in order 0..n → insertion order
+= file order → the duplicate rule (first/last-wins [S]) holds on every run;
+**never CAS-insert** (placement becomes timing-dependent). Probe = DRAM miss
+(~80 ns; 67 MB > 24 MB L3) ≈ 22 ms; batch 8–16 records with `_mm_prefetch` →
+few ms. Large G aggregation: shared `AtomicI64` + `fetch_add` (integer adds
+commute → deterministic). Sort-merge generally = more memory/traffic; not worth
+it. Determinism: probes are pure reads; NEVER iterate the table to emit —
+collect groups, `sort_unstable_by` on the full output key with a final
+tie-break, write once.
+
+## 8. Memory.peak doctrine (P7 — cgroup v2 high-water mark)
+
+Ranked by impact (all sizes are the model's estimates):
+1. **Whole-input residency (100+ MB)** — no `fs::read`/`read_to_end`/`lines().collect()`;
+   `FileExt::read_at` into per-thread 128–256 KiB buffers, carry the partial tail.
+2. **The file's own page cache** — IF charged to our cgroup, no read pattern
+   avoids it; levers are `posix_fadvise(DONTNEED)` (FFI, loses warm cache) or
+   `O_DIRECT` (`custom_flags(0x4000)`, slow on warm cache). Measure first.
+3. **Unbounded pipelines** — no unbounded `mpsc` (reader can buffer the whole
+   file); workers claim chunk indices from an `AtomicUsize` inside
+   `std::thread::scope`; if a producer is needed, `sync_channel(k)` with a fixed
+   ring of recycled buffers; count-then-fill for data that must be kept.
+4. **The ×12 multiplier** — budget ≤ ~1 MB working set per thread; merge by
+   folding or key-sharding; never a second full copy.
+5. **Growth doubling** — `Vec`/`String` realloc transient ≈ 3× old size;
+   hashbrown `HashMap` always allocates a new table; use fixed open-addressing
+   arrays, `reserve_exact`/`with_capacity` from known bounds; **over-reserving
+   is nearly free** (untouched pages are virtual); no unknown-length `collect()`.
+6. **glibc malloc hysteresis (10–30 MB)** — freeing a large mmapped chunk raises
+   `mmap_threshold`/`trim_threshold`; peak can become the sum of phases.
+   Allocate once and reuse (`clear()` + kept buffer); `mallopt` via FFI as a
+   stopgap (check the rules' dep counting for an `extern "C"` libc symbol).
+7. **glibc arenas × 12 threads (5–20 MB)** — per-thread arenas, free memory not
+   shared; the std-only fix is a **`#[global_allocator]` bump arena**: a
+   `static ARENA: [u8; N]` (.bss, costs nothing until touched) + thread-local
+   slab pointers + a global `AtomicUsize` slab counter; dealloc no-op;
+   realloc extends in place when last. Peak = exactly bytes touched, no
+   hysteresis, no locks, ~30 lines, hard abort at the limit = dev guard.
+8. **Hidden std allocations** — `sort`/`sort_by_key` allocate (use
+   `sort_unstable` with full-key tie-break; `select_nth_unstable` for
+   percentiles); `to_string`/`format!`/`lines()` per item (parse `&[u8]` in
+   place, manual number formatting); `BTreeMap` per-node.
+9. **Stack touches** — `[u8; 1<<20]` locals zero-touch 1 MB × 12; keep buffers
+   on the heap; `thread::Builder::stack_size(256<<10)`.
+10. **Zeroing / THP** — `vec![0; n]` takes the calloc lazy path (good);
+    `with_capacity` + `resize(n,0)` touches everything; if THP = `always`, a
+    touched byte can commit 2 MiB — `MADV_NOHUGEPAGE` via FFI.
+11. **Floors** — Rust baseline ~1–2 MB; memcg charge batching leaves maybe
+    ~256 KiB slack per active CPU; **everything written to the 1 GB tmpfs /tmp
+    counts** (spilling saves nothing; keep the OUTPUT off tmpfs).
+
+**~15 MB peak budget:** 12×256 KiB read buffers 3 MB + 12×~0.5 MB tables 6 MB +
+shared 2 MB + output 64 KiB + baseline ~2 MB + slack 2 MB — only reachable with
+1/3/4/5 done; 6/7 keep it from drifting up.
+**Calibrate first:** (1) `fn main(){}` baseline; (2) stream with read_at and do
+nothing → reveals page-cache charging; (3) with_capacity vs `vec![0; n]` vs
+resize; alloc 16 MB then 24 MB to see hysteresis. `strace -f -e
+trace=mmap,munmap,brk,mremap,madvise`; sample `memory.current` every 1 ms to
+find the spiking phase.

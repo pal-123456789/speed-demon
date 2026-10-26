@@ -17,10 +17,11 @@
 #   6  build-context replay   (each track builds from a clean COPY of its folder)
 #   7  image contract         (digest-pinned allowlisted stages, no cached outputs)
 #   8  K what-if self-check   (scoring math pinned to the published example)
-#   9  S and D axes           (code lines per track folder; dependency honesty)
-#  10  per-track gates        (verify: determinism, sandbox, timeout)
-#  11  scaffold sentinels     (a stub must never reach the freeze)
-#  12  the pre-freeze lockdown
+#   9  CSV boundary check     (Track C oracle vs quote-parity split, hostile fixtures)
+#  10  S and D axes           (code lines per track folder; dependency honesty)
+#  11  per-track gates        (verify: determinism, sandbox, timeout)
+#  12  scaffold sentinels     (a stub must never reach the freeze)
+#  13  the pre-freeze lockdown
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -189,6 +190,19 @@ if "$PY" tooling/k_whatif.py --selfcheck >/tmp/sd-kwhatif.txt 2>&1; then
 else
   cat /tmp/sd-kwhatif.txt
   fail "the K math drifted from the events page"
+fi
+
+# Track C's correctness spine: the quoting ORACLE and the quote-parity
+# boundary split (model digest §7). The checker proves every cut lands on a
+# record boundary, ranges cover the file, and the range-parse record count
+# equals the whole-file count — across chunk sizes 1..1 MiB — on the hostile
+# fixtures (BOM mid-file, CRLF/LF mix, escaped quotes, embedded newlines).
+step "CSV BOUNDARY CHECK (oracle vs quote-parity split, hostile fixtures)"
+if "$PY" tooling/csv-boundary-check.py --all >/tmp/sd-csvbound.txt 2>&1; then
+  ok "quote-parity boundaries are deterministic and oracle-consistent"
+else
+  grep 'FAIL' /tmp/sd-csvbound.txt | head -20 | sed 's/^/  /'
+  fail "a hostile-CSV boundary is wrong — the Track C split is not trustworthy"
 fi
 
 # The rules announced before the Oct 28 freeze require the final image to
