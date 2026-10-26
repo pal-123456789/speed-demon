@@ -21,6 +21,7 @@ Exit: 0 always (except --selfcheck, which fails on drift).
 """
 
 import argparse
+import itertools
 import json
 import math
 import os
@@ -81,6 +82,58 @@ def sensitivity(ratios: dict, pct: float) -> dict:
     return out
 
 
+TRACKS = ["A", "B", "C", "D"]
+
+
+def dispatch(base: dict, pph: dict, hours: float, diminish: float = 0.97) -> dict:
+    """Greedy hour allocation across the tracks, maximizing the geometric
+    mean of the BEST THREE resulting speed scores (the overall title rule).
+
+    Model: the h-th hour on track t yields pph[t] * diminish^h points
+    (diminishing returns, r < 1). Tries every 3-of-4 subset, allocates
+    greedily inside it, keeps the best subset. Clearly a heuristic — fill
+    --base/--pph with the team's own estimates (k_whatif and the bench
+    produce them).
+    """
+    best = None
+    for subset in itertools.combinations(TRACKS, 3):
+        hours_i = {t: 0.0 for t in TRACKS}
+        remaining = hours
+        # one "hour" can be fractional for finer granularity; h steps of 0.5
+        step = 0.5
+        while remaining > 1e-9:
+            best_t, best_gain = None, -1.0
+            for t in subset:
+                gain = pph[t] * (diminish ** hours_i[t])
+                if gain > best_gain:
+                    best_gain, best_t = gain, t
+            take = min(step, remaining)
+            hours_i[best_t] += take
+            remaining -= take
+        speeds = {t: base[t] + sum(pph[t] * (diminish ** h) for h in
+                                   range(0, int(hours_i[t] * 2), 2))
+                  for t in subset}
+        gm = math.exp(sum(math.log(max(s, 1e-9)) for s in speeds.values()) / 3)
+        cand = {"subset": sorted(subset), "hours": hours_i, "speeds": speeds,
+                "geomean": gm}
+        if best is None or gm > best["geomean"]:
+            best = cand
+    if best is None:
+        raise ValueError("dispatch: no tracks")
+    best["drop"] = [t for t in TRACKS if t not in best["subset"]]
+    return best
+
+
+def _parse_pairs(values: list) -> dict:
+    out = {}
+    for v in values or []:
+        if "=" not in v:
+            raise ValueError(f"expected TRACK=value, got {v!r}")
+        t, val = v.split("=", 1)
+        out[t.upper()] = float(val)
+    return out
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Speed Demon what-if K explorer")
     p.add_argument("--track", choices=list(REFS), help="track preset (M/S_ref DEFERRED for B/C/D)")
@@ -92,7 +145,35 @@ def main() -> int:
     p.add_argument("--pct", type=float, default=0.10, help="improvement to test per axis (default 0.10)")
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument("--selfcheck", action="store_true", help="assert the Nightshade example still reproduces K=6.41, speed=40.4")
+    p.add_argument("--dispatch", action="store_true", help="allocate H hours across the tracks (best-3 rule)")
+    p.add_argument("--hours", type=float, default=72.0, help="hours to allocate (--dispatch)")
+    p.add_argument("--base", nargs="+", metavar="T=V", help="current speed score per track, e.g. A=35 B=30 C=20 D=12 (--dispatch)")
+    p.add_argument("--pph", nargs="+", metavar="T=V", help="points per hour per track, e.g. A=1.0 B=0.8 C=0.6 D=0.4 (--dispatch)")
+    p.add_argument("--diminish", type=float, default=0.97, help="returns decay per hour on the same track (default 0.97)")
     args = p.parse_args()
+
+    if args.dispatch:
+        if not args.base or not args.pph:
+            p.error("--dispatch needs --base 'T=V ...' and --pph 'T=V ...'")
+        base = _parse_pairs(args.base)
+        pph = _parse_pairs(args.pph)
+        plan = dispatch(base, pph, args.hours, args.diminish)
+        if args.json:
+            print(json.dumps(plan, indent=2))
+            return 0
+        print("\n72h DISPATCH (best-3-of-4 geometric mean; heuristic model)")
+        print("=" * 64)
+        for t in TRACKS:
+            h = plan["hours"][t]
+            sp = base[t] + sum(pph[t] * (args.diminish ** k) for k in
+                               range(0, int(h * 2), 2))
+            role = "DROPPED" if t in plan["drop"] else "COUNTED"
+            print(f"  track {t}: {h:5.1f} h   base {base[t]:5.1f} -> {sp:5.1f}   [{role}]")
+        print(f"\n  best-3 geometric mean of speeds: {plan['geomean']:.2f}")
+        print(f"  drop candidate: {', '.join(plan['drop'])}")
+        print("  (= track total also adds 0.35×judge; this ranks the speed half.)")
+        print()
+        return 0
 
     if args.selfcheck:
         res = coefficient(dict(NIGHTSHADE))

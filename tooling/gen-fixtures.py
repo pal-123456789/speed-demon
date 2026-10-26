@@ -53,6 +53,15 @@ ERROR_STATUSES = {500, 502, 503}
 
 # ── Track A ───────────────────────────────────────────────────────────────
 
+# The published sample rows from the events page, byte-verbatim. The H0
+# oracle must reproduce the same aggregate on these bytes; they also exercise
+# the unit trap (latency_us is MICROSECONDS) and the 5xx error class.
+EVENTS_A_SAMPLE = (
+    "2026-10-30T18:07:18.569411Z GET /api/v2/products 200 8177\n"
+    "2026-10-30T18:07:21.136274Z GET /beta/regions 503 81573\n"
+    "2026-10-30T18:07:27.963350Z PUT /v2/ab_tests 200 6381\n"
+)
+
 def gen_track_a(rows: int, seed: int, out_dir: Path) -> None:
     """Log lines: ts method endpoint status latency_us.
 
@@ -90,6 +99,8 @@ def gen_track_a(rows: int, seed: int, out_dir: Path) -> None:
     hour_ms = 3_600_000_000
     path = out_dir / "access.log"
     with path.open("w", encoding="utf-8", newline="\n") as f:
+        # the published bytes first, so the sample is IN the corpus
+        f.write(EVENTS_A_SAMPLE)
         for i in range(rows):
             t = base + (i * 977) % (24 * hour_ms)
             secs = t // 1000
@@ -104,10 +115,40 @@ def gen_track_a(rows: int, seed: int, out_dir: Path) -> None:
                 f"2026-01-01T{hh:02d}:{mm:02d}:{ss:02d}.{micros:06d}Z "
                 f"{rng.choice(METHODS)} {pick_ep()} {status} {lat}\n"
             )
-    print(f"  A: {rows} lines, {n_ep} distinct endpoints -> {path}")
+    print(f"  A: {rows} lines, {n_ep} distinct endpoints, published sample first -> {path}")
+
+
+def gen_track_a_adversarial(out_dir: Path) -> None:
+    """Tiny A corpus: the published sample plus the parsing traps."""
+    path = out_dir / "access.log"
+    rows = [
+        EVENTS_A_SAMPLE,
+        # boundary statuses (100..599, three digits), latency unit trap,
+        # RFC3339 with +00:00 instead of Z, missing fractional digits
+        "2026-10-30T18:07:28.000001Z GET /api/v1/health 100 0\n",
+        "2026-10-30T18:07:29.000002Z POST /v2/checkout 599 1999999\n",
+        "2026-10-30T18:07:30.000003+00:00 PUT /beta/regions 500 1\n",
+        "2026-10-30T18:07:31.000Z HEAD /v3/items 301 0000001\n",
+        # a maximal-length latency (u32 max: 4294967295 microseconds)
+        "2026-10-30T18:07:32.000000Z DELETE /v3/items 200 4294967295\n",
+    ]
+    path.write_text("".join(rows), encoding="utf-8", newline="")
+    print(f"  A: adversarial corpus ({len(rows)} records: unit trap, boundary "
+          f"statuses, tz forms) -> {path}")
 
 
 # ── Track B ───────────────────────────────────────────────────────────────
+
+# The published query lines from the events page (seed-1 bytes, verbatim).
+EVENTS_B_QUERIES = (
+    "BOOL bond NOT tebaickplea\n"
+    'PHRASE "in the matter of trixclar"\n'
+    "BOOL ceeproust AND drolslemdio\n"
+    'PHRASE "fyslut cliceen surety"\n'
+)
+EVENTS_B_WORDS = ("bond", "tebaickplea", "in", "the", "matter", "of",
+                  "trixclar", "ceeproust", "drolslemdio", "fyslut", "cliceen",
+                  "surety")
 
 WORDS = ("writ habeas corpus bail bond recognizance indemnity forfeiture "
          "surety matter nothing the of and or not in a to is was be by on "
@@ -120,6 +161,8 @@ def gen_track_b(docs: int, seed: int, out_dir: Path) -> None:
     path = out_dir / "corpus.txt"
     vocab = list(dict.fromkeys(WORDS)) + [f"term{i}" for i in range(500)]
     with path.open("w", encoding="utf-8", newline="\n") as f:
+        # published terms first, so phrase/BOOL queries have real postings
+        f.write(" ".join(EVENTS_B_WORDS) + "\n")
         for _ in range(docs):
             n = rng.randint(20, 120)
             f.write(" ".join(rng.choice(vocab) for _ in range(n)) + "\n")
@@ -127,6 +170,7 @@ def gen_track_b(docs: int, seed: int, out_dir: Path) -> None:
     qpath = out_dir / "queries.txt"
     nq = 500
     with qpath.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(EVENTS_B_QUERIES)
         for _ in range(nq):
             if rng.random() < 0.62:
                 # BOOL — left-associative, no parentheses
@@ -141,7 +185,32 @@ def gen_track_b(docs: int, seed: int, out_dir: Path) -> None:
                 n = rng.randint(2, 4)
                 terms = [rng.choice(vocab) for _ in range(n)]
                 f.write(f'PHRASE "{" ".join(terms)}"\n')
-    print(f"  B: {docs} docs, {nq} queries -> {path}, {qpath}")
+    print(f"  B: {docs} docs, {nq} queries, published lines first -> {path}, {qpath}")
+
+
+def gen_track_b_adversarial(out_dir: Path) -> None:
+    """Tiny B corpus: the published query/corpus bytes plus semantic traps."""
+    path = out_dir / "corpus.txt"
+    # every published term appears; a doc where the 4 queries all match;
+    # a doc with CRLF; a doc with 1-byte tokens and an all-stopword phrase.
+    path.write_text(
+        "bond bond bond tebaickplea\n"
+        "in the matter of trixclar\n"
+        "ceeproust drolslemdio\n"
+        "fyslut cliceen surety\n"
+        "a the of in\r\n"
+        "x y z\n",
+        encoding="utf-8", newline="",
+    )
+    qpath = out_dir / "queries.txt"
+    qpath.write_text(EVENTS_B_QUERIES +
+                     'PHRASE "the of"\n'
+                     "BOOL NOT bond\n"
+                     "BOOL x AND z\n"
+                     'PHRASE "in the"\n',
+                     encoding="utf-8", newline="")
+    print(f"  B: adversarial corpus + queries (published bytes, NOT/AND edge "
+          f"cases, stopword phrase) -> {path}, {qpath}")
 
 
 # ── Track C ───────────────────────────────────────────────────────────────
@@ -209,6 +278,7 @@ def gen_track_c_adversarial(out_dir: Path) -> None:
 
 # ── Track D ───────────────────────────────────────────────────────────────
 
+# The published graph bytes from the events page (verbatim header+edges).
 def gen_track_d(nodes: int, edges: int, seed: int, out_dir: Path) -> None:
     """'n m' header then 'u v w' edges, NOT sorted by u."""
     rng = random.Random(seed)
@@ -221,6 +291,31 @@ def gen_track_d(nodes: int, edges: int, seed: int, out_dir: Path) -> None:
             w = rng.randint(1, 10000)
             f.write(f"{u} {v} {w}\n")
     print(f"  D: {nodes} nodes, {edges} edges -> {path}")
+
+
+def gen_track_d_adversarial(out_dir: Path) -> None:
+    """Tiny D graph: the published bytes + self-loops, parallel edges,
+    zero weights, an unreachable node, and unsorted edges."""
+    path = out_dir / "graph.txt"
+    edges = [
+        # the published edges, verbatim
+        "1188446 437285 120\n",
+        "64107 865467 170\n",
+        "472413 359585 122\n",
+        "429961 196139 82\n",
+        # adversarial topology (small ids so the queries can reach them)
+        "0 1 10\n",
+        "1 0 10\n",          # reverse edge listed separately
+        "0 1 5\n",           # parallel edge, cheaper
+        "2 2 0\n",           # self-loop with zero weight
+        "3 4 7\n",
+        "4 5 100\n",
+        "99 0 1\n",          # a far node (unreachable unless 99 is queried in)
+    ]
+    header = f"100 11\n"
+    path.write_text(header + "".join(edges), encoding="utf-8", newline="")
+    print(f"  D: adversarial graph (published bytes, self-loops, parallel "
+          f"edges, zero weight, unsorted) -> {path}")
 
 
 # ── main ──────────────────────────────────────────────────────────────────
@@ -246,16 +341,25 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n[track {t}]")
         if t == "A":
-            gen_track_a(args.rows, args.seed, out_dir)
+            if args.adversarial:
+                gen_track_a_adversarial(out_dir)
+            else:
+                gen_track_a(args.rows, args.seed, out_dir)
         elif t == "B":
-            gen_track_b(args.docs, args.seed, out_dir)
+            if args.adversarial:
+                gen_track_b_adversarial(out_dir)
+            else:
+                gen_track_b(args.docs, args.seed, out_dir)
         elif t == "C":
             if args.adversarial:
                 gen_track_c_adversarial(out_dir)
             else:
                 gen_track_c(args.rows, args.seed, out_dir)
         elif t == "D":
-            gen_track_d(args.nodes, args.edges, args.seed, out_dir)
+            if args.adversarial:
+                gen_track_d_adversarial(out_dir)
+            else:
+                gen_track_d(args.nodes, args.edges, args.seed, out_dir)
     print("\nDone. These fixtures are NOT the sample data — they exist to "
           "catch overfitting.")
     return 0

@@ -112,3 +112,20 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
   the Oct 28 freeze, with URL citations (fetch date Oct 27) — A's percentile
   list/group key/error class, C's columns + sorted output, D's bounded-distance
   hint, the verified digest allowlist, and the prize structure.
+- `98-MODEL-PROMPTS.md` — paste-ready prompts (with the frozen CONTEXT BLOCK)
+  for an external high-level model: timestamp/percentile arithmetic, posting
+  compression, the CSV oracle state machine, CSR/radix layout, determinism and
+  memory.peak tactics, and the K-optimal hour budget. Outputs are
+  DESIGN-ONLY (rule 05) — they land in docs, never in track-*/src before H0.
+
+## The H0 accelerator toolbox (tooling/)
+
+- `tooling/k_whatif.py` — per-axis sensitivity + `--dispatch` (best-3 hour
+  allocation); `--selfcheck` pins the math to the published example.
+- `tooling/pin-hash.sh A|B|C|D` — re-pin a track's expected SHA from the
+  current binary's deterministic output (the SHA-green fast loop at H0).
+- `tooling/context-replay.sh` — replay the Docker `COPY . /src` build from a
+  clean copy of each track folder (catches off-folder dependencies).
+- `tooling/gen-fixtures.py --all --adversarial` — every track's corpus now
+  leads with the PUBLISHED sample bytes plus the parsing traps (unit trap,
+  100/599 statuses, CRLF, self-loops, parallel edges).
