@@ -18,10 +18,11 @@
 #   7  image contract         (digest-pinned allowlisted stages, no cached outputs)
 #   8  K what-if self-check   (scoring math pinned to the published example)
 #   9  CSV boundary check     (Track C oracle vs quote-parity split, hostile fixtures)
-#  10  S and D axes           (code lines per track folder; dependency honesty)
-#  11  per-track gates        (verify: determinism, sandbox, timeout)
-#  12  scaffold sentinels     (a stub must never reach the freeze)
-#  13  the pre-freeze lockdown
+#  10  determinism matrix     (P6: threads x chunk x chaos, byte-identical output)
+#  11  S and D axes           (code lines per track folder; dependency honesty)
+#  12  per-track gates        (verify: determinism, sandbox, timeout)
+#  13  scaffold sentinels     (a stub must never reach the freeze)
+#  14  the pre-freeze lockdown
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -203,6 +204,19 @@ if "$PY" tooling/csv-boundary-check.py --all >/tmp/sd-csvbound.txt 2>&1; then
 else
   grep 'FAIL' /tmp/sd-csvbound.txt | head -20 | sed 's/^/  /'
   fail "a hostile-CSV boundary is wrong — the Track C split is not trustworthy"
+fi
+
+# The SHA gate is binary: ANY nondeterminism is a zero. The P6 matrix runs
+# the real binaries across (threads x chunk x chaos) and asserts byte-identity
+# with a reference run. CI uses a reduced matrix; the full one (6 threads,
+# 3 chunk sizes, chaos on/off, N>=8) runs before every H50+ commit.
+step "DETERMINISM MATRIX (P6: threads x chunk x chaos)"
+if N=2 THREADS="1 6 12" CHUNKS="4093 1048576" sh tooling/determinism-check.sh all \
+   >/tmp/sd-det.txt 2>&1; then
+  ok "all tracks byte-identical across the thread/chunk/chaos matrix"
+else
+  grep 'FAIL' /tmp/sd-det.txt | head -10 | sed 's/^/  /'
+  fail "nondeterminism detected — the SHA gate would score zero"
 fi
 
 # The rules announced before the Oct 28 freeze require the final image to

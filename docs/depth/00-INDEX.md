@@ -129,3 +129,10 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 - `tooling/gen-fixtures.py --all --adversarial` — every track's corpus now
   leads with the PUBLISHED sample bytes plus the parsing traps (unit trap,
   100/599 statuses, CRLF, self-loops, parallel edges).
+- `tooling/csv-boundary-check.py` — the quoting ORACLE (six-state transition
+  table) vs the quote-parity boundary split; proves determinism and
+  oracle-consistency across chunk sizes 1..1 MiB on hostile fixtures.
+- `tooling/determinism-check.sh` — the P6 matrix: run every binary across
+  (THREADS x CHUNK x CHAOS) and assert byte-identity; the SHA-zero killer.
+- `tooling/k_whatif.py --scoreboard` — measured T/M/lines per track -> K,
+  speed, track total, best-3 geomean after every rung (P9).

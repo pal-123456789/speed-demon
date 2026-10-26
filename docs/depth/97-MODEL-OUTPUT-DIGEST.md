@@ -385,3 +385,171 @@ nothing → reveals page-cache charging; (3) with_capacity vs `vec![0; n]` vs
 resize; alloc 16 MB then 24 MB to see hysteresis. `strace -f -e
 trace=mmap,munmap,brk,mremap,madvise`; sample `memory.current` every 1 ms to
 find the spiking phase.
+
+---
+
+## 9. Determinism under parallelism (P6) — the SHA-zero killer
+
+Required property: **output = f(input) only** — thread count, chunk size,
+scheduling and allocator state must never affect the bytes.
+
+**The failure table (source → fix):**
+
+| Source | Fix |
+|---|---|
+| Partitioning derived from thread count | fixed chunk units claimed via `AtomicUsize` — the unit set never depends on T |
+| Completion order (Mutex<Vec>, channels, worker prints) | `results[unit_id]` slots; merge + emit in unit order after the scope |
+| Non-commutative merges (first/last-wins, dedup, "first seen" ids) | merge in unit order; tie-break by `(unit, local_seq)` or file offset |
+| Float reduction (non-associative) | integers/fixed point; compute rates ONCE from final integer counts |
+| Checked arithmetic on partials | `i128` accumulators or wrapping adds + one final range check |
+| Heap/sort tie order | total-order keys with a unique last component `(dist, node)`, `(score, doc_id)`; never `partial_cmp().unwrap()` on floats |
+| Map iteration (RandomState per process!) | never iterate to emit; collect, sort on the full key, then write |
+| Order-sensitive atomics (`fetch_add` term/node ids, CAS first-claimer) | derive ids from keys or prefix sums over fixed units |
+| Stale per-thread state | reset discipline per unit + chaos testing that randomizes unit→thread assignment |
+| Thread-count-dependent code paths | one code path with identical semantics; test SIMD vs scalar against each other |
+| Early exit | define canonical order (e.g. atomic min over unit index) |
+| Environment leaks (pointers as keys, ThreadId, uninitialized `set_len`) | don't; fully initialize every buffer you read |
+| Output | one writer, one pass, after the join |
+
+**Track notes:** A/C — each record owned by exactly one range starting after a
+terminator; prepass cuts independent of T; dedup/last-wins need `(range_idx,
+local_seq)`. B — results in `out[query_idx]`; postings ordered by doc id; global
+token positions via prefix sums of per-chunk counts; **term ids by first-seen
+across threads is a classic leak** — assign from sorted terms. D — distances are
+unique so heap ties can't change distance-only output; risks are shared scratch,
+`<=` vs `<` at the bound, the unreachable sentinel, u64 accumulation of u32
+weights; parallel CSR `fetch_add` placement scrambles adjacency order (harmless
+for distances, not for anything order-sensitive — use per-chunk prefix counts).
+
+**Mechanical matrix** (implemented as `tooling/determinism-check.sh`):
+```
+H = sha256(reference(input))          # a SLOW CORRECT SINGLE-THREAD ref, not your own 1-thread run
+for T in [1,2,3,5,6,7,11,12,13,24,32]:          # include oversubscription
+  for CHUNK in [prod, 4093, 65537, 1 MiB]:        # odd sizes put edges on every special byte
+    for CHAOS in [off, on(seed=1..k)]:            # random yields, shuffled claim order
+      repeat N (>=50 with chaos): sha256(run) == H, else keep (T, CHUNK, seed), cmp first differing byte
+```
+Also: `taskset -c 0-0 / 0-5 / 0-11` (available_parallelism follows affinity);
+`stress-ng --cpu 12` background load; `setarch -R` ASLR off; `MALLOC_PERTURB_=165`
+for uninitialized reads; debug build `-C overflow-checks=on`; small-input fuzz
+with tiny chunks; full-size run on the real file.
+
+**What it will NOT catch** (keep these honest): (1) a consistent wrong answer
+(determinism ≠ correctness — the reference is the oracle); (2) rare
+interleavings — 50 clean runs bound p ≲ 6% at 95% (rule of three), p = 1%
+needs ~300 → chaos matters more than run count; (3) input coverage; (4)
+environment differences (kernel/glibc/CPU; `-C target-cpu=native` is a trap —
+an AVX-512 build host can emit instructions the target lacks); (5) load/time-
+adaptive behavior; (6) UB that happens to be stable; (7) chaos masking — keep
+unperturbed runs too; (8) std behavior across toolchains — pin the toolchain
+and Cargo.lock; (9) cold-cache / memory-limit effects — test under the same
+`--memory`.
+
+## 10. Track A AVX2 micro-design (P2)
+
+- **The output barely needs the timestamp.** Bucket key = first 13 bytes
+  (`YYYY-MM-DDTHH`); no calendar math; fixed-width ISO keys sort bytewise.
+  Hour-of-day (24 buckets): `h = (b[11]&15)*10 + (b[12]&15)`.
+- **Delimiters — one 64-byte window per record** (from `s+28`; covers ≤ 92 B
+  lines): `w0 = loadu256(s+28); w1 = loadu256(s+60)`; mask of ' ' and '\n';
+  `sp2, sp3, sp4, nl = tz` sequence; checks: `buf[nl]=='\n'`, `sp4 == sp3+4`
+  (status exactly 3 bytes), `1 <= nl-sp4-1 <= 10` (latency length), `sp2` in
+  [3..7] (method length); ~25 instructions; any failure → scalar slow path
+  which re-syncs from the line start (fast path's only state = next-line
+  pointer). Buffer padding: ≥ 96 zero bytes at the end, ≥ 16 at the front;
+  append a trailing `\n` if the file lacks one.
+- **Timestamp validation — one 32-byte compare** (~10 instr): subtract '0',
+  digit check via `min_u8(t,9)==t`, separator `cmpeq` vs EXPECT ('-' at 4,7;
+  'T' 10; ':' 13,16; '.' 19; 'Z' 26; ' ' 27); blend; `movemask` must be all
+  ones on the digit lanes. Optional `mm`/`ss` tens ≤ 5 checks (+3 instr).
+  Key = two overlapping u64 loads (`ts[0..8]`, `ts[5..13]`); MRU compare vs
+  previous record, else a small hash table (calendar validation once per
+  distinct hour). Safe-Rust fallback: four u64s via `from_le_bytes`,
+  XOR-with-template + the `0x0606..` digit check (~35 instr).
+- **latency_us (≤ 10 digits) → u32 — SWAR ~20 instr:** load u64 at `nl-8`,
+  fill garbage lanes with '0', digit-check, subtract '0', then the
+  `×2561/×6553601/×42949672960001` pair; if `L > 8` parse the leading 1–2
+  digits scalar and `v = hi*10^8 + lo8` in u64; reject `v > u32::MAX`.
+  SSE4.1 maddubs alternative (~12 instr, branch-free) — adopt only if it
+  beats SWAR on a bench. Status: `is_err = b[sp3+1] == b'5'` (valid because
+  the `sp4 == sp3+4` check enforces 3 digits).
+- **Per-record budget (~120 instr AVX2):** delimiters 25, ts validate + key
+  cache 20, method length 4, endpoint hash + exact-compare (~30; the 1,842-
+  entry table is L2-resident), status 5, latency SWAR 20, group/counter 10,
+  loop 5. At 12 threads on 6 P-cores ≈ 10–15 ms compute vs a DRAM+copy floor
+  ≈ 15–25 ms for ~220 MB → **under ~150 instr/record you are bandwidth-bound**;
+  next gains are avoiding copies and the endpoint lookup. **Decide count-then-
+  fill vs two passes BEFORE tuning** (12.4 MB of latencies is most of a
+  ~20 MB target).
+- **Fallback placement:** chunk-level AVX2 vs scalar selection at startup
+  (`is_x86_feature_detected!("avx2")`), per chunk not per record; the scalar
+  chunk path is the reference of record; `#[cold] #[inline(never)]
+  parse_record_slow(line)` implements full reference semantics — the fast path
+  is only a recognizer that must match or bail. Unsafe surface: the padding
+  invariant justifies `_mm256_loadu_si256`. Minimum unsafe set if budget is
+  tight: a 3-intrinsic delimiter scan (SWAR loses most there, 4–6×).
+  Differential fuzz fast vs slow on every line + single-byte mutations.
+
+## 11. The 72-hour battle plan (P9)
+
+**The score table (S=D=1):** 25×/5× → speed 41.9 (27 pts); 100×/12× → 60.8
+(40); 300×/12× → 72.7 (47); 1000×/12× → 85.8 (56). **"25× and 5×" is a weak
+target — winners are bounded by the I/O + startup floor, not the reference.**
+Elasticities: 1% less time ≈ +0.11 speed pts; halving M ≈ +3.0; doubling code
+size ≈ −2.3 (a change adding 10% lines must save ≥ 3% runtime to break even).
+Overall title = geomean of best 3 → **lift your weakest of the three first**
+(marginal value ∝ 1/total). Judge = 35% — the write-up may pay more per hour
+than late micro-optimization.
+
+**Shape:** Now→Oct 30: build the generic tooling (harness, generators, slow
+oracles, scoreboard, floor baselines, the P6 runner). H0–2: read specs +
+reference; write down the EXACT output/rounding/tie/order rules; pick three
+tracks. **H2–12: SHA-green single-thread baselines on all three tracks BEFORE
+optimizing — a slow green beats a fast gate failure; submit early if
+resubmission is allowed.** H12–50: rungs round-robin by marginal points/hour
+weighted by 1/total; tag every green rung, revert on red. H50–60: P6 + P7
+hardening under the exact container flags. H60–72: freeze features, write up,
+final timing. Two sleeps ≥ 6 h before H48, each after a green commit. Measure
+after every rung: hash at 1/6/12 threads, 5-run middle-3 wall, memory.peak,
+`perf stat` (instructions/cycles/IPC/faults), gap to floor, predicted speed.
+
+**Per-track rungs (estimates; measure each):**
+- **A:** ① 12-thread fixed-chunk pread + merge (6–10×) ② compact storage
+  count-then-fill (M ÷3–5) ③ AVX2 delimiter window (2–3×) ④ endpoint
+  open-addressing intern (1.5–2×) ⑤ ts validate + key cache (1.3×) ⑥ SWAR
+  latency (1.2×) ⑦ memory pass (M ÷2–4, +3–6 pts) ⑧ radix select instead of
+  full sort on big groups (1.2–1.5×) ⑨ parallel merge, one write (1.1–1.3×)
+  ⑩ build flags. Stop at ≈1.5× the pread+startup floor or < 3% per rung.
+- **B:** ① **query-aware index** (postings only for query terms; positions only
+  for phrase terms — the big build cut) ② parallel build over document-aligned
+  fixed chunks, global postings = chunk-local lists concatenated in chunk order
+  (4–8×, no sort) ③ fast tokenizer, no Strings (2–3×) ④ count-then-fill
+  postings ⑤ hybrid bitmaps (dense/stopwords) + u32 arrays (2–5× on BOOL)
+  ⑥ **prefix-trie memoization** — 50k left-associative queries share prefixes,
+  evaluate each once ⑦ phrase = doc-level AND first, then position merge
+  anchored on the rarest term (2–10×) ⑧ reorder pure-AND runs smallest-first
+  ⑨ parallel queries `out[query_idx]` ⑩ preformatted output, one write.
+  Stop when build ≈ 1.5× the tokenize floor and queries < 10% of wall.
+- **C:** ① parity prepass + fixed-range parallel parse (6–10×) ② fast path
+  for name/note (skip-only; interpret columns 0/3/4) (1.5–2×) ③ SWAR money
+  (1.2×) ④ join: direct array if dense else partitioned parallel build
+  (2–4×) ⑤ lookup compaction (M ÷2–3) ⑥ aggregation per-thread vs atomics by
+  group count ⑦ memory-sized pread buffers + sort_unstable full-key ⑧
+  clmul prefix-XOR quote masks only if quoted fields dominate ⑨ one write ⑩
+  flags. **Re-run the whole differential fuzz after EVERY rung**; if not clean
+  well before H48, drop C and keep the other three.
+- **D:** ① parallel newline-aligned parse + SWAR u32 (10–20× on parse) ②
+  parallel CSR via atomics — **the one place the determinism rule relaxes**
+  (distance-only output) (3–6×) ③ compact (v,w) pairs 8 B + u32 offsets ④
+  per-query touched-node maps, not O(n) clears (M ÷several) ⑤ packed u64
+  heap entries, lazy deletion, early exit (1.3–2×) ⑥ parallel queries ⑦
+  prefetch heap-top adjacency ⑧ AVX2 delimiter scan (1.5–2×) ⑨ lazy zero
+  pages ⑩ flags. **Skip bidirectional/CH unless queries > ~20% of wall** (the
+  reverse CSR is a second build; the hint says CH rarely repays).
+
+**Stop rule:** per-rung value ≈ A first 2× = 3–4 h → +4.9 pts (~1.4 pts/h);
+next 1.5× ≈ 3 h → +2.9 (~1 pt/h); later 1.2× ≈ 3 h → +1.3 (~0.4 pts/h).
+Weight by 1/total; **stop a track below ~0.4 pts/h, within ~1.5× of its floor,
+or when a rung needs ≥ 10% more code for < 3% time** — move the hour to the
+next-best rung or the write-up. If the fourth track beats your third at any
+point, it takes its place.

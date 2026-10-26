@@ -194,6 +194,35 @@ def _parse_pairs(values: list) -> dict:
     return out
 
 
+def scoreboard(t_abs: dict, m_abs: dict, lines: dict, judge: float = 82.0) -> dict:
+    """P9 rung-to-rung scoreboard: measured absolutes -> per-track K/speed/
+    total + the best-3 geometric mean (the overall-title driver)."""
+    rows = {}
+    for t in TRACKS:
+        refs = REFS[t]
+        r = ratios_from_abs(t_abs[t], m_abs.get(t, 1.0), lines.get(t, 1.0), refs)
+        partial = False
+        if not refs.get("m_ref") or not refs.get("s_ref"):
+            partial = True
+            # M/S references are DEFERRED until Oct 28: hold those axes at 1.0
+            # so K is a T-x-D projection (optimistic) and gets real after the
+            # freeze pins the refs.
+            r.setdefault("m", 1.0)
+            r.setdefault("s", 1.0)
+        res = coefficient(r)
+        tot = track_total(res["K"], judge)
+        rows[t] = {
+            "t_abs": t_abs[t], "m_abs": m_abs.get(t), "lines": lines.get(t),
+            "ratios": r, "K": res["K"], "speed": tot["speed_score"],
+            "total": tot["total"], "partial": partial,
+        }
+    totals = [rows[t]["total"] for t in TRACKS]
+    best3 = sorted(totals, reverse=True)[:3]
+    rows["_best3_geomean"] = math.exp(sum(math.log(max(x, 1e-9)) for x in best3) / 3)
+    rows["_best3"] = best3
+    return rows
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Speed Demon what-if K explorer")
     p.add_argument("--track", choices=list(REFS), help="track preset (M/S_ref DEFERRED for B/C/D)")
@@ -203,6 +232,7 @@ def main() -> int:
     p.add_argument("--ratios", type=float, nargs=4, metavar=("T", "M", "S", "D"),
                    help="raw ratios, space separated (use 1.0 for unknown D)")
     p.add_argument("--pct", type=float, default=0.10, help="improvement to test per axis (default 0.10)")
+    p.add_argument("--judge", type=float, default=82.0, help="judge score 0-100 (default 82)")
     p.add_argument("--json", action="store_true", help="emit JSON")
     p.add_argument("--selfcheck", action="store_true", help="assert the Nightshade example still reproduces K=6.41, speed=40.4")
     p.add_argument("--dispatch", action="store_true", help="allocate H hours across the tracks (best-3 rule)")
@@ -213,6 +243,10 @@ def main() -> int:
     p.add_argument("--doubling", nargs="+", metavar="T=V", help="hours per T-doubling per track, e.g. A=6 B=5 C=9 D=8 (--waterfill)")
     p.add_argument("--floor", nargs="+", metavar="T=V", help="doublings left before the floor per track, e.g. A=4 B=4 C=6 D=6 (--waterfill; default 20)")
     p.add_argument("--diminish", type=float, default=0.97, help="returns decay per hour on the same track (default 0.97)")
+    p.add_argument("--scoreboard", action="store_true", help="measured absolutes -> per-track K/speed/total + best-3 geomean")
+    p.add_argument("--t", nargs="+", metavar="T=V", help="measured T seconds per track, e.g. A=1.07 B=1.88 (--scoreboard)")
+    p.add_argument("--m", nargs="+", metavar="T=V", help="measured M MB per track (--scoreboard)")
+    p.add_argument("--l", nargs="+", metavar="T=V", help="measured code lines per track (--scoreboard)")
     args = p.parse_args()
 
     if args.waterfill:
@@ -237,6 +271,40 @@ def main() -> int:
         print(f"  drop candidate: {', '.join(plan['drop'])}")
         print("  (= the corner lemma: exactly one track gets zero hours;")
         print("    re-solve every 8h from MEASURED doubling/floors.)")
+        print()
+        return 0
+
+    if args.scoreboard:
+        if not args.t:
+            p.error("--scoreboard needs --t 'T=seconds ...'")
+        t_abs = _parse_pairs(args.t)
+        m_abs = _parse_pairs(args.m) if args.m else {}
+        lines = _parse_pairs(args.l) if args.l else {}
+        sb = scoreboard(t_abs, m_abs, lines, args.judge)
+        if args.json:
+            out = {t: sb[t] for t in TRACKS}
+            out["best3_geomean"] = sb["_best3_geomean"]
+            print(json.dumps(out, indent=2))
+            return 0
+        print("\nRUNG-TO-RUNG SCOREBOARD (P9; judge score = "
+              f"{args.judge:.0f}, D = 1.00)")
+        print("=" * 78)
+        print(f"{'trk':<4}{'T s':>7}{'M MB':>7}{'lines':>7}{'T/M/S ratios':>22}"
+              f"{'K':>7}{'speed':>7}{'total':>7}")
+        for t in TRACKS:
+            r = sb[t]
+            rt = r["ratios"]
+            ratio_txt = (f"{rt.get('t', 0):.1f}/{rt.get('m', 0):.1f}/"
+                         f"{rt.get('s', 0):.2f}")
+            m_txt = "-" if r["m_abs"] is None else f"{r['m_abs']:.0f}"
+            l_txt = "-" if r["lines"] is None else f"{r['lines']:.0f}"
+            print(f"{t:<4}{r['t_abs']:>7.3f}{m_txt:>7}{l_txt:>7}"
+                  f"{ratio_txt:>22}{r['K']:>7.2f}{r['speed']:>7.1f}"
+                  f"{r['total']:>7.2f}")
+        print("-" * 78)
+        print(f"  best-3 geometric mean of totals: {sb['_best3_geomean']:.2f}")
+        print("  elasticity reminders: 1% less T ≈ +0.11 speed pts; halving M "
+              "≈ +3.0; 10% more lines must save ≥ 3% time.")
         print()
         return 0
 
