@@ -104,6 +104,10 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **`95-GROUND-BLUEPRINTS.md`** — the GROUND level: every feature of every
+  track taken to the byte (layouts, offsets, rank formulas, state machines,
+  field formats, per-feature validation map, trap lists), plus the target-T
+  table and the 20-row zero-score risk register. **Start here at H0.**
 - `track-a-INGEST-DEEP.md` — the latency/percentile engine, every feature.
 - `track-b-INDEX-DEEP.md` — the inverted-index search engine, every feature.
 - `track-c-JOIN-DEEP.md` — the hostile-CSV join, the quoting oracle, every parse detail.
