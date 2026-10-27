@@ -49,6 +49,15 @@
    `track-*/src` (copied by h0-launch).
 2. Gate each: `bench-rung.sh` → **SHA-green** → re-pin deliberately
    (`pin-hash.sh`) → commit, tag `baseline-green`.
+   **Pin reproducibility rule:** a pin is only meaningful for a known data
+   set. The canonical set is `python tooling/gen-fixtures.py --all` (writes
+   `verification/data/`); the hostile corpora go to
+   `verification/data-adversarial/` and never touch the pins. A fresh clone
+   reproduces every committed pin with exactly:
+   `gen-fixtures --all` → `sh track-<t>/build.sh` → run → hash. Never pin
+   while an `--adversarial` corpus is in `verification/data/`. When the
+   official sample ships (Oct 30), re-generate with
+   `tooling/gen-official-data.sh` and re-pin against **that**.
 3. `difftest.py` against the official reference on the sample + adversarial
    fixtures. If Track C is not oracle-clean by ~H8, decide early whether to
    drop it — a hash-gate zero at H68 is the worst failure mode.
