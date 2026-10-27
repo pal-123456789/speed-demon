@@ -387,15 +387,22 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Speed Demon fixture generator")
     p.add_argument("--track", choices=["A", "B", "C", "D", "all"])
     p.add_argument("--all", action="store_true")
-    p.add_argument("--out", default="verification/data")
+    p.add_argument("--out", default=None,
+                   help="output root; defaults to verification/data for the "
+                        "standard corpora and verification/data-adversarial for "
+                        "--adversarial (so hostile runs never clobber the data "
+                        "the expected-hash pins were made from)")
     p.add_argument("--rows", type=int, default=20000)
     p.add_argument("--docs", type=int, default=3000)
     p.add_argument("--nodes", type=int, default=5000)
     p.add_argument("--edges", type=int, default=20000)
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--adversarial", action="store_true",
-                   help="Track C: emit the tiny hand-crafted edge-case corpus")
+                   help="emit the tiny hand-crafted edge-case corpora")
     args = p.parse_args()
+
+    if args.out is None:
+        args.out = "verification/data-adversarial" if args.adversarial else "verification/data"
 
     targets = ["A", "B", "C", "D"] if (args.all or args.track in (None, "all")) else [args.track]
 
