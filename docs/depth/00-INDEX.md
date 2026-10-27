@@ -106,8 +106,15 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 - **`95-GROUND-BLUEPRINTS.md`** — the GROUND level: every feature of every
   track taken to the byte (layouts, offsets, rank formulas, state machines,
-  field formats, per-feature validation map, trap lists), plus the target-T
-  table and the 20-row zero-score risk register. **Start here at H0.**
+  field formats, per-feature validation map, trap lists), the deeper optional
+  sub-systems (radix-histogram exact percentiles, bitmap BOOL, clmul quote
+  parity, radix-heap bucket layout), the target-T table and the 20-row
+  zero-score risk register. **Start here at H0.**
+- **`94-VISUALS.md`** — the picture pack (ASCII, renders in PERF.md, a
+  terminal and a diff): four pipeline diagrams, the Track C state machine, the
+  A output anatomy, percentile-rank intuition, memory budget bars, the K
+  ladder chart, the 65/35 split, the 72-hour Gantt, the gate wall and the risk
+  heat map.
 - `track-a-INGEST-DEEP.md` — the latency/percentile engine, every feature.
 - `track-b-INDEX-DEEP.md` — the inverted-index search engine, every feature.
 - `track-c-JOIN-DEEP.md` — the hostile-CSV join, the quoting oracle, every parse detail.

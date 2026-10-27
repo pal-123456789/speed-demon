@@ -228,3 +228,77 @@ row above is far inside that.
 passes the board's pre-build checks (#5–#8), with the official filenames and
 manifest (#9–#12) — and the submission actually registered and public on time
 (#16, #17). Everything on that list is already built, tested, and gated.
+---
+
+## 7. DEEPER SUB-SYSTEMS — the optional accelerators, to the ground
+
+These are the P2 "insane" rungs, specified so they can be implemented without
+further design. Each states its precondition, its exact procedure, its cost,
+and how to prove it is correct before adopting it.
+
+### A13 · Two-level radix histogram for EXACT percentiles (alternative to selection)
+
+- **Precondition:** a group is large enough that three selections cost more
+  than two counting passes. Crossover from the deep dive: selection wins below
+  ~n = 200; the histogram wins on the Zipf head groups (10^5–10^6 values).
+- **Procedure (exact, no approximation):** (1) pass 1 buckets the u32 latency
+  values by their top 16 bits into a 2^16 `u32`-count array; (2) prefix-sum that
+  array to find which bucket holds rank `r` for each of p50/p95/p99; (3) pass 2
+  scans only the values whose top 16 bits match that bucket and counts their
+  low 16 bits into a second 2^16 array; (4) prefix-sum again and read the exact
+  value at the residual rank. Ties are exact because it is a counting sort.
+- **Cost:** 2 passes over the group + 2 × 256 KiB of counters per worker
+  (reused, zeroed only on the touched buckets). Memory is O(1) in n.
+- **Proof:** run both the histogram and `select_nth_unstable` on every fixture
+  group and assert equality — the histogram is only adopted if it matches on
+  all of them (the SHA gate would catch a mismatch, but a cheap unit check
+  finds it in seconds instead of a board run).
+
+### B12 · Bitmap BOOL evaluation for dense terms
+
+- **Precondition:** a term whose df ≥ D/16 (a stopword-like term). Its posting
+  list is larger than D/8 bytes, so a D-bit bitmap is smaller AND faster.
+- **Procedure:** represent dense postings as `[u64; ceil(D/64)]`. AND = `&`,
+  OR = `|`, NOT = `& !` — D/64 word ops, ~8× fewer than a merge walk. Sparse
+  terms stay sorted-`u32` and are merged into the bitmap by setting bits (or
+  the whole query is evaluated as bitmaps when ≥ 2 dense terms are involved).
+- **Mixed case:** drive from the sparse list (iterate its doc ids and test the
+  bitmap bit) when one side is sparse — that is O(|sparse|) probes, never a
+  materialized union.
+- **Cost:** D/8 bytes per dense term per direction; build once at index time.
+- **Proof:** evaluate every BOOL fixture query with both paths (bitmap and
+  merge) and diff the result sets.
+
+### C12 · Prefix-XOR quote parity via carry-less multiply (SIMD split)
+
+- **Precondition:** the scalar parity prepass shows up in a profile (with 12
+  threads it usually does not; this is a late rung).
+- **Procedure:** build a 64-bit mask per 64-byte block with a bit set at each
+  `"` position (compare + movemask). The running parity at any block boundary
+  is the XOR of all previous masks' **popcounts**; the prefix-XOR *mask* is a
+  carry-less prefix product, computed with `_mm_clmulepi64_si128` over a
+  logarithmic shift chain — 64 blocks (4 KiB) per vector op chain. Then the
+  first terminator with even parity inside a block is `tzcnt(mask_of_newlines &
+  ~prefix_xor)` and similarly for odd.
+- **Requires:** `pclmulqdq` (SSE4.2-era; present on the i5-13500) behind
+  `is_x86_feature_detected!`, std `core::arch` only.
+- **Proof:** the scalar `tooling/csv-boundary-check.py` already enumerates the
+  authoritative cuts for every fixture and chunk size; the SIMD path must
+  produce the identical cut set, or it is not adopted.
+
+### D10 · Radix heap — the exact bucket layout
+
+- **Precondition:** the query phase is > ~20% of T (measure with `bench-rung`).
+- **Procedure:** keys are u64 distances but the *difference* from `last` fits
+  u32 once the frontier is bounded; 33 buckets `[Vec<(u32,u32)>; 33]` where
+  item = `(key_delta, node)`. Bucket index = 0 if `delta == 0`, else
+  `32 - leading_zeros(delta)` (i.e. `floor(log2(delta)) + 1`). `pop`: if bucket
+  0 is non-empty, take its minimum (monotone order); otherwise scan for the
+  first non-empty bucket, set `last += min_delta_of_that_bucket`, then
+  redistribute its items downward by recomputing deltas. `top` is O(1) via
+  `last + bucket0_min`.
+- **Cost:** O(1) amortized per push/pop vs O(log n) for the binary heap; 33
+  vectors reused across queries (keep capacity, clear length).
+- **Trap:** redistribution must preserve the invariant `last <= every key`;
+  an off-by-one there silently breaks Dijkstra. Prove it with the fixture
+  graph plus a random-graph differential against the plain binary heap.

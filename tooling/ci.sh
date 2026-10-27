@@ -18,11 +18,13 @@
 #   7  image contract         (digest-pinned allowlisted stages, no cached outputs)
 #   8  K what-if self-check   (scoring math pinned to the published example)
 #   9  CSV boundary check     (Track C oracle vs quote-parity split, hostile fixtures)
-#  10  determinism matrix     (P6: threads x chunk x chaos, byte-identical output)
-#  11  S and D axes           (code lines per track folder; dependency honesty)
-#  12  per-track gates        (verify: determinism, sandbox, timeout)
-#  13  scaffold sentinels     (a stub must never reach the freeze)
-#  14  the pre-freeze lockdown
+#  10  name parity            (check.py vs scaffold vs harness vs pins)
+#  11  track folder audit     (required files present; no stray/forbidden files)
+#  12  determinism matrix     (P6: threads x chunk x chaos, byte-identical output)
+#  13  S and D axes           (code lines per track folder; dependency honesty)
+#  14  per-track gates        (verify: determinism, sandbox, timeout)
+#  15  scaffold sentinels     (a stub must never reach the freeze)
+#  16  the pre-freeze lockdown
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -204,6 +206,29 @@ if "$PY" tooling/csv-boundary-check.py --all >/tmp/sd-csvbound.txt 2>&1; then
 else
   grep 'FAIL' /tmp/sd-csvbound.txt | head -20 | sed 's/^/  /'
   fail "a hostile-CSV boundary is wrong — the Track C split is not trustworthy"
+fi
+
+# The correctness gate is a SHA-256 of ONE file with an exact name. A rename
+# that lands in one source of truth but not another is a silent zero, and no
+# other gate notices. This cross-checks the official check.py against the
+# scaffold constants, the harness table and the pin filenames.
+step "OUTPUT/INPUT NAME PARITY (check.py vs scaffold vs harness vs pins)"
+if "$PY" tooling/check-output-names.py >/tmp/sd-names.txt 2>&1; then
+  ok "every source agrees on the output/input contract"
+else
+  grep 'FAIL' /tmp/sd-names.txt | head -20 | sed 's/^/  /'
+  fail "the scored filenames disagree between sources — a guaranteed zero"
+fi
+
+# The track folder IS the build context and the S axis. Missing required
+# files break the build; stray tracked files enter the image and inflate S
+# (a data or output file could even look like a shipped cached answer).
+step "TRACK FOLDER AUDIT (required files present, no stray/forbidden files)"
+if sh tooling/check-track-folders.sh >/tmp/sd-folders.txt 2>&1; then
+  ok "required files present, no stray or forbidden files in any track folder"
+else
+  grep -E 'FAIL' /tmp/sd-folders.txt | head -20 | sed 's/^/  /'
+  fail "a track folder has a missing or forbidden file — fix before pushing"
 fi
 
 # The SHA gate is binary: ANY nondeterminism is a zero. The P6 matrix runs
