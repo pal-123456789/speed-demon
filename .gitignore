@@ -65,3 +65,5 @@ track-*/run.pdb
 # transient commit-message files
 .commitmsg.txt
 
+.cm.txt
+
