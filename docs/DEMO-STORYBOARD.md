@@ -24,7 +24,7 @@
 | 2 | 0:15–0:35 | **The board** | speeddemon.dev board with our run IDs; name the K and the speed points. |
 | 3 | 0:35–1:00 | **The pipeline (Track A)** | `docs/depth/94-VISUALS.md` §1 diagram while the built binary runs on the sample: `/usr/bin/time` line, output file appearing. |
 | 4 | 1:00–1:20 | **The profiler** | `perf stat` (or `perf top`) on the hot loop; point at the one line that moved the number. |
-| 5 | 1:20–1:40 | **The correctness spine** | `python check.py a --data <dir> --expected <sha>` printing the match; then the Track C quoting fixture (`"said ""no"" twice"`) to show the hostile case is handled. |
+| 5 | 1:20–1:40 | **The correctness spine** | `python check.py a --data verification/data/track-a --expected ca6311bbeb53...` printing the match; then the Track C quoting fixture (`"said ""no"" twice"`) to show the hostile case is handled. |
 | 6 | 1:40–2:00 | **The trade we made** | PERF.md open at the board-run table: "step 4 cost 60 lines and bought 1%, so we reverted it" — the failed experiment is the interesting part. |
 | 7 | 2:00–2:10 | **Determinism** | `sh tooling/determinism-check.sh all` finishing with "ALL RUNS BYTE-IDENTICAL". |
 | 8 | 2:10–2:15 | **Close** | Repo URL, licence, "three tracks entered, best-three geomean" number. |

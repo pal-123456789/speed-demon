@@ -17,7 +17,7 @@
 | H0–H2 | `python tooling/spec_intake.py --check` | the Oct-28 pins applied; **0 blocking** = intake done |
 | Any time | `python check.py a --data verification/data/track-a --expected ca6311bb...` | the OFFICIAL board checker (from the starter): builds with `--network=none`, runs under the board's sandbox, prints the output hash — the closest local proxy for a board run |
 | Every rung | `sh tooling/bench-rung.sh a --label rung-07` | build → mini determinism → SHA-check → 5-run bench → ledger |
-| Every rung | `python tooling/k_whatif.py --scoreboard --t A=<s> --m A=<MB> --l A=<lines>` | K / speed / track total / best-3 geomean |
+| Every rung | `python tooling/k_whatif.py --scoreboard --t a=1.07 b=1.88 c=0.48 d=2.42 --m a=15 b=120 c=80 d=70 --l a=150 b=260 c=180 d=220` | K / speed / track total / best-3 geomean |
 | Every ~8 h | `python tooling/k_whatif.py --waterfill --hours 60 --base A=47 B=43 C=39 D=35 --doubling A=6 B=5 C=9 D=8` | re-solve the hour budget from measured rates |
 | H50+ | `sh tooling/determinism-check.sh all` | the full P6 matrix before every green commit |
 | Before freeze | `sh tooling/ci.sh` | all 15 gates, then `verification/pre-freeze.ps1 -All` / `lockdown` |

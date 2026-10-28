@@ -118,7 +118,7 @@ more lines for <3% time.
 |---|---|---|
 | 1 | Real team name (currently `solo`) | the four `track-*/.speed-demon.toml` |
 | 2 | GitHub repo from the starter template + push to the `speed-demon` branch | external (0 remotes configured) |
-| 3 | One Docker smoke build: `python check.py a --data <dir> --expected <sha>` | a Docker-capable machine (this host has none) |
+| 3 | One Docker smoke build: `python check.py a --data verification/data/track-a --expected ca6311bbeb53...` | a Docker-capable machine (this host has none) |
 | 4 | Submission form (repo URL, tracks, the three confirmations) | speeddemon.dev |
 
 ## 7. Where everything lives

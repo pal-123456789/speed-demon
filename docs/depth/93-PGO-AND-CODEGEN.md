@@ -83,7 +83,7 @@ rustc --edition 2021 -C opt-level=3 -C codegen-units=1 -C panic=abort \
   silent no-op into a visible warning. Do not omit it.
 - **Cost:** the generator copy is free in S (change #16); the `build-pgo.sh`
   script itself is ~15–25 lines and **does** count in S. Price it:
-  `python tooling/k_whatif.py --tradeoff --t-abs <T> --m-abs <M> --lines <L> --add-lines 20 --t-gain 8`.
+  `python tooling/k_whatif.py --tradeoff --t-abs 1.07 --m-abs 15 --lines 150 --add-lines 20 --t-gain 8`.
 
 ## 4. The decision rule (do not guess)
 
