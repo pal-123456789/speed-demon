@@ -247,7 +247,50 @@ def main() -> int:
     p.add_argument("--t", nargs="+", metavar="T=V", help="measured T seconds per track, e.g. A=1.07 B=1.88 (--scoreboard)")
     p.add_argument("--m", nargs="+", metavar="T=V", help="measured M MB per track (--scoreboard)")
     p.add_argument("--l", nargs="+", metavar="T=V", help="measured code lines per track (--scoreboard)")
+    p.add_argument("--tradeoff", action="store_true",
+                   help="price a change: +N lines for -X%% T (PGO, radix select, any rung)")
+    p.add_argument("--add-lines", type=float, default=0.0, help="lines the change adds (--tradeoff)")
+    p.add_argument("--t-gain", type=float, default=0.0, help="%% wall-time the change saves (--tradeoff)")
+    p.add_argument("--m-gain", type=float, default=0.0, help="%% peak-memory the change saves (--tradeoff)")
     args = p.parse_args()
+
+    if args.tradeoff:
+        tr = args.track or "A"
+        if not args.t_abs or not args.lines:
+            p.error("--tradeoff needs --t-abs, --lines (and optionally --m-abs, --track)")
+        refs = REFS[tr]
+        before = ratios_from_abs(args.t_abs, args.m_abs or 1.0, args.lines, refs)
+        t_after = args.t_abs * (1.0 - args.t_gain / 100.0)
+        m_after = (args.m_abs or 1.0) * (1.0 - args.m_gain / 100.0)
+        after = ratios_from_abs(t_after, m_after, args.lines + args.add_lines, refs)
+        for r in (before, after):
+            r.setdefault("m", 1.0)
+            r.setdefault("s", 1.0)
+        b, a = coefficient(before), coefficient(after)
+        bt, at = track_total(b["K"], args.judge), track_total(a["K"], args.judge)
+        if args.json:
+            print(json.dumps({
+                "before": {"K": b["K"], "speed": bt["speed_score"], "total": bt["total"]},
+                "after": {"K": a["K"], "speed": at["speed_score"], "total": at["total"]},
+                "d_speed": at["speed_score"] - bt["speed_score"],
+                "d_total": at["total"] - bt["total"],
+            }, indent=2))
+            return 0
+        print(f"\nTRADE-OFF PRICE — track {tr}: +{args.add_lines:.0f} lines, "
+              f"-{args.t_gain:.1f}% T, -{args.m_gain:.1f}% M")
+        print("=" * 66)
+        print(f"  {'':<10}{'K':>9}{'speed':>9}{'total':>9}")
+        print(f"  {'before':<10}{b['K']:>9.3f}{bt['speed_score']:>9.2f}{bt['total']:>9.2f}")
+        print(f"  {'after':<10}{a['K']:>9.3f}{at['speed_score']:>9.2f}{at['total']:>9.2f}")
+        print(f"  {'delta':<10}{'':>9}{(at['speed_score'] - bt['speed_score']):>+9.2f}"
+              f"{(at['total'] - bt['total']):>+9.2f}")
+        verdict = "ADOPT" if (at["total"] - bt["total"]) > 0 else "REJECT"
+        print(f"\n  verdict: {verdict}  (T carries 0.50, S only 0.15 and capped)")
+        print("  Note: S is capped at 1.0 — once you are above the reference line")
+        print("  count, extra lines always cost; the question is only whether the")
+        print("  measured T gain outruns them.")
+        print()
+        return 0
 
     if args.waterfill:
         if not args.base or not args.doubling:

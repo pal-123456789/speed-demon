@@ -1,5 +1,12 @@
 # The allowlisted base images this submission builds from, pinned by digest
 # (one per line). Every FROM in every track Dockerfile must name one of these.
 # Digests are exactly the ones published on speeddemon.dev/allowlist.json.
+#
+# Runtime + standard build stage:
 debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb
+# rust:1-trixie with the llvm-tools component, so llvm-profdata matches rustc
+# (change #23): makes Rust PGO possible inside an offline build. Same compiler
+# 1.99.1. Use it as the BUILD stage when doing PGO; the runtime stage stays
+# debian:13-slim.
+halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools@sha256:13e4ee7135d8eac6c56476c7d1aee201f36479f4745fd5d0e6b4529f4e13251a

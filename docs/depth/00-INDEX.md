@@ -110,6 +110,12 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
   sub-systems (radix-histogram exact percentiles, bitmap BOOL, clmul quote
   parity, radix-heap bucket layout), the target-T table and the 20-row
   zero-score risk register. **Start here at H0.**
+- **`93-PGO-AND-CODEGEN.md`** — the free build-time wins: the `x86-64-v3`
+  codegen baseline already in every `build.sh`, the full offline **PGO**
+  recipe on the newly allowlisted llvm-tools image (change #23), the
+  `native` option the organizers build on the scoring box (change #24), the
+  exact cost model, and the risk controls. Price any change with
+  `k_whatif.py --tradeoff`.
 - **`94-VISUALS.md`** — the picture pack (ASCII, renders in PERF.md, a
   terminal and a diff): four pipeline diagrams, the Track C state machine, the
   A output anatomy, percentile-rank intuition, memory budget bars, the K

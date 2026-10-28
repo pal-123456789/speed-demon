@@ -100,14 +100,17 @@ def check_base_pinned(res: Result) -> None:
         res.bad("tooling/base-image.txt is empty — no allowlisted base images recorded")
 
     # The runtime base: the final image must be the clean runtime stage (the
-    # last FROM in each Dockerfile), not the toolchain build stage. The runtime
-    # image is the non-toolchain entry in the allowlist.
+    # last FROM in each Dockerfile), not a toolchain build stage. Identify it
+    # explicitly as the allowlisted `debian:` image — the allowlist can hold
+    # several toolchain builds (rust, rust+llvm-tools, golang, ...), so
+    # "anything not starting with rust:" is not a safe heuristic.
     runtime_ref = ""
     for ref in sorted(allow):
-        if not ref.startswith("rust:"):
+        if ref.startswith("debian:"):
             runtime_ref = ref
+            break
     if not runtime_ref:
-        res.bad("tooling/base-image.txt does not pin a non-toolchain runtime base")
+        res.bad("tooling/base-image.txt pins no debian: runtime base")
 
     for path in files:
         rel = path.relative_to(ROOT)

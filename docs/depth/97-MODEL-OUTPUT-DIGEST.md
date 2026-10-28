@@ -662,3 +662,41 @@ are already charged outside your cgroup."
   OUTPUT FILE's first-touched pages. Keep the output write minimal and
   single-shot (it is — one file, hand-formatted, one write_all). Never spill
   intermediates to /tmp (counts AND defeats the point of scratchless).
+
+---
+
+## 14. OFFICIAL PAGE — FULL DUMP (Oct 27/28) — the last new facts
+
+Fetched/confirmed from the event page and Discord. All are now encoded:
+
+**Change #23 — Rust PGO is possible offline.** The allowlist gained
+`halloumee/speed-demon-rust:1.99.1-trixie-llvm-tools@sha256:13e4ee7135d8eac6c56476c7d1aee201f36479f4745fd5d0e6b4529f4e13251a`
+= `rust:1-trixie` (same compiler, 1.99.1) **with the llvm-tools component**, so
+`llvm-profdata` matches `rustc`. Build time is NOT scored ("spend six of your
+ten minutes on PGO, that is free"). Recipe + cost model + risk controls:
+`93-PGO-AND-CODEGEN.md`. Decision tool: `k_whatif.py --tradeoff`.
+
+**Change #24 — native CPU builds are supported.** "A track that compiles for
+the native CPU is built on the scoring box itself, so native means the scoring
+CPU, a Core i5-13500 with AVX2 and no AVX-512." Our `build.sh` now carries
+`-C target-cpu=x86-64-v3` (AVX2/BMI2/FMA — exactly the scoring CPU's level,
+risk-free on any modern host); `native` is a supported H24+ option.
+
+**Judge split (the 35%).** Code quality **15%**, technique **12%**, PERF.md
+**8%** — "would you merge this", "is the approach considered", "measurements
+not adjectives, each step citing the live-board run ID". Judges see code +
+write-up + **live-board run history**, and they never see final scores before
+submitting forms.
+
+**Deliverables per track.** Dockerfile · PERF.md · README.md ·
+.speed-demon.toml · src/ · plus **demo.mp4 (optional, < 3 min, unscored)**; the
+repo carries the OSI licence and goes public at freeze. Storyboard:
+`../DEMO-STORYBOARD.md`.
+
+**Other confirmations that matched what we had:** 5 runs middle-3, >5% spread
+re-runs, >2% reference drift voids a batch, serialized runs, `--memory=8g
+--memory-swap=8g` disables swap, container fs diff after every run, one output
+file named by the spec, `io_uring` blocked but `mmap` works, ties broken by
+raw K then wall time then earliest commit, overall = geometric mean of best
+three, `$50` highest-K per track (specialist-friendly), write-up side quest
+`$100 x2`.
