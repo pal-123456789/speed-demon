@@ -1,6 +1,8 @@
 # HANDOVER — what was done on Oct 28, and what to do at kickoff
 
-> **Read this first when we resume (kickoff Oct 30 15:00 UTC).**
+> **Read this first when we resume (kickoff Oct 30 15:00 UTC).** The 72-hour
+> operating plan, the module loop and the video plan are in
+> [`docs/KICKOFF-PLAN-pal.md`](KICKOFF-PLAN-pal.md).
 > Written Oct 28 19:10 UTC. HEAD at the time: `d4790a9`, working tree clean,
 > 256 tracked files, 22 CI gates all green.
 >
@@ -116,7 +118,7 @@ more lines for <3% time.
 
 | # | Item | Where |
 |---|---|---|
-| 1 | Real team name (currently `solo`) | the four `track-*/.speed-demon.toml` |
+| 1 | ~~Real team name~~ **DONE**: `Pal Ghevariya` (solo) | the four `track-*/.speed-demon.toml` |
 | 2 | GitHub repo from the starter template + push to the `speed-demon` branch | external (0 remotes configured) |
 | 3 | One Docker smoke build: `python check.py a --data verification/data/track-a --expected ca6311bbeb53...` | a Docker-capable machine (this host has none) |
 | 4 | Submission form (repo URL, tracks, the three confirmations) | speeddemon.dev |
