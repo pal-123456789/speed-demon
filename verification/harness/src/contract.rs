@@ -47,11 +47,11 @@ pub fn tracks() -> BTreeMap<char, Track> {
             // "Reference numbers are now measured on the scoring machine, five
             // runs each: Track A 32.05 s, B 56.35 s, C 14.44 s, D 72.69 s.
             // Timeouts are 10 times those."
-            ref_time_s: 32.05,
-            ref_mem_mb: Some(228.0),
+            ref_time_s: 32.047276,
+            ref_mem_mb: Some(227.98336),
             // The reference's source size is published: 56 lines.
             ref_src_lines: Some(56.0),
-            timeout_s: 321.0,
+            timeout_s: 320.5,
         },
     );
     m.insert(
@@ -61,10 +61,10 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "track-b",
             input: "docs.txt",
             output: "results.txt",
-            ref_time_s: 56.35,
-            ref_mem_mb: None,
+            ref_time_s: 56.352376,
+            ref_mem_mb: Some(2199.9616),
             ref_src_lines: None,
-            timeout_s: 564.0,
+            timeout_s: 563.5,
         },
     );
     m.insert(
@@ -74,10 +74,10 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "track-c",
             input: "records.csv",
             output: "aggregates.txt",
-            ref_time_s: 14.44,
-            ref_mem_mb: None,
+            ref_time_s: 14.444059,
+            ref_mem_mb: Some(367.435776),
             ref_src_lines: None,
-            timeout_s: 144.0,
+            timeout_s: 144.4,
         },
     );
     m.insert(
@@ -87,10 +87,10 @@ pub fn tracks() -> BTreeMap<char, Track> {
             dir: "track-d",
             input: "graph.txt",
             output: "distances.txt",
-            ref_time_s: 72.69,
-            ref_mem_mb: None,
+            ref_time_s: 72.692655,
+            ref_mem_mb: Some(892.915712),
             ref_src_lines: None,
-            timeout_s: 727.0,
+            timeout_s: 726.9,
         },
     );
     m

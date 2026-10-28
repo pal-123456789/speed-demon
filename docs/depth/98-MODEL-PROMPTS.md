@@ -6,7 +6,7 @@
 > at H0.
 >
 > **Rule 05 (critical):** answers are DESIGN KNOWLEDGE. If a model emits code,
-> it lives in `docs/` (or nowhere) — BEFORE Oct 30 18:00 UTC nothing goes into
+> it lives in `docs/` (or nowhere) — BEFORE Oct 30 15:00 UTC nothing goes into
 > `track-*/src/`. Paste code back marked `# DESIGN-ONLY`, never as solution code.
 >
 > Machine facts every model needs: single machine, Debian 13, Intel

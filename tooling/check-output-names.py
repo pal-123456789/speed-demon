@@ -78,7 +78,10 @@ def from_harness() -> dict[str, tuple[str, str]]:
 
 def from_pins(track: str) -> list[str]:
     d = ROOT / f"track-{track}" / "verification" / "expected"
-    return sorted(p.name for p in d.glob("*.sha256")) if d.is_dir() else []
+    # *.local.sha256 is a local self-consistency pin written by pin-hash.sh;
+    # the OFFICIAL pin (<output>.sha256) is the one that must exist, exactly once.
+    return sorted(p.name for p in d.glob("*.sha256")
+                  if not p.name.endswith(".local.sha256")) if d.is_dir() else []
 
 
 def main(argv: list[str] | None = None) -> int:

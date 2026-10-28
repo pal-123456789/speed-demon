@@ -389,7 +389,7 @@ done
 
 # ── 9. sentinels ──────────────────────────────────────────────────────────
 # The sentinel gate INVERTS at kickoff, so it must not be a bare grep:
-#   before Oct 30 18:00 UTC, rule 05 forbids solution code, so every track
+#   before Oct 30 15:00 UTC, rule 05 forbids solution code, so every track
 #   MUST still carry #SCAFFOLD_NOT_IMPLEMENTED — a missing sentinel means
 #   unauthorised solution code and the guard already failed in step 1.
 #   after kickoff, a sentinel means a stub could ship and score zero.
@@ -397,7 +397,7 @@ done
 # to ignore it, so the mode comes from the same clock the rule-05 guard uses.
 step "SCAFFOLD SENTINELS (mode-aware)"
 NOW_EPOCH="$(date -u +%s)"
-KICKOFF_EPOCH="$(date -u -d '2026-10-30T18:00:00Z' +%s 2>/dev/null || echo 0)"
+KICKOFF_EPOCH="$(date -u -d '2026-10-30T15:00:00Z' +%s 2>/dev/null || echo 0)"
 SENT_FILES="$(grep -rl 'SCAFFOLD_NOT_IMPLEMENTED' track-*/src 2>/dev/null | wc -l | tr -d ' ')"
 if [ "$KICKOFF_EPOCH" != "0" ] && [ "$NOW_EPOCH" -lt "$KICKOFF_EPOCH" ]; then
   if [ "$SENT_FILES" = "4" ]; then

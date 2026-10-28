@@ -29,7 +29,7 @@
 > stop rules, and the scoring math all stand.
 
 Event: **SpeedDemon** (Hackathon Raptors) — 72h machine-judged performance championship.
-Window: **Oct 30 18:00 UTC → Nov 2 18:00 UTC 2026** = **Oct 30 23:30 IST → Nov 2 23:30 IST**.
+Window: **Oct 30 15:00 UTC → Nov 2 15:00 UTC 2026** = **Oct 30 23:30 IST → Nov 2 23:30 IST**.
 Entry: **solo, all four tracks (A–D)**. Pool: $1,800. Language per track: **Rust, std-only, D=1**.
 
 ---
@@ -97,7 +97,7 @@ B is still submitted (completeness, highest-K-anywhere) but is not where the dee
 - **One reference language:** one naive Python reference per track, not Go, Python
   and Rust.
 - **Timeline:** Oct 28 18:00 UTC specs+refs+harness frozen · Oct 30 06:00 UTC sample
-  datasets + expected hashes · **Oct 30 18:00 UTC kickoff** · **Nov 2 18:00 UTC code
+  datasets + expected hashes · **Oct 30 15:00 UTC kickoff** · **Nov 2 15:00 UTC code
   freeze** · scoring Nov 2–4 (gate pass/fail published by Nov 4) · judging Nov 3–12 ·
   Nov 13 winners. Write-up deadline **Nov 10**. The **live board** closes at code
   freeze (one run per team per 15 minutes, via the Speed Demon Board GitHub App);
@@ -200,7 +200,7 @@ typing:
 
 ---
 
-## 5. The 72-hour schedule (fills the full duration; H0 = Oct 30 18:00 UTC = 23:30 IST)
+## 5. The 72-hour schedule (fills the full duration; H0 = Oct 30 15:00 UTC = 23:30 IST)
 
 Doctrine: **all four tracks correct + SHA-green + deterministic before any optimization.** Then deep
 ladders on A → D → C, solid B, then a 6-hour frozen lockdown. Three 5-hour sleep blocks
@@ -224,7 +224,7 @@ land in local early-morning. Total = 57 h hands-on + 15 h sleep = **72 h, no idl
 | **Solid B** | H56–H61 | 07:30–12:30 | B: StreamVByte/PForDelta postings, smallest-first AND, rarest-anchor phrase, **build-side speedups** — one total wall time, so a build win is worth as much as a query win. **Target K 8.** |
 | **Extra deep A** | H61–H64 | 12:30–15:30 | Second pass on A's two biggest cost centres (timestamp parse and the per-endpoint aggregation), plus a re-measure of the whole axis table. |
 | Buffer | H64–H66 | 15:30–17:30 | Catch up the furthest-behind track; finalize PERF.md, READMEs, dep-count honesty, S-axis source check (whole-repo line count). |
-| **LOCKDOWN** | H66–H72 | 17:30–23:30 | **No new experiments.** Pre-freeze checklist ×4 (§9), clean-checkout build+SHA+determinism, record final commit hashes into PERF.md, publish, final commit **before Nov 2 18:00 UTC.** |
+| **LOCKDOWN** | H66–H72 | 17:30–23:30 | **No new experiments.** Pre-freeze checklist ×4 (§9), clean-checkout build+SHA+determinism, record final commit hashes into PERF.md, publish, final commit **before Nov 2 15:00 UTC.** |
 
 **#1 schedule risk:** Track C's baseline is the hardest to get SHA-exact (hostile CSV). If H2–H6
 slips, the H17 all-green milestone slips — protect it by keeping C's baseline a *correct scalar*

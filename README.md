@@ -1,6 +1,6 @@
 # Speed Demon — Solo Campaign Monorepo (4 Tracks, Pre-Kickoff Build)
 
-> **Status: PRE-KICKOFF SCAFFOLD — no project code committed before Oct 30 18:00 UTC.**
+> **Status: PRE-KICKOFF SCAFFOLD — no project code committed before Oct 30 15:00 UTC.**
 > All source under `track-*/src/` is a **correctness-green stub** that compiles offline
 > via `rustc` (no cargo fetch). Real optimization replaces stubs at H0 inside the 72h window.
 > Rules 04/05 explicitly permit reading, designing, and preparing the environment beforehand.
@@ -154,9 +154,9 @@ holdout seed. PERF.md steps must cite live-board run IDs.
 |---|---|
 | Oct 28 18:00 | Specs + refs + harness frozen — pin all deferred values in `verification/contract.toml` |
 | Oct 30 06:00 | Sample datasets + expected hashes — load into `track-*/verification/expected/` |
-| Oct 30 18:00 | **KICKOFF — H0** — replace stubs with real baselines, first SHA-green |
+| Oct 30 15:00 | **KICKOFF — H0** — replace stubs with real baselines, first SHA-green |
 | ~H17 | **All 4 SHA-green + deterministic** — tag `baseline-green` |
-| Nov 02 18:00 | **CODE FREEZE** — public repo, OSI license, final commit; the live board closes |
+| Nov 02 15:00 | **CODE FREEZE** — public repo, OSI license, final commit; the live board closes |
 | Nov 02–04 | Scoring (holdout seed) — gate pass/fail published by Nov 04 |
 | Nov 03–12 | Judging; Nov 10 write-up deadline; Nov 13 winners announced |
 

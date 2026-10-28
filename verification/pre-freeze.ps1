@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    THE PRE-FREEZE LOCKDOWN. Run this in the last 6 hours before Nov 2 18:00 UTC.
+    THE PRE-FREEZE LOCKDOWN. Run this in the last 6 hours before Nov 2 15:00 UTC.
 
 .DESCRIPTION
     A literal, executable checklist of everything that must be true at the
@@ -105,7 +105,7 @@ function Check { param([string]$Name, [bool]$Ok, [string]$Detail = "", [switch]$
 
 Write-Host "`n################ PRE-FREEZE LOCKDOWN ################" -ForegroundColor Magenta
 Write-Host "Track selection: $Track" -ForegroundColor Magenta
-Write-Host "This is the last gate before Nov 2 18:00 UTC code freeze." -ForegroundColor Magenta
+Write-Host "This is the last gate before Nov 2 15:00 UTC code freeze." -ForegroundColor Magenta
 
 # ── 1. offline build from a clean checkout ────────────────────────────────
 if (-not $SkipCleanBuild) {

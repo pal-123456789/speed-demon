@@ -1,7 +1,7 @@
 # DEPTH DEPLOYMENT — The Power-House Blueprints (pre-kickoff design arsenal)
 
 > **Status: PRE-KICKOFF DESIGN. No solution code.** Rules 04/05 explicitly permit
-> reading, designing, and preparing the environment before Oct 30 18:00 UTC.
+> reading, designing, and preparing the environment before Oct 30 15:00 UTC.
 > Nothing in this directory is code; everything is decision — the exhaustive
 > feature inventory, the optimization ladder, the determinism traps, and the
 > hour-by-hour window runbook for each track.

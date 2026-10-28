@@ -724,12 +724,26 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
         );
         all_ok = false;
     }
+    // The post-loop verdict needs the scaffold flag too (it is computed per run
+    // inside the loop); out_dir still holds the last run's output.
+    let scaffold = output_is_scaffold(&out_dir);
     match &expected {
         Some(exp) => {
             let matched = recs_passed(&hashes, exp);
             if matched == hashes.len() {
                 println!(
                     "  SHA-256 gate     : PASS ({matched}/{} runs matched)",
+                    hashes.len()
+                );
+            } else if scaffold {
+                // The OFFICIAL expected hash is pinned (tooling/official-data.py),
+                // and the binary is still the pre-kickoff scaffold — it writes a
+                // sentinel, not the answer. Report that precisely: a scaffold
+                // mismatch is expected state, not a defect in the verifier.
+                println!(
+                    "  SHA-256 gate     : SCAFFOLD ({matched}/{} matched — the stub writes \
+                     a sentinel; the official hash is pinned and waiting for the real \
+                     implementation)",
                     hashes.len()
                 );
             } else {

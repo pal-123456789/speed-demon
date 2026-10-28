@@ -33,7 +33,7 @@ design are what the rules explicitly permit before kickoff.
 
 Usage:
     python tooling/rule05_guard.py            # check and report
-    python tooling/rule05_guard.py --h0 2026-10-30T18:00:00Z
+    python tooling/rule05_guard.py --h0 2026-10-30T15:00:00Z
     python tooling/rule05_guard.py --list     # show the pattern set
 """
 
@@ -59,10 +59,10 @@ if hasattr(sys.stdout, "reconfigure"):
 REPO = Path(__file__).resolve().parent.parent
 
 # The published kickoff. Overridable for rehearsals.
-DEFAULT_H0 = "2026-10-30T18:00:00Z"
+DEFAULT_H0 = "2026-10-30T15:00:00Z"
 
 # The published freeze.
-DEFAULT_FREEZE = "2026-11-02T18:00:00Z"
+DEFAULT_FREEZE = "2026-11-02T15:00:00Z"
 
 
 @dataclass

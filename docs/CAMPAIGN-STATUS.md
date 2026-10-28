@@ -6,7 +6,7 @@
 > **Status: PRE-KICKOFF SCAFFOLD — green infrastructure, stub implementations.**
 > The machine is ready. The *implementations* are not, by design: rules 04/05
 > require all project code to be written inside the 72-hour window
-> (Oct 30 18:00 UTC → Nov 2 18:00 UTC).
+> (Oct 30 15:00 UTC → Nov 2 15:00 UTC).
 >
 > Last updated: after the restructure to per-track images (Oct 27). See §1a.
 
@@ -82,7 +82,7 @@ changing a check.
 
 | FAIL | Why it is correct now | When it clears |
 |---|---|---|
-| 4× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 18:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
+| 4× "no scaffold sentinel in source" | The implementations do not exist yet, and rule 05 forbids writing them before Oct 30 15:00 UTC. The check is doing its job: **a stub can never reach the freeze.** | H0–H17, as each track's real implementation lands |
 | 4× "sample SHA-256 green" | The expected hashes are pinned from the Oct 30 06:00 UTC sample. This used to be reported as SKIP, which let the lockdown certify a correctness gate it had proved it could not check — a placeholder file containing `TODO-fill-this-in` counted as a pin. It is now a FAIL until a real 64-hex pin exists | Oct 30, when the sample ships and the hashes are pinned |
 | "public remote configured" | There is no public GitHub repo yet. This now requires an https/ssh URL — it previously accepted any two `git remote -v` lines, so a `file://` path passed | before the freeze — push to a public repo under an OSI licence |
 | "working tree clean" | The tree is mid-audit; this is the real state, not a measurement artefact. It previously **vanished entirely on a host without git**, which is how a dirty tree with no remote could print "ALL CHECKS PASSED — safe to freeze" | the final commit before the freeze |
@@ -210,7 +210,7 @@ echo "<sha256>" > track-a/verification/expected/summary.txt.sha256
 powershell -File verification/verify.ps1 -Track A
 ```
 
-### Oct 30 18:00 UTC — H0, the window opens
+### Oct 30 15:00 UTC — H0, the window opens
 
 Order of work (from `docs/MASTER-PLAN.md` §5):
 
@@ -244,7 +244,7 @@ Order of work (from `docs/MASTER-PLAN.md` §5):
 5. A track is "done" when it reaches its target K band — bank it and move on
    rather than chase a brittle +0.3.
 
-### Nov 2 18:00 UTC — the freeze
+### Nov 2 15:00 UTC — the freeze
 
 ```bash
 powershell -File verification/pre-freeze.ps1 -All     # must be 0 failures
@@ -258,7 +258,7 @@ Then record the final commit hash in every `PERF.md`.
 
 ## 3a. Oct 28 18:00 UTC — SPEC.md intake
 
-The organizers freeze the specs on Oct 28; the window opens Oct 30 18:00 UTC.
+The organizers freeze the specs on Oct 28; the window opens Oct 30 15:00 UTC.
 36 values in `verification/contract.toml` are marked `DEFERRED` until then;
 24 of them block a track outright (get one wrong and the submission writes a
 file nobody asked for). `tooling/spec_intake.py` is the checklist for that

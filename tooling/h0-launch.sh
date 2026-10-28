@@ -1,5 +1,5 @@
 #!/bin/sh
-# h0-launch.sh — the kickoff GO sequence. Run at Oct 30 18:00 UTC.
+# h0-launch.sh — the kickoff GO sequence. Run at Oct 30 15:00 UTC.
 #
 # Verifies the machine state, builds everything, runs the gates, regenerates
 # fixtures, re-pins the expected hashes (the first real implementation CHANGES

@@ -1,4 +1,4 @@
-# WINDOW RUNBOOK — Oct 30 18:00 → Nov 2 18:00 UTC (72 hours)
+# WINDOW RUNBOOK — Oct 30 15:00 → Nov 2 15:00 UTC (72 hours)
 
 > The single document for the window. Every tool below is committed and
 > gate-verified. The goal of H0–H12 is **a SHA-green single-thread baseline on
@@ -115,7 +115,7 @@ means no score.**
    board builds and runs within minutes; one run per team per 15 minutes;
    the board caps a run at 3× the reference.
 5. **Make the repo public under an OSI licence at code freeze**
-   (Nov 2, 18:00 UTC). This repo's LICENSE is MIT and already in place.
+   (Nov 2, 15:00 UTC). This repo's LICENSE is MIT and already in place.
 
 **Pre-flight checklist before the first push**
 

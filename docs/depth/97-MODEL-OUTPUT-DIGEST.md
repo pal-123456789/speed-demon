@@ -3,7 +3,7 @@
 > **Status:** PRE-KICKOFF DESIGN (rule 04/05). Answers to prompts P8, P3, P1 from
 > `docs/depth/98-MODEL-PROMPTS.md`, pasted back by the team, distilled here.
 > **DESIGN-ONLY:** any code fragments below are design sketches — they live in
-> this doc, never in `track-*/src/` before Oct 30 18:00 UTC. Every estimate is
+> this doc, never in `track-*/src/` before Oct 30 15:00 UTC. Every estimate is
 > the model's; the harness/bench are the authority at H0.
 
 ---

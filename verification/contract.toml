@@ -129,6 +129,24 @@ m_is_kernel_peak = true
 overall_aggregate = "geometric_mean_of_best_three"
 overall_min_tracks = 3
 
+# ── Published dataset + expected-output hashes (seed 1, from specs/*.md) ────
+# The specs publish these; tooling/official-data.py regenerates the data with
+# the vendored generators and verifies every one of them. sample scale is what
+# the live board runs; full is the size of the final holdout.
+dataset_sample_requests_log = "7b22c678acceba2b82120394afe27e827ca4083a677a8e51147defa854c86847"
+dataset_sample_summary_txt  = "ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3"
+dataset_full_requests_log   = "7ec80ba45bceef51ac7f79d3a14521fc6187b2dcb87b5e5542d08063fe5d962a"
+dataset_full_summary_txt    = "495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3"
+dataset_sample_docs_txt     = "e157fabb5874c6058a3f6c7726f51df08b2369664cc76c52dde62335ef57eaa4"
+dataset_sample_results_txt  = "eeeec1e9319da98a6f3c664c78f93e7078fd603c25c2bb3027174e81e3638a8f"
+dataset_sample_records_csv  = "07bc636857b70556921be08d406f887eb07dbdacb8384587ed7fd3b52addfd86"
+dataset_sample_aggregates   = "9035fed36823232dd41ae2d1b9d6d21aa7c73f49d8e95647e953a89d5ebe9a66"
+dataset_sample_graph_txt    = "16351d408f1f94a6bcf66de5c5762abede111c07a4a38306253504a6c9c9b7cd"
+dataset_sample_distances    = "a4c76ed030bc7e365db33191f6cf74708fba7f25eb48d64c8c4279f2e57046a0"
+# The live board caps a run at 3x the reference; final scoring at 10x.
+board_time_cap_multiplier = 3
+final_time_cap_multiplier = 10
+
 # ── Owner clarifications (official Discord answers, Oct 27) ─────────────────
 # M counter: cgroup v2 memory.peak, read on the HOST after the container
 # exits — NOT ru_maxrss. M is the peak of everything charged to the run's own
@@ -149,15 +167,17 @@ d_one_dep_factor = 0.90
 
 # ── Track A — Ingest ───────────────────────────────────────────────────────
 [A]
+board_cap_s = 96.1
+
 status = "DEFERRED"
 # "Reference numbers are now measured on the scoring machine, five runs each:
 #  Track A 32.05 s, B 56.35 s, C 14.44 s, D 72.69 s. Timeouts are 10 times
 #  those." The old estimates (41.20 / 58.70 / 36.90 / 72.40) are dead.
-ref_time_s = 32.05
-ref_peak_mem_mb = 228
+ref_time_s = 32.047276  # official calibration seed 1 (harness/calibration-seed1.json)
+ref_peak_mem_mb = 227.98336  # official cgroup memory.peak
 # S is CODE LINES now, and the reference's is published: 56 lines.
 ref_source_lines = 56
-timeout_s = 321
+timeout_s = 320.5  # 10x the reference
 # FILENAME: the spec fixes the dataset filenames; only the schema is public.
 input_file = "requests.log"
 output_file = "summary.txt"
@@ -180,17 +200,19 @@ input_format = "ts method endpoint status latency_us, one per line, LF (referenc
 
 # ── Track B — Index ───────────────────────────────────────────────────────
 [B]
+board_cap_s = 169.1
+
 status = "DEFERRED"
-ref_time_s = 56.35
+ref_time_s = 56.352376  # official calibration seed 1 (harness/calibration-seed1.json)
 # "Track B is timed as one total wall time, and its queries are readable from
 # the start. The 40/60 build/query split is gone." There is no blend any
 # more: build + queries are one measured wall time.
-ref_total_time_s = 56.35
+ref_total_time_s = 56.352376
 ref_build_time_s = "NOT_APPLICABLE"
 ref_query_time_s = "NOT_APPLICABLE"
-ref_peak_mem_mb = "DEFERRED"
+ref_peak_mem_mb = 2199.9616  # official cgroup memory.peak
 ref_source_lines = "DEFERRED"
-timeout_s = 564
+timeout_s = 563.5  # 10x the reference
 corpus_file = "docs.txt"
 queries_file = "queries.txt"     # published name: QUERIES.TXT
 output_file = "results.txt"
@@ -214,11 +236,13 @@ corpus_format = "docs.txt: id<TAB>text, ids 0..N-1 in order (reference)"
 
 # ── Track C — Join ────────────────────────────────────────────────────────
 [C]
+board_cap_s = 43.3
+
 status = "DEFERRED"
-ref_time_s = 14.44
-ref_peak_mem_mb = "DEFERRED"
+ref_time_s = 14.444059  # official calibration seed 1 (harness/calibration-seed1.json)
+ref_peak_mem_mb = 367.435776  # official cgroup memory.peak
 ref_source_lines = "DEFERRED"
-timeout_s = 144
+timeout_s = 144.4  # 10x the reference
 records_file = "records.csv"     # published name: RECORDS.CSV
 lookup_file = "regions.csv"      # region_id,country header (reference)
 output_file = "aggregates.txt"
@@ -245,11 +269,13 @@ output_number_format = "space-joined: key count id_sum amount_sum amount_min amo
 
 # ── Track D — Traverse ────────────────────────────────────────────────────
 [D]
+board_cap_s = 218.1
+
 status = "DEFERRED"
-ref_time_s = 72.69
-ref_peak_mem_mb = "DEFERRED"
+ref_time_s = 72.692655  # official calibration seed 1 (harness/calibration-seed1.json)
+ref_peak_mem_mb = 892.915712  # official cgroup memory.peak
 ref_source_lines = "DEFERRED"
-timeout_s = 727
+timeout_s = 726.9  # 10x the reference
 graph_file = "graph.txt"         # published name: GRAPH.TXT
 queries_file = "queries.txt"     # 's t' per line (reference)
 output_file = "distances.txt"

@@ -164,9 +164,9 @@ TRACK A · INGEST (the parsing track; recommended starter)
     status     uint16 (5xx counts toward error rate)
     latency_us uint32 (MICROseconds, not millis)
   Sample lines (exact):
-    2026-10-30T18:00:00.114982Z GET /v2/orders/{id} 200 1841
-    2026-10-30T18:00:00.115330Z POST /v2/checkout 503 204117
-    2026-10-30T18:00:00.115332Z GET /health 200 62
+    2026-10-30T15:00:00.114982Z GET /v2/orders/{id} 200 1841
+    2026-10-30T15:00:00.115330Z POST /v2/checkout 503 204117
+    2026-10-30T15:00:00.115332Z GET /health 200 62
   Naive reference: reads lines, splits on delimiters, parses timestamps with a date
   library, pushes latencies into a growing per-endpoint list, sorts each list at the end.
   Organizer hints: custom line parsing >> general reader; percentiles WITHOUT sorting the
@@ -261,10 +261,10 @@ spectacular track carry two mediocre ones: 90/40/40 → 52.4 loses to 60/60/60 �
   Oct 28 18:00 (T-48h): specs + reference impls (Go/Python/Rust) + FULL harness published;
                         frozen — nothing about scoring changes after this.
   Oct 30 06:00 (T-12h): 10% sample datasets + their expected output hashes (verify locally).
-  Oct 30 18:00 (T-0):   KICKOFF — full datasets, live leaderboard opens, clocks start.
+  Oct 30 15:00 (T-0):   KICKOFF — full datasets, live leaderboard opens, clocks start.
   Oct 31 (midnight):    standings + a written teardown of every deliberately bad decision
                         in the reference implementation (free intelligence — exploit it).
-  Nov 2 18:00:          CODE FREEZE — repos locked at the recorded commit.
+  Nov 2 15:00:          CODE FREEZE — repos locked at the recorded commit.
   Nov 2–4 scoring (holdout) · Nov 3–12 judging · Nov 10 write-up closes · Nov 13 winners.
 
 ===== RULES THAT BITE =====
@@ -311,8 +311,8 @@ no hedging, no generic advice. Output in GitHub-flavored Markdown with tables. D
 4. THE MASTER 72-HOUR SCHEDULE — hour-blocked, the centerpiece. Requirements:
    - A PRE-KICKOFF prep phase (legal: env, reading, design, local harness, profiling the
      published references, skeleton repos + Dockerfiles) spanning Oct 28 18:00 (specs/harness
-     freeze) and Oct 30 06:00 (sample+hashes) up to Oct 30 18:00 kickoff.
-   - The 72h from Oct 30 18:00 → Nov 2 18:00 in blocks (≈2–4h each) mapped to tracks and
+     freeze) and Oct 30 06:00 (sample+hashes) up to Oct 30 15:00 kickoff.
+   - The 72h from Oct 30 15:00 → Nov 2 15:00 in blocks (≈2–4h each) mapped to tracks and
      milestones, with a hard "all five pass the SHA gate on the sample by hour X" checkpoint,
      the Oct 31 midnight reference-teardown integration, realistic SLEEP blocks for a solo
      human (say so explicitly), daily sample-board pushes, and a frozen last-6-hours
@@ -606,7 +606,7 @@ real box. This is the capstone that makes the plan "full-proof". Use the CONTEXT
      sample ✓, deterministic across N runs ✓, under memory/time limits ✓, Dockerfile builds
      offline from clean checkout ✓, exactly one /out file ✓, PERF.md numbers reproduce ✓,
      README + .speed-demon.toml present ✓, repo public + OSI license ✓, final commit recorded
-     before Nov 2 18:00 UTC ✓. Make it a literal checkbox list I can execute.
+     before Nov 2 15:00 UTC ✓. Make it a literal checkbox list I can execute.
 
 End with the single highest-leverage piece of advice for a solo competitor across all five
 tracks, in two sentences.
@@ -625,4 +625,4 @@ tracks, in two sentences.
   follow-up micro-prompt (e.g. "Track B inverted-index merge loop, exhaustively").
 
 **Legality reminder:** this is design/preparation only, which the rules explicitly permit.
-No project code is written or committed before kickoff (Oct 30 18:00 UTC).
+No project code is written or committed before kickoff (Oct 30 15:00 UTC).

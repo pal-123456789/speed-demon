@@ -69,3 +69,6 @@ track-*/run.pdb
 
 /verification/data-adversarial/
 
+# local self-consistency pins (pin-hash.sh); the official pin is <output>.sha256
+**/*.local.sha256
+

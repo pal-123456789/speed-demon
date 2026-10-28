@@ -77,7 +77,7 @@ TRACK B · INDEX (ref 56.35 s)                    TRACK D · TRAVERSE (ref 72.69
 ## 3. A-axis output anatomy (byte-exact, one line)
 
 ```
-2026-10-30T18:00:00Z  /api/v2/products   18422  6381  41207  81573  7  380
+2026-10-30T15:00:00Z  /api/v2/products   18422  6381  41207  81573  7  380
 └──────┬───────────┘  └──────┬───────┘   └─┬─┘  └─┬─┘ └─┬──┘ └─┬─┘ └┬┘ └─┬┘
    hour13 + ":00:00Z"      endpoint      count  p50   p95    p99  errs  ppm
                                                         (nearest rank)  = errs*1e6/count
