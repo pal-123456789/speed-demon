@@ -75,7 +75,7 @@ Consequences:
 > image."
 
 Action required here: **every `FROM` must be digest-pinned.**
-`Dockerfile` and all five `tracks/*/Dockerfile` currently say `FROM
+all four `track-*/Dockerfile` currently say `FROM
 debian:13-slim`, which is a tag, not a digest. `tooling/check_base_pinned.py`
 now enforces this and is wired into the pre-freeze checklist.
 

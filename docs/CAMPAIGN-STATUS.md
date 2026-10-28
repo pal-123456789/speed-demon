@@ -195,7 +195,7 @@ sh tooling/install-hooks.sh            # installs the pre-commit gate
 3. Replace the TARGET K budgets in `docs/MASTER-PLAN.md` with the real
    `Tref/Mref/Sref`.
 4. Load the sample expected hashes into
-   `tracks/<track>/verification/expected/<output>.sha256` (Oct 30 06:00 UTC).
+   `track-<t>/verification/expected/<output>.sha256` (Oct 30 06:00 UTC).
 
 ### Oct 30 06:00 UTC — sample data
 
@@ -278,7 +278,7 @@ table keeps the old number. If that test fails, the fix is to update
 
 Then, in order:
 
-1. Update the four `tracks/*/.speed-demon.toml` output filenames if the spec
+1. Update the four `track-*/.speed-demon.toml` output filenames if the spec
    renamed anything; the lockdown cross-checks them against the contract.
 2. Re-run `python tooling/fix_encoding.py --scan .` after pasting any spec
    text into a file — the PowerShell round-trip that produced the Oct 22

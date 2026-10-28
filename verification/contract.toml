@@ -296,7 +296,7 @@ max_distance_bound = "unbounded in the reference — carry u64 internally (refer
 
 # ── Track E — Compress — CUT ──────────────────────────────────────────────
 # "Four tracks, A to D. Track E (Compress) is cut: storing the input raw
-# outscored a real codec." The [E] section and tracks/E-compress/ are gone.
+# outscored a real codec." The [E] section and the old E folder are gone.
 #
 # Keeping the scaffold would not be free: S counts every line in the repo, so
 # a dead track would cost all four remaining tracks 15%-weight source size.

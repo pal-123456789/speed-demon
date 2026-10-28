@@ -193,7 +193,7 @@ typing:
   offline rustc*, `.speed-demon.toml`, SHA-gate hook, cgroup-v2 `memory.peak` reader) — ready to
   type at H0, not committed early.
 - **Oct 30 06:00 UTC (sample + hashes):** load the expected sample hashes into
-  `tracks/<track>/verification/expected/<output>.sha256` — per track, which is
+  `track-<t>/verification/expected/<output>.sha256` — per track, which is
   where `verify.ps1` and `pre-freeze.ps1` actually read them (there is no
   repo-level `verification/expected/`). Sanity-read the sample bytes (grammar
   only — never tune to them).
