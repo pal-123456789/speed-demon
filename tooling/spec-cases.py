@@ -36,6 +36,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shell import shell  # noqa: E402  (portable sh discovery)
+
 ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "verification" / "cases"
 REFERENCE = {"a": "a_ingest.py", "b": "b_index.py", "c": "c_join.py", "d": "d_traverse.py"}
@@ -112,7 +115,7 @@ def main(argv=None) -> int:
 
         if args.run:
             if args.build:
-                b = subprocess.run(["sh", f"track-{t}/build.sh"], cwd=ROOT,
+                b = subprocess.run([shell(), f"track-{t}/build.sh"], cwd=ROOT,
                                    capture_output=True, text=True)
                 if b.returncode != 0:
                     print(f"  FAIL candidate build: {(b.stderr or '').strip()[-160:]}")

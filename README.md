@@ -38,6 +38,10 @@ cargo, no registry, no network.
 
 ## Quick start (Windows dev machine — Docker not required for scaffold check)
 
+> On Windows PowerShell there is no `sh` on PATH. Run the shell scripts
+> through the shim: `.\tooling\run.ps1 ci` (or use Git Bash and `sh tooling/ci.sh`).
+> The Python tools locate Git for Windows' `sh.exe` themselves.
+
 ```powershell
 # 1. Run the whole gate suite (sh from Git Bash / WSL / Linux)
 sh tooling\ci.sh

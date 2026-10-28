@@ -73,24 +73,37 @@ own Dockerfile guardrail and D-axis measurement both accept our submission.
 
 ## 5. The kickoff sequence (run this at 15:00 UTC)
 
-```sh
+**Invocation note (learned the hard way on Oct 28).** Windows PowerShell has
+no `sh` on PATH, so `sh tooling/ci.sh` fails with *"The term 'sh' is not
+recognized"*. Use the shim `tooling/run.ps1` (it finds Git for Windows' sh for
+you), or run the same commands inside Git Bash. The Python tools find the shell
+by themselves (`tooling/_shell.py`: `$SD_SH` → Git for Windows' sh → PATH sh →
+bash), so `python tooling/spec-cases.py --build` works from either shell.
+
+```powershell
 # 0. state
-git log --oneline -1 && git status --short          # expect clean
+git log --oneline -1 ; git status --short           # expect clean
 
 # 1. official data + the official expected hash, installed and verified
 python tooling/official-data.py --track all --scale sample
 
-# 2. write the implementation (rule 05 window opens now), then the loop:
+# 2. the loop (run from PowerShell; the shim supplies the shell)
 python tooling/spec-cases.py --run --build          # every documented edge case, ms
 python tooling/conformance.py --track a --diff --build   # full-sample byte diff vs the oracle
-sh tooling/bench-rung.sh a --label rung-01          # 5-run middle-3 measurement + ledger
+.\tooling\run.ps1 bench-rung.sh a --label rung-01        # or: sh tooling/bench-rung.sh a
 python tooling/k_whatif.py --scoreboard --t a=<s> --m a=<MB> --l a=<lines>
-sh tooling/ci.sh                                    # 22 gates, the authority's included
+.\tooling\run.ps1 ci                                    # or: sh tooling/ci.sh  (22 gates)
 
 # 3. before every green commit
-sh tooling/determinism-check.sh all
+.\tooling\run.ps1 determinism-check.sh all               # or: sh tooling/determinism-check.sh all
 python tooling/k_whatif.py --tradeoff --t-abs <T> --lines <L> --add-lines <n> --t-gain <pct>
 ```
+
+**If a command still fails:** *"The term 'sh' is not recognized"* → use
+`run.ps1`; *WinError 2 / FileNotFoundError* → the tool could not find a shell,
+set `$env:SD_SH = "C:\Program Files\Git\bin\sh.exe"`; *WSL session error*
+→ Git Bash is being shadowed by WSL's bash, and `_shell.py` already prefers Git
+for Windows' `sh.exe`.
 
 Priority order from the measured profiles: **A** hour-key/timestamp first ·
 **B** tokenizer + single-pass build · **C** amount parser + aggregate layout ·

@@ -40,6 +40,9 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shell import shell  # noqa: E402  (portable sh discovery)
+
 ROOT = Path(__file__).resolve().parent.parent
 REFERENCE = {"a": "a_ingest.py", "b": "b_index.py", "c": "c_join.py", "d": "d_traverse.py"}
 OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}
@@ -59,7 +62,7 @@ def run_reference(track: str, data: Path, out: Path) -> tuple[int, str]:
 
 
 def build_candidate(track: str) -> tuple[int, str]:
-    p = subprocess.run(["sh", f"track-{track}/build.sh"], cwd=ROOT,
+    p = subprocess.run([shell(), f"track-{track}/build.sh"], cwd=ROOT,
                        capture_output=True, text=True)
     return p.returncode, (p.stderr or "").strip()
 
