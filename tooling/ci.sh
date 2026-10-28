@@ -18,7 +18,8 @@
 #   7  image contract         (digest-pinned allowlisted stages, no cached outputs)
 #   8  K what-if self-check   (scoring math pinned to the published example)
 #   9  CSV boundary check     (Track C oracle vs quote-parity split, hostile fixtures)
-#  10  name parity            (check.py vs scaffold vs harness vs pins)
+#  10  spec conformance corpus (tiny edge cases, oracle-verified)
+#  11  name parity            (check.py vs scaffold vs harness vs pins)
 #  11  track folder audit     (required files present; no stray/forbidden files)
 #  12  determinism matrix     (P6: threads x chunk x chaos, byte-identical output)
 #  13  S and D axes           (code lines per track folder; dependency honesty)
@@ -227,6 +228,18 @@ fi
 # that lands in one source of truth but not another is a silent zero, and no
 # other gate notices. This cross-checks the official check.py against the
 # scaffold constants, the harness table and the pin filenames.
+# The specs inject EVERY documented edge case at least once at `tiny` scale,
+# so verification/cases/ is a complete conformance suite with the reference's
+# own answers stored beside it. This gate proves the corpus is authoritative
+# (re-derived from the oracle) rather than stale.
+step "SPEC CONFORMANCE CORPUS (tiny: every documented edge case, oracle-verified)"
+if "$PY" tooling/spec-cases.py --verify-corpus >/tmp/sd-speccases.txt 2>&1; then
+  ok "all four tiny corpora match the official reference, edge cases included"
+else
+  grep -E 'FAIL|no corpus' /tmp/sd-speccases.txt | head -8 | sed 's/^/  /'
+  fail "the spec conformance corpus is missing or stale"
+fi
+
 step "OUTPUT/INPUT NAME PARITY (check.py vs scaffold vs harness vs pins)"
 if "$PY" tooling/check-output-names.py >/tmp/sd-names.txt 2>&1; then
   ok "every source agrees on the output/input contract"

@@ -125,17 +125,23 @@ def main(argv=None) -> int:
     ap.add_argument("--verify-only", action="store_true",
                     help="do not generate; verify what is already installed and re-pin")
     ap.add_argument("--no-pin", action="store_true", help="do not touch the expected-hash pins")
+    ap.add_argument("--dest", help="install root (default verification/data)")
+    ap.add_argument("--save-expected", action="store_true",
+                    help="save the reference output beside the data as expected-<output>")
     args = ap.parse_args(argv)
 
     tracks = list(TRACKS) if args.track == "all" else [args.track]
     failures = 0
 
     for t in tracks:
-        want = PUBLISHED[t].get(args.scale)
+        want = PUBLISHED[t].get(args.scale, {})
         if not want:
-            print(f"[track {t}] no published hashes for scale {args.scale} — skipping")
-            continue
-        dest = DATA / f"track-{t}"
+            # No published hash table for this scale (the specs publish full and
+            # sample for B/C/D; tiny only for A). The reference still defines the
+            # answer, so generate and record it — just without hash verification.
+            print(f"[track {t}] no published hashes for scale {args.scale} — "
+                  f"generating, oracle-verified against the reference only")
+        dest = (Path(args.dest) if args.dest else DATA) / f"track-{t}"
         print(f"[track {t}] scale={args.scale} dest={dest}")
 
         # 1/2. generate (unless verifying) and check every INPUT hash
@@ -193,6 +199,11 @@ def main(argv=None) -> int:
             print(f"  installed {len(INPUTS[t])} input file(s) -> {dest}")
 
         # 6. pin the OFFICIAL expected hash (the true SHA-gate target)
+        if args.save_expected and (refout / outname).is_file():
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(refout / outname, dest / f"expected-{outname}")
+            print(f"  saved the reference answer as expected-{outname}")
+
         if not args.no_pin and exp_out and (refout / outname).is_file():
             pin = ROOT / f"track-{t}" / "verification" / "expected" / f"{outname}.sha256"
             pin.parent.mkdir(parents=True, exist_ok=True)
