@@ -2,7 +2,9 @@
 
 > The operating plan for Oct 30 15:00 UTC → Nov 2 15:00 UTC. Read together with
 > `docs/HANDOVER-oct28.md` (state + verified assets) and
-> `docs/WINDOW-RUNBOOK.md` (the hour-by-hour tool map).
+> `docs/WINDOW-RUNBOOK.md` (the hour-by-hour tool map) and
+> `docs/MODULE-PLAN.md` (the adopted D1 architecture: modules, acceptance
+> tests, build order, risks).
 >
 > **Rule of the campaign: every module is built at "insane level", never child
 > level. A power house is only as strong as its weakest module.**
