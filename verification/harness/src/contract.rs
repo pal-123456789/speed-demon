@@ -63,7 +63,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
             output: "results.txt",
             ref_time_s: 56.352376,
             ref_mem_mb: Some(2199.9616),
-            ref_src_lines: None,
+            ref_src_lines: Some(91.0),
             timeout_s: 563.5,
         },
     );
@@ -76,7 +76,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
             output: "aggregates.txt",
             ref_time_s: 14.444059,
             ref_mem_mb: Some(367.435776),
-            ref_src_lines: None,
+            ref_src_lines: Some(108.0),
             timeout_s: 144.4,
         },
     );
@@ -89,7 +89,7 @@ pub fn tracks() -> BTreeMap<char, Track> {
             output: "distances.txt",
             ref_time_s: 72.692655,
             ref_mem_mb: Some(892.915712),
-            ref_src_lines: None,
+            ref_src_lines: Some(43.0),
             timeout_s: 726.9,
         },
     );

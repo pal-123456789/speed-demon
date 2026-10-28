@@ -188,9 +188,38 @@ def _scc_code_lines(path: Path) -> int | None:
         if out.returncode != 0 or not out.stdout.strip():
             return None
         data = json.loads(out.stdout)
-        return int(sum(lang.get("Code", 0) for lang in data))
+        return int(sum(lang.get("Code", 0) for lang in data
+                       if lang.get("Name") not in (PROSE_LANGS | DATA_LANGS)))
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+# The organizers' rule (harness/static_axes.py): "Documentation and data
+# formats are not code (PROSE_LANGUAGES, DATA_LANGUAGES): PERF.md, README.md,
+# manifests, lockfiles and committed data cost nothing." We mirror it so the
+# local S estimate matches the scored one instead of overcounting ~250 lines
+# of Markdown per track.
+PROSE_SUFFIXES = {".md", ".markdown", ".mdx", ".rst", ".adoc", ".org", ".textile",
+                  ".creole", ".rtf", ".spdx", ".tex", ".latex", ".typ"}
+DATA_SUFFIXES = {".toml", ".json", ".json5", ".jsonc", ".jsonl", ".yaml", ".yml",
+                 ".xml", ".csv", ".ini", ".properties", ".svg", ".lock", ".sha256",
+                 ".gitignore", ".dockerignore"}
+PROSE_LANGS = {"Markdown", "MDX", "Plain Text", "License", "ReStructuredText",
+               "AsciiDoc", "Org", "Textile", "Creole", "Rich Text Format", "SPDX",
+               "TeX", "LaTeX", "Typst", "TaskPaper"}
+DATA_LANGS = {"JSON", "JSON5", "JSONC", "JSONL", "YAML", "TOML", "XML", "CSV", "INI",
+              "Properties File", "SVG", "HEX", "Intel HEX", "MSBuild", "Cabal",
+              "nuspec", "gitignore", "ignore", "Docker ignore", "Systemd"}
+
+
+def counts_toward_s(path: Path) -> bool:
+    """True when a file is CODE under the organizers' S rule."""
+    name = path.name
+    if name == "Dockerfile" or name.startswith("Dockerfile."):
+        return True                      # scc counts the Dockerfile language as code
+    if name.startswith("LICENSE") or name in (".gitignore", ".dockerignore"):
+        return False                     # prose / data
+    return path.suffix.lower() not in (PROSE_SUFFIXES | DATA_SUFFIXES)
 
 
 def _fallback_code_lines(text: str) -> int:
@@ -220,6 +249,7 @@ def measure_source(track_dir: Path) -> dict:
         and "verification" not in p.parts
         and p.name not in ("run", "run.exe", "run.pdb")
         and not p.name.endswith((".pdb", ".exe"))
+        and counts_toward_s(p)
     )
     per_file = []
     fallback = 0
