@@ -240,6 +240,20 @@ else
   fail "the spec conformance corpus is missing or stale"
 fi
 
+# The organizers publish their own test suite; a byte-identical copy lives in
+# reference/official/ (free per rule 16, and outside every track folder so it
+# costs nothing). Its fast subset is the spec worked examples plus the
+# hand-written edge cases for all four tracks — the strongest available
+# statement that our reading of the contract matches theirs.
+step "OFFICIAL TEST SUITE (the organizers' own conformance tests)"
+if "$PY" tooling/official-tests.py >/tmp/sd-officialtests.txt 2>&1; then
+  grep -E '^  (Ran|OK)' /tmp/sd-officialtests.txt | tail -2 | sed 's/^/  /'
+  ok "the organizers' test suite passes against our artifacts"
+else
+  tail -12 /tmp/sd-officialtests.txt | sed 's/^/  /'
+  fail "the official test suite fails against our vendored copy"
+fi
+
 step "OUTPUT/INPUT NAME PARITY (check.py vs scaffold vs harness vs pins)"
 if "$PY" tooling/check-output-names.py >/tmp/sd-names.txt 2>&1; then
   ok "every source agrees on the output/input contract"
