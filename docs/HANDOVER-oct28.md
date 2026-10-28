@@ -91,12 +91,13 @@ python tooling/official-data.py --track all --scale sample
 python tooling/spec-cases.py --run --build          # every documented edge case, ms
 python tooling/conformance.py --track a --diff --build   # full-sample byte diff vs the oracle
 .\tooling\run.ps1 bench-rung.sh a --label rung-01        # or: sh tooling/bench-rung.sh a
-python tooling/k_whatif.py --scoreboard --t a=<s> --m a=<MB> --l a=<lines>
+python tooling/k_whatif.py --scoreboard `
+    --t a=1.07 b=1.88 c=0.48 d=2.42 --m a=15 b=120 c=80 d=70 --l a=150 b=260 c=180 d=220
 .\tooling\run.ps1 ci                                    # or: sh tooling/ci.sh  (22 gates)
 
 # 3. before every green commit
 .\tooling\run.ps1 determinism-check.sh all               # or: sh tooling/determinism-check.sh all
-python tooling/k_whatif.py --tradeoff --t-abs <T> --lines <L> --add-lines <n> --t-gain <pct>
+python tooling/k_whatif.py --tradeoff --t-abs 1.07 --lines 150 --add-lines 20 --t-gain 8
 ```
 
 **If a command still fails:** *"The term 'sh' is not recognized"* → use

@@ -15,10 +15,10 @@
 |---|---|---|
 | H0 (once) | `sh tooling/h0-launch.sh` | build all → gates → fixtures → kit → pins, in one run |
 | H0–H2 | `python tooling/spec_intake.py --check` | the Oct-28 pins applied; **0 blocking** = intake done |
-| Any time | `python check.py a --data data/a --expected <sha>` | the OFFICIAL board checker (from the starter): builds with `--network=none`, runs under the board's sandbox, prints the output hash — the closest local proxy for a board run |
+| Any time | `python check.py a --data verification/data/track-a --expected ca6311bb...` | the OFFICIAL board checker (from the starter): builds with `--network=none`, runs under the board's sandbox, prints the output hash — the closest local proxy for a board run |
 | Every rung | `sh tooling/bench-rung.sh a --label rung-07` | build → mini determinism → SHA-check → 5-run bench → ledger |
 | Every rung | `python tooling/k_whatif.py --scoreboard --t A=<s> --m A=<MB> --l A=<lines>` | K / speed / track total / best-3 geomean |
-| Every ~8 h | `python tooling/k_whatif.py --waterfill --hours H --base … --doubling …` | re-solve the hour budget from measured rates |
+| Every ~8 h | `python tooling/k_whatif.py --waterfill --hours 60 --base A=47 B=43 C=39 D=35 --doubling A=6 B=5 C=9 D=8` | re-solve the hour budget from measured rates |
 | H50+ | `sh tooling/determinism-check.sh all` | the full P6 matrix before every green commit |
 | Before freeze | `sh tooling/ci.sh` | all 15 gates, then `verification/pre-freeze.ps1 -All` / `lockdown` |
 | Freeze | git push | public repo + OSI license + final commit; PERF.md cites run IDs |
@@ -33,7 +33,7 @@
 2. **Oct 30 06:00: the organizers publish the generators and the sample
    hashes.** Fetch the official-shaped data with `sh tooling/gen-official-data.sh`
    (seed 1, `sample` scale = 10%; `SCALE=full` is the board dataset). Then
-   `python check.py <t> --data verification/data/track-<t>` is the official
+   `python check.py a --data verification/data/track-a --expected ca6311bb...` is the official
    local check. Our own `gen-fixtures.py` remains the anti-overfit layer.
 3. Read the four frozen specs AND the reference implementations. Write down,
    per track, the EXACT output format, rounding/tie/order rules, malformed-
@@ -124,7 +124,7 @@ means no score.**
 - [ ] folders for tracks you are NOT entering deleted (an unchanged folder is
       the reference itself → the board reports it "unchanged" and does not run
       it)
-- [ ] `python check.py <t> --data <dir> --expected <sha>` passes on a
+- [ ] `python check.py a --data verification/data/track-a --expected ca6311bb...` passes on a
       Docker-capable machine (the one thing this Windows host cannot run)
 - [ ] the PERF.md board-run table is ready to record the first run IDs
 - [ ] `sh tooling/ci.sh` green and the working tree committed

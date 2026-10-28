@@ -204,7 +204,7 @@ sh tooling/install-hooks.sh            # installs the pre-commit gate
 # NOTE: already pinned from the scaffolds' deterministic output — track-a/..D/
 # verification/expected/*.sha256 exist; replacing a pin after H0 requires the
 # SHA gate to go green again with the real implementation.
-echo "<sha256>" > track-a/verification/expected/summary.txt.sha256
+echo "ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3" > track-a/verification/expected/summary.txt.sha256
 
 # and confirm the gate is live
 powershell -File verification/verify.ps1 -Track A
@@ -248,7 +248,7 @@ Order of work (from `docs/MASTER-PLAN.md` §5):
 
 ```bash
 powershell -File verification/pre-freeze.ps1 -All     # must be 0 failures
-git tag final-<commit>
+git tag final-$(git rev-parse --short HEAD)
 git push origin main                                   # public repo
 ```
 

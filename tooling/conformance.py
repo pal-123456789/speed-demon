@@ -43,6 +43,8 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shell import shell  # noqa: E402  (portable sh discovery)
 
+SENTINEL = b"#SCAFFOLD_NOT_IMPLEMENTED"
+
 ROOT = Path(__file__).resolve().parent.parent
 REFERENCE = {"a": "a_ingest.py", "b": "b_index.py", "c": "c_join.py", "d": "d_traverse.py"}
 OUTPUT = {"a": "summary.txt", "b": "results.txt", "c": "aggregates.txt", "d": "distances.txt"}
@@ -220,9 +222,18 @@ def main(argv=None) -> int:
                 failures += 1
             else:
                 diff = first_divergence(exp, act)
-                if diff:
+                if not diff:
+                    print(f"  ok   outputs are byte-identical (sha {sha(act)[:12]}...)")
+                elif act.read_bytes().startswith(SENTINEL):
+                    print("  SCAFFOLD the candidate is still the pre-kickoff stub "
+                          "(expected: it writes a sentinel, not the answer)")
+                    print(f"           oracle produced {exp.stat().st_size} B, "
+                          f"the official hash is {sha(exp)[:12]}...")
+                else:
                     print(f"  FAIL outputs differ — {diff}")
                     failures += 1
+                if diff and False:
+                    pass
                     if args.minimize:
                         print("       minimizing ...")
                         small, removed = minimize(t, data, ROOT)

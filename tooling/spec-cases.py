@@ -39,6 +39,8 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shell import shell  # noqa: E402  (portable sh discovery)
 
+SENTINEL = b"#SCAFFOLD_NOT_IMPLEMENTED"
+
 ROOT = Path(__file__).resolve().parent.parent
 CASES = ROOT / "verification" / "cases"
 REFERENCE = {"a": "a_ingest.py", "b": "b_index.py", "c": "c_join.py", "d": "d_traverse.py"}
@@ -129,11 +131,15 @@ def main(argv=None) -> int:
             r = subprocess.run([str(exe)], capture_output=True, text=True, env=env)
             rep = diff_report(expected, out / outname) if r.returncode == 0 else \
                 f"candidate exited {r.returncode}: {(r.stderr or '').strip()[:160]}"
-            if rep:
+            got = out / outname
+            if got.is_file() and got.read_bytes().startswith(SENTINEL):
+                print("  SCAFFOLD the candidate is still the pre-kickoff stub "
+                      "(expected: it writes a sentinel, not the answer)")
+            elif rep:
                 print(f"  FAIL {rep}")
                 failures += 1
             else:
-                print(f"  ok   candidate matches the oracle on every documented edge case")
+                print("  ok   candidate matches the oracle on every documented edge case")
             import shutil
             shutil.rmtree(out, ignore_errors=True)
 

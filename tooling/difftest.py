@@ -26,7 +26,7 @@ expected hash) and reports:
 
 Usage:
     python tooling/difftest.py candidate.txt reference.txt
-    python tooling/difftest.py candidate.txt --expect <sha256>
+    python tooling/difftest.py candidate.txt --expect ca6311bbeb536fa55d85265bf6fd3d24cc9586f13de1ac73bd2a23ac3893aac3
     python tooling/difftest.py candidate.txt reference.txt --json
     python tooling/difftest.py candidate.txt reference.txt --cols 5
 """

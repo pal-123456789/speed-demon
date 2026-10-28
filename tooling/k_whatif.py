@@ -190,15 +190,25 @@ def _parse_pairs(values: list) -> dict:
         if "=" not in v:
             raise ValueError(f"expected TRACK=value, got {v!r}")
         t, val = v.split("=", 1)
-        out[t.upper()] = float(val)
+        try:
+            out[t.upper()] = float(val)
+        except ValueError:
+            hint = ""
+            if any(c in val for c in "<>"):
+                hint = ("  (that looks like a placeholder from a doc example — "
+                        "put your measured number, e.g. a=1.07)")
+            raise SystemExit(f"--{t} expects a number, got {val!r}{hint}")
     return out
 
 
 def scoreboard(t_abs: dict, m_abs: dict, lines: dict, judge: float = 82.0) -> dict:
     """P9 rung-to-rung scoreboard: measured absolutes -> per-track K/speed/
     total + the best-3 geometric mean (the overall-title driver)."""
+    present = [x for x in TRACKS if x in t_abs]
+    if not present:
+        raise SystemExit("--scoreboard needs at least one track, e.g. --t a=1.07")
     rows = {}
-    for t in TRACKS:
+    for t in present:
         refs = REFS[t]
         r = ratios_from_abs(t_abs[t], m_abs.get(t, 1.0), lines.get(t, 1.0), refs)
         partial = False
@@ -216,7 +226,7 @@ def scoreboard(t_abs: dict, m_abs: dict, lines: dict, judge: float = 82.0) -> di
             "ratios": r, "K": res["K"], "speed": tot["speed_score"],
             "total": tot["total"], "partial": partial,
         }
-    totals = [rows[t]["total"] for t in TRACKS]
+    totals = [rows[t]["total"] for t in present]
     best3 = sorted(totals, reverse=True)[:3]
     rows["_best3_geomean"] = math.exp(sum(math.log(max(x, 1e-9)) for x in best3) / 3)
     rows["_best3"] = best3
@@ -225,7 +235,8 @@ def scoreboard(t_abs: dict, m_abs: dict, lines: dict, judge: float = 82.0) -> di
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Speed Demon what-if K explorer")
-    p.add_argument("--track", choices=list(REFS), help="track preset (M/S_ref DEFERRED for B/C/D)")
+    p.add_argument("--track", choices=[*REFS, *[k.lower() for k in REFS]],
+                   help="track preset, upper or lower case")
     p.add_argument("--t-abs", type=float, help="our absolute T in seconds")
     p.add_argument("--m-abs", type=float, help="our absolute M in MB")
     p.add_argument("--lines", type=float, help="our S code-line count")
@@ -255,7 +266,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.tradeoff:
-        tr = args.track or "A"
+        tr = (args.track or "A").upper()
         if not args.t_abs or not args.lines:
             p.error("--tradeoff needs --t-abs, --lines (and optionally --m-abs, --track)")
         refs = REFS[tr]
@@ -325,7 +336,7 @@ def main() -> int:
         lines = _parse_pairs(args.l) if args.l else {}
         sb = scoreboard(t_abs, m_abs, lines, args.judge)
         if args.json:
-            out = {t: sb[t] for t in TRACKS}
+            out = {t: sb[t] for t in TRACKS if t in sb}
             out["best3_geomean"] = sb["_best3_geomean"]
             print(json.dumps(out, indent=2))
             return 0
@@ -334,7 +345,8 @@ def main() -> int:
         print("=" * 78)
         print(f"{'trk':<4}{'T s':>7}{'M MB':>7}{'lines':>7}{'T/M/S ratios':>22}"
               f"{'K':>7}{'speed':>7}{'total':>7}")
-        for t in TRACKS:
+        present = [x for x in TRACKS if x in sb]
+        for t in present:
             r = sb[t]
             rt = r["ratios"]
             ratio_txt = (f"{rt.get('t', 0):.1f}/{rt.get('m', 0):.1f}/"
@@ -345,7 +357,9 @@ def main() -> int:
                   f"{ratio_txt:>22}{r['K']:>7.2f}{r['speed']:>7.1f}"
                   f"{r['total']:>7.2f}")
         print("-" * 78)
-        print(f"  best-3 geometric mean of totals: {sb['_best3_geomean']:.2f}")
+        n = len(present)
+        label = "best-3" if n >= 3 else f"best-{n} (partial — the overall title needs 3)"
+        print(f"  {label} geometric mean of totals: {sb['_best3_geomean']:.2f}")
         print("  elasticity reminders: 1% less T ≈ +0.11 speed pts; halving M "
               "≈ +3.0; 10% more lines must save ≥ 3% time.")
         print()
@@ -385,7 +399,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    refs = REFS.get(args.track) if args.track else REFS["A"]
+    refs = REFS.get((args.track or "A").upper(), REFS["A"])
     if args.ratios:
         ratios = dict(zip(AXES, args.ratios))
     else:
