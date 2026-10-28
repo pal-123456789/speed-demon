@@ -214,6 +214,33 @@ fi
 # data proves the data is INSIDE the contract: the reference raises on a
 # non-integer region_id, a 4-column record, a node id >= n, a doc id out of
 # order. Six real fixture defects were found exactly this way.
+# Our image contract and D-axis checks are reimplementations. These two run the
+# ORGANIZERS' OWN code against our artifacts: harness/dockerfile_check.py (the
+# pre-build guardrail that refuses a build) and harness/dependencies.py (the D
+# axis). A reimplementation can drift; the authority cannot.
+step "OFFICIAL GUARDRAIL + D AXIS (their dockerfile_check.py, their dependencies.py)"
+OFFICIAL_OK=1
+for t in a b c d; do
+  if ! "$PY" reference/official/harness/dockerfile_check.py "track-$t/Dockerfile" \
+       reference/official/harness/allowlist.json >/tmp/sd-official-df-$t.txt 2>&1; then
+    echo "  track-$t guardrail:"
+    sed 's/^/    /' /tmp/sd-official-df-$t.txt
+    OFFICIAL_OK=0
+  fi
+done
+if [ "$OFFICIAL_OK" = "1" ]; then
+  ok "their dockerfile_check.py accepts all four of our Dockerfiles"
+else
+  fail "an official pre-build guardrail rejects a Dockerfile"
+fi
+if "$PY" tooling/official-axes.py >/tmp/sd-official-d.txt 2>&1; then
+  grep -E 'track-' /tmp/sd-official-d.txt | sed 's/^/  /'
+  ok "their dependencies.py measures D = 1.00 on every track"
+else
+  cat /tmp/sd-official-d.txt | sed 's/^/  /'
+  fail "the official D measurement does not agree with our declaration"
+fi
+
 step "ORACLE CONFORMANCE (our data is accepted by the official references)"
 if "$PY" tooling/conformance.py --track all --oracle >/tmp/sd-oracle.txt 2>&1 \
    && "$PY" tooling/conformance.py --track all --oracle --data-root verification/data-adversarial \
