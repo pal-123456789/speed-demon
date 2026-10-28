@@ -5,8 +5,14 @@
 > via `rustc` (no cargo fetch). Real optimization replaces stubs at H0 inside the 72h window.
 > Rules 04/05 explicitly permit reading, designing, and preparing the environment beforehand.
 >
-> **Start here: [`docs/CAMPAIGN-STATUS.md`](docs/CAMPAIGN-STATUS.md)** — the operational
-> dashboard, the contract of deferred values, and the hour-by-hour runbook.
+> **Start here: [`docs/HANDOVER-oct28.md`](docs/HANDOVER-oct28.md)** — what was
+> done on Oct 28, the kickoff facts (15:00 UTC), the exact H0 command sequence,
+> and the four open external items. Written to be read first when we resume.
+>
+> **Then: [`docs/WINDOW-RUNBOOK.md`](docs/WINDOW-RUNBOOK.md)** — the hour-by-hour
+> plan and the submission logistics; and
+> [`docs/CAMPAIGN-STATUS.md`](docs/CAMPAIGN-STATUS.md)** — the operational
+> dashboard and the contract of values.
 
 ## Map
 
