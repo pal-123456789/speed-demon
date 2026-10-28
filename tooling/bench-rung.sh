@@ -94,6 +94,8 @@ else
 fi
 
 # 5. scoreboard row (speed/track total from the crude or last numbers)
-echo "  next: python tooling/k_whatif.py --scoreboard --t $t=<T> --m $t=<MB> --l $t=<lines>"
+echo "  next (put YOUR measured numbers, all four tracks):"
+echo "        python tooling/k_whatif.py --scoreboard --t a=1.07 b=1.88 c=0.48 d=2.42 \\"
+echo "            --m a=15 b=120 c=80 d=70 --l a=150 b=260 c=180 d=220"
 echo "        (then commit the green rung and PERF.md via gen_docs)"
 exit "$rc"

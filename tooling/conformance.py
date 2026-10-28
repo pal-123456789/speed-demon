@@ -232,15 +232,11 @@ def main(argv=None) -> int:
                 else:
                     print(f"  FAIL outputs differ — {diff}")
                     failures += 1
-                if diff and False:
-                    pass
-                    if args.minimize:
-                        print("       minimizing ...")
-                        small, removed = minimize(t, data, ROOT)
-                        print(f"       minimized repro: {small} "
-                              f"({removed} lines removed; mismatch persists)")
-                else:
-                    print(f"  ok   outputs are byte-identical (sha {sha(act)[:12]}...)")
+                if diff and args.minimize:
+                    print("       minimizing ...")
+                    small, removed = minimize(t, data, ROOT)
+                    print(f"       minimized repro: {small} "
+                          f"({removed} lines removed; mismatch persists)")
             shutil.rmtree(c_out, ignore_errors=True)
         shutil.rmtree(r_out, ignore_errors=True)
 
