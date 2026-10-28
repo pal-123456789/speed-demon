@@ -295,8 +295,12 @@ def gen_track_c(rows: int, seed: int, out_dir: Path) -> None:
             if i > 0 and i % 1000 == 0:
                 f.write(b"\xef\xbb\xbf")
 
-        # a trailing record with an empty amount and an unquoted empty name
-        f.write(f"{rows},,,\u0000,0.00\n".encode("utf-8", errors="replace"))
+        # a trailing record with an empty amount and an unquoted empty name.
+        # region_id 0 is deliberately NOT in regions.csv, so this row exercises
+        # the _UNMATCHED join path. It must still be a VALID integer: the
+        # reference raises on anything else (a NUL here was rejected by the
+        # oracle — see tooling/conformance.py).
+        f.write(f"{rows},,,0,0.00\n".encode("utf-8", errors="replace"))
     print(f"  C: {rows} hostile rows (BOM, quoted commas, escaped quotes, "
           f"embedded LF/CRLF, mixed endings) -> {path}")
 
@@ -307,17 +311,20 @@ def gen_track_c_adversarial(out_dir: Path) -> None:
     write_regions(out_dir)
     path = out_dir / "records.csv"
     cases = [
+        # every record MUST have exactly 5 columns (id,name,note,region_id,amount)
+        # — the reference raises otherwise, and tooling/conformance.py proves it
         b"\xef\xbb\xbfid,name,note,region_id,amount\r\n",
         b'1,"Kaphar, Titus","said ""no"" twice",7,1420.00\r\n',
         b'2,"Betts","a note that\nspans two lines",7,88.50\n',
         b'3,,"",12,0.00\r\n',
         b'4,"trailing space ","comma, quote "" and newline\ntogether",3,-5.25\r\n',
         b'5,"",,0,-0.01\n',
-        b'6,"only one quote \"" ,1,0.00\n',
-        b'7,"crlf\r\ninside",2,1.00\n',
-        b'\xef\xbb\xbf8,"mid-file bom",3,2.00\n',
-        b'9,"unicode \xc3\xa9\xc3\xbc",4,3.00\n',
-        b'10,"tab\there",5,4.00\r\n',
+        # a field that is exactly one escaped quote: """" -> the value is "
+        b'6,"""","note",6,1.00\n',
+        b'7,"crlf\r\ninside","note7",2,1.00\n',
+        b'\xef\xbb\xbf8,"mid-file bom","note8",3,2.00\n',
+        b'9,"unicode \xc3\xa9\xc3\xbc","note9",4,3.00\n',
+        b'10,"tab\there","note10",5,4.00\r\n',
     ]
     path.write_bytes(b"".join(cases))
     print(f"  C: adversarial edge-case corpus ({len(cases)} cases) -> {path}")
@@ -363,7 +370,10 @@ def gen_track_d_adversarial(out_dir: Path) -> None:
         "4 5 100\n",
         "99 0 1\n",          # a far node (unreachable unless 99 is queried in)
     ]
-    header = f"100 11\n"
+    # n must cover EVERY node id in the file — the reference indexes a list of
+    # n adjacency vectors, so an id >= n is an IndexError (found by
+    # tooling/conformance.py). 1740512 is the published header's node count.
+    header = "1740512 11\n"
     path.write_text(header + "".join(edges), encoding="utf-8", newline="")
     qpath = out_dir / "queries.txt"
     queries = [

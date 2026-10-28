@@ -208,6 +208,21 @@ else
   fail "a hostile-CSV boundary is wrong — the Track C split is not trustworthy"
 fi
 
+# The organizers' own reference implementations are vendored under reference/
+# (the rules make byte-identical copies free). Running them over our generated
+# data proves the data is INSIDE the contract: the reference raises on a
+# non-integer region_id, a 4-column record, a node id >= n, a doc id out of
+# order. Six real fixture defects were found exactly this way.
+step "ORACLE CONFORMANCE (our data is accepted by the official references)"
+if "$PY" tooling/conformance.py --track all --oracle >/tmp/sd-oracle.txt 2>&1 \
+   && "$PY" tooling/conformance.py --track all --oracle --data-root verification/data-adversarial \
+      >>/tmp/sd-oracle.txt 2>&1; then
+  ok "all 8 corpora (standard + adversarial x 4 tracks) are oracle-valid"
+else
+  grep -E 'FAIL|rejected' /tmp/sd-oracle.txt | head -12 | sed 's/^/  /'
+  fail "a fixture generator emits data the reference rejects — the contract is broken"
+fi
+
 # The correctness gate is a SHA-256 of ONE file with an exact name. A rename
 # that lands in one source of truth but not another is a silent zero, and no
 # other gate notices. This cross-checks the official check.py against the

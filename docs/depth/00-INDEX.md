@@ -104,6 +104,12 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **`92-REFERENCE-PROFILES.md`** — MEASURED profiles of the organizers'
+  references per phase (`tooling/profile-reference.py`), which overturn four
+  of our documented assumptions: A's timestamp is 48.7% while its line parse
+  is only 2.4%; B is half build-side; C's cost is the **amount parse (24%)**
+  and aggregation, not the quoting; and D is **97.1% search** with a 0.4%
+  edge parse. **Read this before choosing the first rung.**
 - **`95-GROUND-BLUEPRINTS.md`** — the GROUND level: every feature of every
   track taken to the byte (layouts, offsets, rank formulas, state machines,
   field formats, per-feature validation map, trap lists), the deeper optional
