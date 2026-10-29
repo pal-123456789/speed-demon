@@ -42,12 +42,30 @@ own Dockerfile guardrail and D-axis measurement both accept our submission.
 | **Kickoff** | **Oct 30, 15:00 UTC** (was 18:00) — full datasets + live board open |
 | **Code freeze** | **Nov 2, 15:00 UTC** (was 18:00) — repo locked at the recorded commit |
 | Live board cap | 3× the reference; final scoring 10× |
-| Board dataset | `sample` scale, seed 1 (live board); final scoring uses a private full-size holdout |
+| Board dataset | **`full` scale, seed 1, for every track** (owner-confirmed; the "runs on sample" line in `b-index.md` was drift and is fixed). Final scoring uses a private **full-size** holdout seed. |
 | Reference (official calibration) | A 32.047276 s / 227.98 MB · B 56.352376 / 2199.96 · C 14.444059 / 367.44 · D 72.692655 / 892.92 |
 | Reference S (code lines) | A 56 · B 91 · C 108 · D 43 |
 | Board caps (3×) | A 96.1 s · B 169.1 · C 43.3 · D 218.1 |
 | Machine | fsn1, i5-13500, `--cpuset-cpus=0-11`, 8 GB no swap, turbo off, `/data` ro, one file to `/out`, exit 0 |
 | Scoring | `K = (Tref/T)^0.50·(Mref/M)^0.20·(Sref/S)^0.15·(Dref/D)^0.15`; speed `= 50·log10(K)`; track total `= 0.65·speed + 0.35·judge`; overall = geometric mean of best three |
+
+## 3a. CORRECTIONS AND NEW FACTS (official LLM context + owner reply, Oct 29)
+
+Read from `speeddemon.dev/speed-demon-context.md` and the owner's answer on the two
+repo drifts. These override anything older in this repo.
+
+| # | Fact | Why it matters |
+|---|---|---|
+| 1 | **The board runs every track on the `full` public dataset, seed 1** — not `sample` (that line in `b-index.md` was drift, now fixed upstream). Board scores therefore use the **full-scale** references we hold: A 32.047276 s / 227.98 MB, B 56.352376 / 2199.96, C 14.444059 / 367.44, D 72.692655 / 892.92. | Our board pushes are scored on 10× the data we tested on with `--scale sample`. Generate `--scale full` (≈600 MB) for every real measurement. |
+| 2 | **Final-scoring timeout = 10× T_ref** (A 320.5 s, B 563.5, C 144.4, D 726.9). The board's live cap is **3×**. | Already in `contract.toml`; the harness's `--timeout-factor` default was 3.0 and is now 10.0 upstream. |
+| 3 | **Track B at `full` is 250,000 documents and 50,000 queries** (31,000 BOOL / 19,000 PHRASE), `docs.txt` 253,827,587 B, reference peak RSS 2.29 GB. | The corpus is 10× and the query set is 25× our bare sample assumption; budget index build and query time accordingly. |
+| 4 | **PERF.md steps must cite live-board run IDs**, and judges check that each cited run exists and that the claimed change moved in the claimed direction. | This changes the module loop: **push each verified rung and record its run ID** in PERF.md. A rung that was never pushed cannot be cited. |
+| 5 | **The write-up side quest is a separate $100 × 2 prize, closing Nov 10**, on a public blog (dev.to, Medium, Hashnode or your own site). A README or a GitHub Pages repo does **not** count. | Pure upside beyond the board; schedule a post at D3. |
+| 6 | **A committed `.profdata` inside a track folder is DATA, not code** — it costs nothing in S. Tooling kept **outside** the track folders is never scored. | PGO becomes nearly free on S: train in the build, or commit the profile. |
+| 7 | **"Unchanged" folder detection**: a folder is unchanged only if every file except Markdown and `.speed-demon.toml` is byte-identical to the starter. One push re-runs **all** changed folders (no per-folder detection). | Our folders always differ, so they always run — expected. Do not leave the final push to the last hour: the queue lengthens near the freeze. |
+| 8 | **Authority order**: frozen specs + harness > website > clarifications > video transcript. | When two sources disagree, cite the spec. |
+| 9 | **Gates are checked on every one of the five final runs.** Nondeterminism is a correctness bug. | Our determinism matrix (36 configs × 3 runs) is exactly the right guard. |
+| 10 | **Specialist prizes**: $50 for the highest K on each track, no three-track requirement. | A single very fast track has its own prize. |
 
 ## 4. What we now hold (all verified locally)
 

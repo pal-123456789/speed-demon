@@ -143,6 +143,30 @@ dataset_sample_records_csv  = "07bc636857b70556921be08d406f887eb07dbdacb8384587e
 dataset_sample_aggregates   = "9035fed36823232dd41ae2d1b9d6d21aa7c73f49d8e95647e953a89d5ebe9a66"
 dataset_sample_graph_txt    = "16351d408f1f94a6bcf66de5c5762abede111c07a4a38306253504a6c9c9b7cd"
 dataset_sample_distances    = "a4c76ed030bc7e365db33191f6cf74708fba7f25eb48d64c8c4279f2e57046a0"
+# THE BOARD'S DATASET IS FULL SCALE, SEED 1, for every track (owner-confirmed;
+# the "runs on sample" line in specs/b-index.md was drift and is fixed upstream).
+# These are therefore the hashes the live board actually gates on.
+dataset_full_docs_txt      = "6cd461670d6c39f9c5211162577532d3648edeab12340c71cc7d2ab5f18e66c8"
+dataset_full_queries_b     = "77ef7ffc59afde051006b02a2ce8e4c090fbbfbf101acd6f862d0f8e298d39f9"
+dataset_full_results_txt   = "f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927"
+dataset_full_records_csv   = "36166f4ac44101a22ebf25b4f949436a681a2698cb0f2ae1f7f6853010259f48"
+dataset_full_regions_csv   = "414c57c4f3ec968f9bce28c59eebfdf57a9425322b468db7ee964c18c4852fe1"
+dataset_full_aggregates    = "d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536"
+dataset_full_graph_txt     = "fe6471f2712d10b23c2ec58a4cbc7db1ea3e742daf6b6db62829e74d6c4a26c7"
+dataset_full_queries_d     = "160f1ef48378dcb567a8d9ddd2676ee777b044a5ede3ad4c7b42e812aa4b3a6f"
+dataset_full_distances_txt = "a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e"
+
+# Scale facts that change the plan at full size.
+board_dataset_scale        = "full"   # seed 1, every track
+b_full_documents           = 250000   # vs 1000 tiny / 25000 sample
+b_full_queries             = 50000    # 31000 BOOL / 19000 PHRASE
+b_full_docs_bytes          = 253827587
+b_full_reference_peak_mb   = 2290.0   # the organizers' own M4 measurement, for context
+final_timeout_a_s          = 320.5
+final_timeout_b_s          = 563.5
+final_timeout_c_s          = 144.4
+final_timeout_d_s          = 726.9
+
 # The live board caps a run at 3x the reference; final scoring at 10x.
 board_time_cap_multiplier = 3
 final_time_cap_multiplier = 10
