@@ -8,9 +8,18 @@
 > digest-pinned base images, a 30 MB image and a sandboxed run that reads the board's
 > full-scale dataset and writes exactly one output file, on all four tracks.
 >
+> **▶ RESUMING? OPEN THIS FIRST: [`docs/SESSION-LOG.md`](docs/SESSION-LOG.md)** —
+> the current state in one screen, what is verified and how, the full bug ledger
+> with the class each defect belongs to, the two browser steps still outstanding,
+> and the one command that proves the tree is healthy.
+>
 > **▶ AT KICKOFF, OPEN THIS: [`docs/KICKOFF-CARD.md`](docs/KICKOFF-CARD.md)** — the
 > three browser steps, then the exact command sequence for 15:00 UTC / 20:30 IST,
 > the freeze-day publish command, and the three facts that decide the score.
+>
+> **Write-up material: [`docs/WRITEUP-EVIDENCE.md`](docs/WRITEUP-EVIDENCE.md)** —
+> twelve real findings, each with the measurement behind it. The side quest closes
+> Nov 10.
 >
 > **Start here: [`docs/HANDOVER-oct28.md`](docs/HANDOVER-oct28.md)** — what was
 > done on Oct 28, the kickoff facts (15:00 UTC), the exact H0 command sequence,
