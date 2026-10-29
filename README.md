@@ -9,6 +9,8 @@
 > done on Oct 28, the kickoff facts (15:00 UTC), the exact H0 command sequence,
 > and the four open external items. Written to be read first when we resume.
 >
+> **Judge-facing + video: [`docs/MODEL-OUTPUTS-ADOPTED.md`](docs/MODEL-OUTPUTS-ADOPTED.md)**
+>
 > **The architecture: [`docs/MODULE-PLAN.md`](docs/MODULE-PLAN.md)** — the modules
 > per track, their acceptance tests, the build order and the risks.
 >

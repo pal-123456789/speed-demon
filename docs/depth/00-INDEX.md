@@ -104,6 +104,11 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **See also `docs/MODEL-OUTPUTS-ADOPTED.md`** — the triaged P-B/P-C/P-D answers:
+  the measurement-gated optimisation ladder, the judge-facing PERF.md/README/VERIFY.md
+  template, and the 5-minute video pack (slide outline, ElevenLabs narration, the
+  60-second capture).
+
 - **`BRIEFS-FINAL-DESIGNS.md`** — the four critical routines in their final
   pre-code form (P-A answer, hand-verified): rank selection with the
   inclusive narrowing and the n=17-19 branch, the per-slot phrase matcher
