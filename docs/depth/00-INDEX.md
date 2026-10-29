@@ -104,6 +104,14 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **`99-PROMPT-PACK.md`** — the five prompts to run against a high-level
+  model, in priority order: P-A implementation pseudocode + test vectors
+  for the four critical modules (critical path, unblocks H1), P-B where the
+  next 10-20% is per track, P-C the judge-facing PERF.md/README structure
+  (35% of the track total), P-D the 5-minute video plan with the narration
+  script and the 1-minute terminal take, P-E the red-team pass over P-A's
+  answer.
+
 - **`BRIEFS-CRITICAL-MODULES.md`** — implementation-grade design briefs for the
   modules where a wrong decision costs a whole track: A's 13-byte hour key,
   grouping and nearest rank; B's byte-level tokeniser, phrase positions and
