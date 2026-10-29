@@ -43,15 +43,30 @@ def fail(msg: str) -> None:
 
 
 def texts():
-    """Every first-party text file (relative path, content)."""
-    for p in sorted(ROOT.rglob("*")):
-        if not p.is_file() or p.suffix not in TEXT_SUFFIXES:
+    """Every first-party text file that can actually SHIP (relative path, content).
+
+    Derived from git rather than from a directory walk. A walk also picks up
+    files that git ignores, and ignored scratch is not part of the submission:
+    a transient `.commitmsg.txt` once tripped the abandoned-architecture check
+    with a line from its own commit message. `--others --exclude-standard`
+    keeps new, not-yet-staged files in scope while dropping the ignored
+    scratch, so the check runs during development and still only polices what
+    can reach the judges.
+    """
+    r = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    for rel in sorted(set(r.stdout.split())):
+        if Path(rel).suffix not in TEXT_SUFFIXES:
             continue
-        rel = p.relative_to(ROOT).as_posix()
         if any(rel.startswith(s) for s in SKIP_DIRS):
             continue
         if rel == "tooling/check-consistency.py":
             continue  # this file names every stale pattern on purpose
+        p = ROOT / rel
+        if not p.is_file():
+            continue
         try:
             yield rel, p.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -303,6 +318,17 @@ for rel, text in texts():
 check("every script named in first-party prose exists",
       not script_hits, "; ".join(script_hits[:6]))
 check("check_pgo_wiring is wired into ci.sh", "check_pgo_wiring" in ci)
+
+# ── 15. a PGO profile inside a track folder must remain committable ──────
+# Two independent rules have to hold at once for build-time training to work:
+# the organizers count a committed `.profdata` in a track folder as DATA rather
+# than code (so it is free on S), and the track folder is the entire build
+# context (so the profile has to live inside it to reach the scored image).
+# A `*.profdata` line in .gitignore satisfies neither -- it just blocks the
+# commit, and the build then runs unprofiled while claiming otherwise.
+for probe in ("track-a/pgo/merged.profdata", "track-a/merged.profdata"):
+    r = subprocess.run(["git", "check-ignore", "-q", probe], cwd=ROOT)
+    check(f"{probe} is committable (not gitignored)", r.returncode != 0)
 
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:

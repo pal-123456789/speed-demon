@@ -1,8 +1,11 @@
-# Rust
+# Rust build output. The four track folders compile with rustc directly and
+# have no build directory; this covers the verification harness, which is the
+# only Cargo package in the repository.
 /target/
 **/target/
-# Cargo.lock IS committed: this is a binary project and the lockfile is part
-# of the reproducible build.
+# verification/harness/Cargo.lock IS committed: the harness is a binary crate
+# and its lockfile is part of a reproducible build. The four tracks have no
+# manifest at all, which is what keeps D = 1.00.
 
 # Verification output
 /out/
@@ -32,6 +35,17 @@ perf.data.old
 flamegraph.svg
 *.profraw
 *.profdata
+
+# ...EXCEPT a profile deliberately committed INSIDE a track folder. The scored
+# build uses the track folder as its entire build context, so a profile stored
+# anywhere else is a profile rustc can never read. The organizers count a
+# committed `.profdata` in a track folder as DATA, not code, so it costs
+# nothing on S. Without this negation an over-broad `*.profdata` above silently
+# blocks the commit and the scored build runs unprofiled while the log claims
+# PGO was applied. Later patterns win.
+!track-*/pgo/
+!track-*/pgo/*.profdata
+!track-*/*.profdata
 
 # Sample data (never commit real datasets)
 /data/
