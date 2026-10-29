@@ -9,7 +9,7 @@ That is a rule about a **clock**, and clocks are exactly the thing a tired
 participant forgets at hour 40. So this tool turns it into a pre-commit
 check with a hard boundary:
 
-  * Before H0 (Oct 30 2026 18:00 UTC) it scans the submission source for
+  * Before H0 (Oct 30 2026 15:00 UTC) it scans the submission source for
     anything that looks like a *solution* to a track, and refuses the commit.
   * After H0 it stops scanning and instead reports that the window is open.
 
