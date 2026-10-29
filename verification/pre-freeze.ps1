@@ -223,14 +223,24 @@ foreach ($t in $targets) {
     # three different correct answers) and the committed pin holds only one of
     # them, while the corpus on disk may be a different scale. Derive it from
     # the bytes actually present, and only fall back to the pin.
-    if (Test-Path $dataDir) {
-        $out = & python "$Root\tooling\official-data.py" --track $t.ToLower() --expected-for $dataDir 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) {
-            $parts = @($out)[0] -split '\s+'
-            if ($parts.Count -ge 3 -and $parts[2] -match '^[0-9a-f]{64}$') {
-                $expected = $parts[2]
-                $expScale = $parts[1]
-            }
+    #
+    # Through Get-NativeOut, not `& python` directly: with
+    # $ErrorActionPreference = "Stop", PowerShell 5.1 turns a native command's
+    # STDERR into a terminating error, and official-data.py prints "nomatch"
+    # there when no published dataset matches. Called directly, that aborted the
+    # gate on any tree without data -- a clean clone -- before it reported
+    # anything.
+    $inFile = Join-Path $dataDir $info.Input
+    if (Test-Path $inFile) {
+        $out = Get-NativeOut "python" "$Root\tooling\official-data.py" `
+                   --track $t.ToLower() --expected-for $dataDir
+        $line = ($out -split "`n") |
+                Where-Object { $_ -match '^[abcd]\s+\S+\s+[0-9a-f]{64}$' } |
+                Select-Object -First 1
+        if ($line) {
+            $parts = $line -split '\s+'
+            $expected = $parts[2]
+            $expScale = $parts[1]
         }
     }
     if (-not $expected) {

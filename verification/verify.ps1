@@ -98,6 +98,26 @@ function Resolve-Runnable {
     return $staged
 }
 
+function Get-NativeValue {
+    # Run a native command and return its stdout, WITHOUT letting
+    # $ErrorActionPreference = "Stop" turn the command's STDERR into a
+    # terminating error. PowerShell 5.1 raises NativeCommandError for stderr on
+    # a native command, and this script stops on errors -- so a tool that writes
+    # a diagnostic to stderr killed the whole gate. official-data.py
+    # --expected-for prints "nomatch" there and exits 3, which meant that on a
+    # tree with no dataset (a clean clone) verify.ps1 aborted before it reported
+    # anything at all. Invoke-Native already existed for exactly this quirk; this
+    # is the same guard for a call whose stdout is needed.
+    param([string]$Exe, [string[]]$Arguments)
+    $eap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        return (& $Exe @Arguments 2>$null)
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+}
+
 function Get-ExpectedHash {
     param([string]$TrackId, [string]$DataDir)
 
@@ -112,14 +132,20 @@ function Get-ExpectedHash {
     # So ask the tool that owns the published table what the right answer is for
     # the bytes we actually have on disk. Its hash is the only reliable link
     # between a dataset and its expectation, and it is not duplicated here.
-    if (Test-Path $DataDir) {
-        $out = & python "$Root\tooling\official-data.py" --track $TrackId.ToLower() `
-                   --expected-for $DataDir 2>$null
-        if ($LASTEXITCODE -eq 0 -and $out) {
-            $parts = @($out)[0] -split '\s+'
-            if ($parts.Count -ge 3 -and $parts[2] -match '^[0-9a-f]{64}$') {
-                return @{ Hash = $parts[2]; Scale = $parts[1]; Source = "derived from the data on disk" }
-            }
+    # Guarded on the INPUT FILE rather than the directory: this script creates
+    # the directory a few lines earlier, so a directory test always passed.
+    $inFile = Join-Path $DataDir $TrackInfo[$TrackId].Input
+    if (Test-Path $inFile) {
+        $out = Get-NativeValue "python" @(
+            "$Root\tooling\official-data.py", "--track", $TrackId.ToLower(),
+            "--expected-for", $DataDir)
+        # Identify the answer by its SHAPE, not by an exit code: the tool prints
+        # "<track> <scale> <hash>" on success and nothing on stdout otherwise.
+        $line = @($out) | Where-Object { $_ -match '^[abcd]\s+\S+\s+[0-9a-f]{64}$' } |
+                Select-Object -First 1
+        if ($line) {
+            $parts = $line -split '\s+'
+            return @{ Hash = $parts[2]; Scale = $parts[1]; Source = "derived from the data on disk" }
         }
     }
 
