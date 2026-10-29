@@ -104,6 +104,15 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **`BRIEFS-FINAL-DESIGNS.md`** — the four critical routines in their final
+  pre-code form (P-A answer, hand-verified): rank selection with the
+  inclusive narrowing and the n=17-19 branch, the per-slot phrase matcher
+  with document-relative positions, the chunk walker whose parallel result
+  is used only when `cur == R[c]`, and the bidirectional search with lazy
+  labels, first-write touched tracking and 21-bit key packing. Carries the
+  verified vector results and the three behaviours to settle against the
+  oracle at H1.
+
 - **`99-PROMPT-PACK.md`** — the five prompts to run against a high-level
   model, in priority order: P-A implementation pseudocode + test vectors
   for the four critical modules (critical path, unblocks H1), P-B where the
