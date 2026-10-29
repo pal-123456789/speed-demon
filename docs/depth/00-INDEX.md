@@ -104,6 +104,14 @@ Each rung has a measurement gate (below). You do not climb with a red SHA.
 
 ## Files
 
+- **`BRIEFS-CRITICAL-MODULES.md`** — implementation-grade design briefs for the
+  modules where a wrong decision costs a whole track: A's 13-byte hour key,
+  grouping and nearest rank; B's byte-level tokeniser, phrase positions and
+  left-to-right eval; C's quote parity, record state machine and integer
+  cents; D's CSR build, bidirectional termination and scratch reset. Each
+  carries the contract, the invariants, the edge cases the tiny corpus
+  exercises, the pitfalls and a code-line budget against the reference S.
+
 - **`92-REFERENCE-PROFILES.md`** — MEASURED profiles of the organizers'
   references per phase (`tooling/profile-reference.py`), which overturn four
   of our documented assumptions: A's timestamp is 48.7% while its line parse
