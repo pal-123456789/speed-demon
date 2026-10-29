@@ -27,9 +27,14 @@ WHAT IT DOES
 
 Usage
 -----
-    python tooling/gen-fixtures.py --track C --rows 20000 --seed 7 --out verification/data/track-c
-    python tooling/gen-fixtures.py --all --out verification/data
-    python tooling/gen-fixtures.py --track C --adversarial   # tiny edge-case corpus
+    python tooling/gen-fixtures.py --all                       # -> verification/data-fixtures
+    python tooling/gen-fixtures.py --track C --rows 20000 --seed 7
+    python tooling/gen-fixtures.py --track C --adversarial      # -> verification/data-adversarial
+
+  These corpora are SYNTHETIC and are NOT the organizers' data. They exist to
+  catch overfitting and to exercise hostile shapes, and they must never be
+  written where a published expected-hash pin expects the official dataset --
+  see the guard in main() for why that is enforced rather than documented.
 """
 
 import argparse
@@ -398,10 +403,11 @@ def main() -> int:
     p.add_argument("--track", choices=["A", "B", "C", "D", "all"])
     p.add_argument("--all", action="store_true")
     p.add_argument("--out", default=None,
-                   help="output root; defaults to verification/data for the "
-                        "standard corpora and verification/data-adversarial for "
-                        "--adversarial (so hostile runs never clobber the data "
-                        "the expected-hash pins were made from)")
+                   help="output root; defaults to verification/data-fixtures for the "
+                        "synthetic corpora and verification/data-adversarial for "
+                        "--adversarial. Writing into verification/data, where the "
+                        "official dataset the expected-hash pins were made from "
+                        "lives, is refused unless --force is given")
     p.add_argument("--rows", type=int, default=20000)
     p.add_argument("--docs", type=int, default=3000)
     p.add_argument("--nodes", type=int, default=5000)
@@ -409,10 +415,30 @@ def main() -> int:
     p.add_argument("--seed", type=int, default=1)
     p.add_argument("--adversarial", action="store_true",
                    help="emit the tiny hand-crafted edge-case corpora")
+    p.add_argument("--force", action="store_true",
+                   help="allow writing into verification/data (destroys the official corpus)")
     args = p.parse_args()
 
     if args.out is None:
-        args.out = "verification/data-adversarial" if args.adversarial else "verification/data"
+        args.out = "verification/data-adversarial" if args.adversarial else "verification/data-fixtures"
+
+    # ── do not overwrite the official dataset ────────────────────────────────
+    # verification/data holds the organizers' seed-1 corpus, and the per-track
+    # .sha256 pins are the expected output FOR THAT DATA. These fixtures are a
+    # different dataset with no published hash. Writing them here silently
+    # replaces the official corpus: every correctness check then compares a
+    # synthetic fixture against an official pin, `--expected-for` stops being
+    # able to identify any scale at all, and the failure looks like a wrong
+    # answer rather than a missing dataset. The README used to recommend exactly
+    # that command, and it cost a full regeneration to notice.
+    _dest = Path(args.out).resolve()
+    if _dest == (Path.cwd() / "verification" / "data").resolve() and not args.force:
+        print("REFUSING to write synthetic fixtures into verification/data.")
+        print("  That directory holds the official seed-1 dataset the expected-hash")
+        print("  pins were made from; overwriting it makes every correctness check")
+        print("  meaningless. Use the default (verification/data-fixtures), or pass")
+        print("  --force if you really intend to destroy the official corpus.")
+        return 2
 
     targets = ["A", "B", "C", "D"] if (args.all or args.track in (None, "all")) else [args.track]
 

@@ -427,6 +427,48 @@ for t in tracks:
     check(f"{t}/PERF.md keeps the board-run table the judges check",
           "Board runs" in pf_text and "| Run ID |" in pf_text)
 
+# ── 18. the declared-dependency key matches what the official parser reads ─
+# Our tracks have no manifest, so D is 1 + `dependency_count` from
+# .speed-demon.toml -- that one key IS the whole D axis. The name is not ours to
+# choose: the organizers' dependencies.py reads it directly and their fixture
+# manifests use it. verification/pre-freeze.ps1 checked `declared_dependencies`
+# instead, a name that appears nowhere in their code, so it read -1 and failed
+# the D axis on a manifest that was already correct -- a freeze-day gate that
+# could never pass, whose own docstring invited "fixing" a correct file.
+dep_py = (ROOT / "reference/official/harness/dependencies.py").read_text(encoding="utf-8")
+key_m = re.search(r'declaration\.get\(\s*"([a-z_]+)"\s*\)', dep_py)
+check("the official parser's declared-dependency key is discoverable", key_m is not None)
+DEP_KEY = key_m.group(1) if key_m else "dependency_count"
+check("the official key is dependency_count", DEP_KEY == "dependency_count", DEP_KEY)
+for t in tracks:
+    tn = (ROOT / t / ".speed-demon.toml").read_text(encoding="utf-8")
+    check(f"{t}/.speed-demon.toml declares {DEP_KEY}",
+          re.search(rf"^{DEP_KEY}\s*=\s*\d+\s*$", tn, re.M) is not None)
+# And no gate that reads the manifest may invent a different name for it.
+for rel in ("verification/pre-freeze.ps1", "verification/verify.ps1",
+            "verification/bench.ps1", "verification/harness/src/lockdown.rs"):
+    p = ROOT / rel
+    if not p.is_file():
+        continue
+    ptxt = p.read_text(encoding="utf-8", errors="replace")
+    if "dependency" in ptxt.lower():
+        check(f"{rel} uses the official key, not an invented one",
+              "declared_dependencies" not in ptxt)
+
+# ── 19. every Python tool forces UTF-8 stdio ──────────────────────────────
+# On Windows the default stdout code page is cp1252, so a tool printing an
+# em-dash or a box-drawing character emits mojibake -- and mojibake in a log is
+# indistinguishable from real output. tooling/add_utf8_stdio.py applies the
+# snippet, but it had been run over most tools rather than all of them:
+# k_whatif.py (the K calculator whose numbers end up in the docs), _shell.py and
+# official-axes.py were all still unpatched, so the fix that was supposed to be
+# global was in fact partial and nothing noticed.
+stdio_missing = [p.name for p in sorted(TOOLING.glob("*.py"))
+                 if 'reconfigure(encoding="utf-8"' not in p.read_text(encoding="utf-8", errors="replace")]
+check("every Python tool forces UTF-8 stdio", not stdio_missing, ", ".join(stdio_missing))
+check("the UTF-8 stdio fixer is present so a new tool can be patched",
+      (TOOLING / "add_utf8_stdio.py").is_file())
+
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:
     for f in FAILS:

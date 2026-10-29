@@ -79,17 +79,57 @@ function Invoke-Native {
     return [int]$LASTEXITCODE
 }
 
+function Resolve-Runnable {
+    # Windows executes a PE only when it carries an executable extension. The
+    # host build is deliberately named `run`, because the Dockerfile needs
+    # `COPY --from=build /src/run /app/run` on Linux, and rustc on Windows writes
+    # exactly `run` plus `run.pdb` -- so on this host the binary cannot be
+    # executed at all: PowerShell's call operator falls through to the shell
+    # handler and sets no exit code, and cmd reports "not recognized".
+    #
+    # Stage a byte-identical copy under a name the OS accepts. The copy does not
+    # change the program, so the hash gate is unaffected.
+    param([string]$Path)
+    if ($Path -match '\.exe$') { return $Path }
+    if ($env:OS -ne 'Windows_NT') { return $Path }
+    $track = Split-Path (Split-Path $Path -Parent) -Leaf
+    $staged = Join-Path ([System.IO.Path]::GetTempPath()) "sd-$track-run.exe"
+    Copy-Item -LiteralPath $Path -Destination $staged -Force
+    return $staged
+}
+
 function Get-ExpectedHash {
-    param([string]$TrackId)
-    $candidates = @(
-        "$Root\$($TrackInfo[$TrackId].Name)\verification\expected\$($TrackInfo[$TrackId].Output).sha256",
-        "$Root\$($TrackInfo[$TrackId].Name)\verification\expected\sample.sha256"
-    )
-    foreach ($c in $candidates) {
-        if (Test-Path $c) {
-            $raw = (Get-Content $c -Raw).Trim()
-            # accept "<hash>  <filename>" or a bare hash
-            if ($raw -match '^([0-9a-fA-F]{64})') { return $Matches[1].ToLower() }
+    param([string]$TrackId, [string]$DataDir)
+
+    # The expected hash is SCALE-SPECIFIC: seed 1 at tiny, sample and full give
+    # three different correct answers, and the committed pin holds exactly one
+    # of them. Comparing a run against that pin while the corpus on disk is a
+    # different scale fails no matter how correct the implementation is -- and
+    # that is what this script used to do (Track A carried tiny data against the
+    # sample pin, B/C/D carried sample data against the sample pin, and the full
+    # corpus the board actually uses matches neither).
+    #
+    # So ask the tool that owns the published table what the right answer is for
+    # the bytes we actually have on disk. Its hash is the only reliable link
+    # between a dataset and its expectation, and it is not duplicated here.
+    if (Test-Path $DataDir) {
+        $out = & python "$Root\tooling\official-data.py" --track $TrackId.ToLower() `
+                   --expected-for $DataDir 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            $parts = @($out)[0] -split '\s+'
+            if ($parts.Count -ge 3 -and $parts[2] -match '^[0-9a-f]{64}$') {
+                return @{ Hash = $parts[2]; Scale = $parts[1]; Source = "derived from the data on disk" }
+            }
+        }
+    }
+
+    # Fall back to the committed pin, but name it as a pin so a scale mismatch
+    # can never be mistaken for a wrong answer.
+    $c = "$Root\$($TrackInfo[$TrackId].Name)\verification\expected\$($TrackInfo[$TrackId].Output).sha256"
+    if (Test-Path $c) {
+        $raw = (Get-Content $c -Raw).Trim()
+        if ($raw -match '^([0-9a-fA-F]{64})') {
+            return @{ Hash = $Matches[1].ToLower(); Scale = "unknown scale"; Source = "committed pin file" }
         }
     }
     return $null
@@ -112,18 +152,18 @@ foreach ($t in $targets) {
     $info = $TrackInfo[$t]
     Write-Head "TRACK $t ($($info.Name))"
 
-    # locate a built binary: cargo target dir first, then /app/bin
+    # locate the host build (run.exe first — see Resolve-Runnable for why the
+    # extensionless `run` cannot be executed on Windows at all)
     $bin = $null
-    $cands = @(
-        "$Root\$($info.Name)\run",
-        "/app/run"
-    )
-    foreach ($c in $cands) { if (Test-Path $c) { $bin = $c; break } }
+    foreach ($c in @("$Root\$($info.Name)\run.exe", "$Root\$($info.Name)\run", "/app/run")) {
+        if (Test-Path $c -PathType Leaf) { $bin = $c; break }
+    }
     if (-not $bin) {
-        Write-Bad "binary $($info.Binary) not found — run 'cargo build --release' first"
+        Write-Bad "no built binary in $($info.Name) — build it with: cd $($info.Name); sh build.sh   (or: sh tooling/ci.sh)"
         $overallOk = $false
         continue
     }
+    $bin = Resolve-Runnable $bin
     Write-Info "binary: $bin"
 
     # data + output dirs
@@ -134,15 +174,22 @@ foreach ($t in $targets) {
     }
     $inPath = Join-Path $dataDir $info.Input
     if (-not (Test-Path $inPath)) {
-        Write-Warn "no sample data at $inPath — create it with verification/gen-fixtures.py"
+        Write-Warn "no data at $inPath — generate a known dataset with:"
+        Write-Warn "  python tooling\official-data.py --track $($t.ToLower()) --scale sample"
     }
 
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     Get-ChildItem $outDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
 
-    $expected = Get-ExpectedHash -TrackId $t
-    if ($expected) { Write-Info "expected SHA-256: $expected" }
-    else { Write-Warn "no expected hash pinned yet (SHA gate cannot PASS until the Oct 30 sample ships)" }
+    $expected = Get-ExpectedHash -TrackId $t -DataDir $dataDir
+    if ($expected) {
+        Write-Info "expected SHA-256: $($expected.Hash)"
+        Write-Info "                  [$($expected.Scale) — $($expected.Source)]"
+    }
+    else {
+        Write-Warn "no published hash matches the data in $dataDir — G1 cannot be verified at all"
+        Write-Warn "generate a known dataset first: python tooling\official-data.py --track $($t.ToLower()) --scale sample"
+    }
 
     # ── run N times ──
     $times = @()
@@ -156,8 +203,13 @@ foreach ($t in $targets) {
         $env:SD_DATA_DIR = $dataDir
         $env:SD_OUT_DIR  = $outDir
         $env:TRACK       = $t
-        $null = Invoke-Native $bin @()
-        $code = $LASTEXITCODE
+        # The harness times from exec to exit and treats a non-zero exit as a
+        # failed run, so this has to be the REAL exit code. The function returns
+        # it; `$LASTEXITCODE` is not reliable across the function boundary, and
+        # since `$null -ne 0` is TRUE in PowerShell, discarding the return value
+        # made every run look like a non-zero exit and aborted the gate before
+        # it ever checked a hash.
+        $code = Invoke-Native $bin @()
         $sw.Stop()
         $times += $sw.Elapsed.TotalSeconds
 
@@ -180,14 +232,14 @@ foreach ($t in $targets) {
 
     # ── G1 CORRECTNESS ──
     if ($expected) {
-        $allMatch = ($hashes | Where-Object { $_ -ne $expected }).Count -eq 0
-        if ($allMatch) { Write-Ok "G1 correctness: SHA-256 matches on all $($hashes.Count) runs" }
+        $allMatch = ($hashes | Where-Object { $_ -ne $expected.Hash }).Count -eq 0
+        if ($allMatch) { Write-Ok "G1 correctness: SHA-256 matches on all $($hashes.Count) runs ($($expected.Scale))" }
         else {
-            Write-Bad "G1 correctness: SHA mismatch (got $($hashes[0]))"
+            Write-Bad "G1 correctness: SHA mismatch (got $($hashes[0]), expected $($expected.Hash) at $($expected.Scale) scale)"
             $overallOk = $false
         }
     } else {
-        Write-Warn "G1 correctness: UNVERIFIABLE (no expected hash pinned)"
+        Write-Warn "G1 correctness: UNVERIFIABLE (the data on disk matches no published dataset)"
     }
 
     # ── DETERMINISM (correctness gate applies to all 5 runs) ──

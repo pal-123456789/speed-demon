@@ -13,6 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "reference" / "official" / "harness"))
 import dependencies as d  # noqa: E402
+# Force UTF-8 on stdio. On Windows the default code page mangles every
+# non-ASCII character this tool prints, which corrupts logs and makes
+# mojibake indistinguishable from real output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 bad = 0
 for t in "abcd":

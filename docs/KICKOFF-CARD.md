@@ -156,7 +156,7 @@ site) — a README or a GitHub Pages repo does not count — must mention Hackat
 Raptors, and must link the repository.
 
 The raw material is already banked in
-[WRITEUP-EVIDENCE.md](WRITEUP-EVIDENCE.md): eight real findings from this
+[WRITEUP-EVIDENCE.md](WRITEUP-EVIDENCE.md): twelve real findings from this
 repository, each with the measurement that proves it and a note on why it stayed
 invisible. Add to that file as the window produces more, then write the post
 from it. The deadline is after the freeze, so this costs no window time.

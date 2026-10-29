@@ -10,12 +10,12 @@
 
     The checks:
       1.  offline build from a clean checkout (no network)
-      2.  sample SHA-256 green (the correctness gate)
+      2.  SHA-256 green at the scale of the data on disk (the correctness gate)
       3.  byte-identical output across 10 runs (nondeterminism = gate fail)
       4.  no scaffold sentinel left in any track
       5.  every required file present per track
           (Dockerfile, PERF.md, README.md, .speed-demon.toml, src/)
-      6.  D-axis honesty: declared_dependencies == 0 and no vendored crates
+      6.  D-axis honesty: dependency_count == 0 and no vendored crates
       7.  exactly one output file per track
       8.  peak memory and wall time under the safety floors
       9.  the repo is clean and the final commit is recorded
@@ -74,6 +74,23 @@ function Invoke-Native {
         $ErrorActionPreference = $eap
     }
     return [int]$LASTEXITCODE
+}
+
+function Resolve-Runnable {
+    # Windows executes a PE only when it carries an executable extension. The
+    # host build is named `run` because the Dockerfile needs
+    # `COPY --from=build /src/run /app/run` on Linux, and rustc on Windows writes
+    # exactly `run` plus `run.pdb` -- so on this host the binary cannot be run at
+    # all: PowerShell's call operator falls through to the shell handler and sets
+    # no exit code, and cmd reports "not recognized". Stage a byte-identical copy
+    # under a name the OS accepts; the program is unchanged.
+    param([string]$Path)
+    if ($Path -match '\.exe$') { return $Path }
+    if ($env:OS -ne 'Windows_NT') { return $Path }
+    $track = Split-Path (Split-Path $Path -Parent) -Leaf
+    $staged = Join-Path ([System.IO.Path]::GetTempPath()) "sd-$track-run.exe"
+    Copy-Item -LiteralPath $Path -Destination $staged -Force
+    return $staged
 }
 
 # Same, but returns the command's stdout as a trimmed string. The exit code
@@ -158,8 +175,18 @@ foreach ($t in $targets) {
     $tomlPath = "$dir\.speed-demon.toml"
     if (Test-Path $tomlPath) {
         $toml = Get-Content $tomlPath -Raw
-        $decl = if ($toml -match 'declared_dependencies\s*=\s*(\d+)') { [int]$Matches[1] } else { -1 }
-        Check "D axis: declared_dependencies == 0" ($decl -eq 0) "declared=$decl"
+        # The declared-dependency key is `dependency_count`. That is what the
+        # organizers' own parser reads -- reference/official/harness/
+        # dependencies.py does `declaration.get("dependency_count")` -- and it
+        # is the key their fixture manifests use. This gate previously looked for
+        # a key name that appears NOWHERE in the official code, so it read -1
+        # every time and failed the D axis on a manifest that was already
+        # correct. At freeze time that reports a dishonest D axis for a perfect
+        # one, and invites "fixing" the manifest into a wrong key. The invented
+        # name is deliberately not repeated here, because
+        # tooling/check-consistency.py asserts it appears in no manifest reader.
+        $decl = if ($toml -match 'dependency_count\s*=\s*(\d+)') { [int]$Matches[1] } else { -1 }
+        Check "D axis: dependency_count == 0" ($decl -eq 0) "declared=$decl"
         Check "D axis: no Cargo.toml in the track folder" (-not (Test-Path "$dir\Cargo.toml")) "rustc-only build, zero manifest deps"
     }
 
@@ -172,13 +199,18 @@ foreach ($t in $targets) {
     Check "no scaffold sentinel in source" (-not $hasSentinel) "a stub must never reach the freeze"
 
     # ── 2/3/7/8. functional gates ──
-    $bin = "$Root\track-$t\run"
-    if (-not (Test-Path $bin -PathType Leaf)) { $bin = "/app/run" }
+    # run.exe is probed first: see Resolve-Runnable for why the extensionless
+    # `run` that build.sh emits on Windows cannot be executed here at all.
+    $bin = $null
+    foreach ($c in @("$Root\track-$t\run.exe", "$Root\track-$t\run", "/app/run")) {
+        if (Test-Path $c -PathType Leaf) { $bin = $c; break }
+    }
 
-    if (-not (Test-Path $bin -PathType Leaf)) {
+    if (-not $bin) {
         Check "binary built" $false "run: sh track-$t/build.sh"
         continue
     }
+    $bin = Resolve-Runnable $bin
     Check "binary built" $true (Split-Path $bin -Leaf)
 
     $dataDir = "$Root\verification\data\track-$t"
@@ -186,16 +218,28 @@ foreach ($t in $targets) {
     New-Item -ItemType Directory -Force -Path $dataDir, $outDir | Out-Null
 
     $expected = $null
-    $expFile = "$dir\verification\expected\$($info.Output).sha256"
-    if (Test-Path $expFile) {
-        $raw = (Get-Content $expFile -Raw).Trim()
-        if ($raw -match '^([0-9a-fA-F]{64})') { $expected = $Matches[1].ToLower() }
+    $expScale = "committed pin"
+    # The expected hash is SCALE-SPECIFIC (tiny, sample and full seed 1 give
+    # three different correct answers) and the committed pin holds only one of
+    # them, while the corpus on disk may be a different scale. Derive it from
+    # the bytes actually present, and only fall back to the pin.
+    if (Test-Path $dataDir) {
+        $out = & python "$Root\tooling\official-data.py" --track $t.ToLower() --expected-for $dataDir 2>$null
+        if ($LASTEXITCODE -eq 0 -and $out) {
+            $parts = @($out)[0] -split '\s+'
+            if ($parts.Count -ge 3 -and $parts[2] -match '^[0-9a-f]{64}$') {
+                $expected = $parts[2]
+                $expScale = $parts[1]
+            }
+        }
     }
     if (-not $expected) {
-        $expFile2 = "$dir\verification\expected\sample.sha256"
-        if (Test-Path $expFile2) {
-            $raw = (Get-Content $expFile2 -Raw).Trim()
-            if ($raw -match '^([0-9a-fA-F]{64})') { $expected = $Matches[1].ToLower() }
+        foreach ($expFile in @("$dir\verification\expected\$($info.Output).sha256",
+                               "$dir\verification\expected\sample.sha256")) {
+            if (Test-Path $expFile) {
+                $raw = (Get-Content $expFile -Raw).Trim()
+                if ($raw -match '^([0-9a-fA-F]{64})') { $expected = $Matches[1].ToLower(); break }
+            }
         }
     }
 
@@ -230,9 +274,9 @@ foreach ($t in $targets) {
 
         # 2. correctness
         if ($expected) {
-            Check "sample SHA-256 green" ($uniq[0] -eq $expected) "expected=$($expected.Substring(0,12)) got=$($uniq[0].Substring(0,12))"
+            Check "SHA-256 green at $expScale scale" ($uniq[0] -eq $expected) "expected=$($expected.Substring(0,12)) got=$($uniq[0].Substring(0,12))"
         } else {
-            Check "sample SHA-256 green" $true "NO EXPECTED HASH PINNED — cannot be verified" -Skip
+            Check "SHA-256 green" $true "NO PUBLISHED HASH MATCHES THE DATA ON DISK — cannot be verified" -Skip
         }
 
         # 8. safety floors

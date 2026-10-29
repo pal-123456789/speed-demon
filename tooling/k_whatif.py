@@ -27,6 +27,13 @@ import math
 import os
 import sys
 
+# Force UTF-8 on stdio. On Windows the default code page mangles every
+# non-ASCII character this tool prints, which corrupts logs and makes
+# mojibake indistinguishable from real output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from k_calc import (  # noqa: E402  (reuse the single source of truth)
     AXES,

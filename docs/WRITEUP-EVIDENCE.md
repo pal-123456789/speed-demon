@@ -169,6 +169,139 @@ deliberately, confirm the fix flips it, and then confirm the fix does not change
 anything it should not have — the Docker output hash was byte-identical, the S
 axis stayed at 141 lines, and the hostile corpus still had both terminator kinds.
 
+## 9. The freeze-day gate that could never pass, because it checked an invented key
+
+The pre-freeze lockdown read the declared dependency count from the track
+manifest using a key name that **does not exist anywhere in the organizers'
+code**:
+
+```
+[FAIL] D axis: declared_dependencies == 0  declared=-1
+```
+
+The real key is `dependency_count` — that is what their `dependencies.py` reads
+with `declaration.get("dependency_count")`, and what their own fixture manifests
+use. Ours used it correctly. So the gate read `-1`, failed, and would have done
+so at code freeze on a **perfect** manifest.
+
+That is worse than a false alarm. Its own docstring named the invented key, so
+the natural response to a red freeze gate is to "fix" the manifest into the
+wrong key — breaking the D axis to satisfy a gate that was already wrong.
+
+The class is worth naming: **a gate that has never once run against the thing it
+claims to check**. This one had a sibling in the same script that could not
+execute the binary at all (§10), so the whole script had evidently never
+completed a successful pass.
+
+## 10. Windows cannot execute the binary that rustc produces
+
+`build.sh` compiles with `-o run`, because inside the container the Dockerfile
+needs exactly that path:
+
+```
+COPY --from=build /src/run /app/run
+```
+
+On Linux that is fine. On Windows, rustc writes `run` and `run.pdb` — **not**
+`run.exe` — and Windows executes a PE only when it carries an executable
+extension. So on the development host:
+
+```
+PS> & .\track-a\run
+PS> $LASTEXITCODE        # empty — the call operator fell through to the shell
+                         # handler, and the process never ran
+CMD> track-a\run
+'track-a\run' is not recognized as an internal or external command
+```
+
+Staged as `run.exe`, the identical bytes run fine. Three local gate scripts
+(`verify.ps1`, `bench.ps1`, `pre-freeze.ps1`) all pointed at the extensionless
+file, and one of them additionally did this:
+
+```powershell
+$null = Invoke-Native $bin @()
+if ($LASTEXITCODE -ne 0) { ... }     # $null -ne 0 is TRUE in PowerShell
+```
+
+Discarding the return value and reading the automatic variable meant **every run
+looked like a non-zero exit**, so the script aborted before hashing anything and
+could never pass. The symptom was a failure message with an empty exit code:
+`run 1 exited with code  (non-zero exit = failed run)`.
+
+## 11. The README command that destroyed the dataset it was verifying against
+
+`python tooling/gen-fixtures.py --all` — documented as command number six in the
+README — defaulted its output to `verification/data`, which is where the
+**organizers' seed-1 corpus** lives and what the per-track `.sha256` pins are the
+expected output *for*.
+
+One run replaced it:
+
+```
+track-c/records.csv    19,846,456 B  ->  947,339 B
+track-c/regions.csv     2,177,777 B  ->      226 B
+track-d/graph.txt       8,194,650 B  ->  288,872 B
+```
+
+The tool's own help text claimed the design prevented this ("so hostile runs
+never clobber the data the expected-hash pins were made from") — but that
+protection covered only `--adversarial`. The standard path wrote straight over
+the official corpus.
+
+**Why the damage was so quiet.** Every correctness check still *ran*. It just
+compared a synthetic fixture against an official pin and reported a mismatch, so
+the failure read as *your implementation is wrong* rather than *your dataset is
+gone*. Detecting it required asking the one question nothing had asked: does the
+data on disk still match a published dataset at all?
+
+The fix is a refusal, not a note. `gen-fixtures.py` now writes to
+`verification/data-fixtures/` by default and exits 2 with an explanation if
+asked to write into `verification/data`. A CI gate asserts that whatever is in
+`verification/data` is identifiable as a published scale, so a fixture that
+replaces the corpus fails immediately instead of masquerading as a wrong answer.
+
+## 12. The fixer that broke the file it was fixing
+
+`add_utf8_stdio.py` inserts a UTF-8 stdio preamble into every tool. It found its
+insertion point with a line regex:
+
+```python
+r"^(?:import .*|from .* import .*)$"
+```
+
+For a parenthesised import that matches the **first line only**, so the snippet
+was spliced inside the parentheses:
+
+```python
+from k_calc import (  # noqa: E402
+# Force UTF-8 on stdio. ...
+if hasattr(sys.stdout, "reconfigure"):
+    AXES,          # <- the import's own arguments, now orphaned
+```
+
+It silently rewrote `k_whatif.py` — the K calculator — into a file that does not
+parse. The generalisable lesson is small and sharp: **a tool that edits source
+should compile its own output before writing it.** The version now derives the
+insertion point from the AST (`end_lineno` of the last top-level import) and
+refuses to write a file that fails to parse, and the negative control for it is a
+file with a deliberately awkward multi-line import.
+
+---
+
+## The through-line
+
+Every entry in this bank is the same failure wearing different clothes: **a
+check that cannot fail correctly.** Line endings that normalise to the same
+bytes. A build context git cleans but docker does not. A compiler flag that
+reports success while doing nothing. A gate that cannot tell "absent" from
+"broken". A manifest key that exists nowhere. A dataset that no longer matches
+any published hash. A fixer that never parsed what it wrote.
+
+So the method that actually found them was not reading the code harder. It was,
+for each claim: **find the one command that would prove it, run that command, and
+then deliberately break it to confirm the checker notices.** That is what turned
+each finding into a gate, and each gate into a negative control.
+
 ---
 
 ## Suggested shape for the post

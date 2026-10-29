@@ -118,6 +118,32 @@ def sha(p: Path) -> str:
     return h.hexdigest()
 
 
+def detect_scale(track: str, data_dir: Path):
+    """Return (scale, expected_output_hash) for the dataset actually on disk.
+
+    The expected hash is scale-specific: seed 1 at tiny, sample and full give
+    three different correct answers. The per-track committed pin holds exactly
+    ONE of them, so comparing a run against it is only valid at that scale --
+    and verify.ps1/bench.ps1 did precisely that while the corpus on disk was a
+    different scale, which fails no matter how correct the implementation is.
+
+    The input file's own hash is the only reliable link to the right
+    expectation, and it is already in the table above, so nothing is duplicated
+    here. Returns (None, None) when no published scale matches what is on disk.
+    """
+    table = PUBLISHED.get(track, {})
+    outname = OUTPUT[track]
+    for scale, files in table.items():
+        expected = files.get(outname)
+        inputs = {n: h for n, h in files.items() if n != outname}
+        if not inputs or not expected:
+            continue
+        if all((data_dir / n).is_file() and sha(data_dir / n) == h
+               for n, h in inputs.items()):
+            return scale, expected
+    return None, None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--track", choices=[*TRACKS, "all"], default="all")
@@ -128,7 +154,29 @@ def main(argv=None) -> int:
     ap.add_argument("--dest", help="install root (default verification/data)")
     ap.add_argument("--save-expected", action="store_true",
                     help="save the reference output beside the data as expected-<output>")
+    ap.add_argument("--expected-for", metavar="DIR",
+                    help="print the published expected hash for the dataset in DIR, "
+                         "and the scale it is (exit 3 if no published scale matches)")
     args = ap.parse_args(argv)
+
+    if args.expected_for:
+        # One line of machine-readable output, so a shell or PowerShell gate can
+        # ask "what is the right answer for the bytes on disk?" instead of
+        # hardcoding a hash that is only correct at one scale.
+        #   --track a   DIR is the data dir itself      (e.g. verification/data/track-a)
+        #   --track all DIR is a root holding track-*/  (e.g. verification/data)
+        d = Path(args.expected_for)
+        single = args.track != "all"
+        for t in ([args.track] if single else list(TRACKS)):
+            data = d if single else d / f"track-{t}"
+            scale, expected = detect_scale(t, data)
+            if scale:
+                print(f"{t} {scale} {expected}")
+                if single:
+                    return 0
+            else:
+                print(f"{t} nomatch -", file=sys.stderr)
+        return 0 if not single else 3
 
     tracks = list(TRACKS) if args.track == "all" else [args.track]
     failures = 0

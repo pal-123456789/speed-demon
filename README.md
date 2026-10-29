@@ -89,8 +89,13 @@ python tooling\k_calc.py --t 30 --m 15 --s 0.62 --d 1
 # 5. See where the S and D axes stand
 python tooling\measure_axes.py --all
 
-# 6. Generate anti-overfit fixtures
+# 6. Generate anti-overfit fixtures (synthetic; written to verification\data-fixtures,
+#    never into verification\data, which holds the official dataset the pins match)
 python tooling\gen-fixtures.py --all
+
+# 7. Load a known dataset so the correctness pins mean something
+#    (any scale: tiny/sample/full — the expected hash is derived from the bytes)
+python tooling\official-data.py --track all --scale sample
 ```
 
 > **Note on `pwsh` vs `powershell`.** These scripts run under Windows

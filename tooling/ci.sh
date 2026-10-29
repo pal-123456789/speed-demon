@@ -257,6 +257,28 @@ else
   fail "the official D measurement does not agree with our declaration"
 fi
 
+step "OFFICIAL DATASET INTEGRITY (verification/data is the organizers' corpus, not fixtures)"
+# The expected hash is the hash of the OFFICIAL dataset at one scale, so
+# whatever sits in verification/data must BE that dataset. tooling/
+# gen-fixtures.py used to default its synthetic corpora to this very directory
+# (and the README recommended the command), which silently replaced the official
+# corpus with unrelated fixtures: every correctness comparison then pitted a
+# fixture against an official pin, and the failure read as a wrong answer rather
+# than a missing dataset. This asks the published table to identify what is on
+# disk, and fails if it cannot.
+if [ ! -d verification/data ]; then
+  skip "no verification/data here — nothing to check (a clean clone has none)"
+else
+  SCALES="$("$PY" tooling/official-data.py --track all --expected-for verification/data 2>&1 || true)"
+  MATCHED="$(printf '%s\n' "$SCALES" | grep -cE '^[abcd] (tiny|sample|full) ' || true)"
+  if [ "$MATCHED" = "4" ]; then
+    ok "verification/data is a published dataset at all four tracks ($(printf '%s\n' "$SCALES" | awk '{print $2}' | sort -u | tr '\n' ' '))"
+  else
+    printf '%s\n' "$SCALES" | sed 's/^/  /'
+    fail "verification/data matches no published dataset — synthetic fixtures have replaced the official corpus (regenerate: python tooling/official-data.py --track all --scale sample)"
+  fi
+fi
+
 step "ORACLE CONFORMANCE (our data is accepted by the official references)"
 # The corpora are GENERATED, not committed: hundreds of megabytes, reproducible
 # from the public generators via tooling/official-data.py. A fresh clone has
@@ -555,6 +577,55 @@ if "$PY" tooling/gen_docs.py --check >/tmp/sd-gendocs.txt 2>&1; then
 else
   tail -12 /tmp/sd-gendocs.txt | sed 's/^/  /'
   fail "generated docs are stale — run: python tooling/gen_docs.py (it rewrites only the marked region of PERF.md, so hand-written rows and prose are preserved)"
+fi
+
+# ── 12. the PowerShell gate runners must actually RUN the binary ──────────
+# verification/verify.ps1, bench.ps1 and pre-freeze.ps1 are the documented local
+# scoring-box replicas, and all three were broken at once in ways that no parser
+# or linter can see:
+#   * verify.ps1 discarded Invoke-Native's return value and then read
+#     $LASTEXITCODE. Since `$null -ne 0` is TRUE in PowerShell, every run looked
+#     like a non-zero exit, so the script aborted before checking a single hash
+#     and could never pass.
+#   * rustc on Windows writes the host binary as `run` (not run.exe) because the
+#     Dockerfile needs that exact name inside Linux -- and Windows executes a PE
+#     only when it has an executable extension, so neither PowerShell nor cmd
+#     could run it at all.
+#   * the expected hash was pinned at one scale while the corpus on disk was
+#     another, so even a correct implementation failed the correctness gate.
+# This runs one for real and requires it to reach the hashing stage.
+step "POWERSHELL GATES EXECUTE THE TRACK BINARY (verify.ps1 really runs it)"
+PSBIN="$(command -v pwsh 2>/dev/null || command -v powershell 2>/dev/null)"
+if [ -z "$PSBIN" ]; then
+  skip "no PowerShell on this host"
+elif [ "$FAST" = "1" ]; then
+  skip "skipped (--fast)"
+else
+  for t in a b c d; do
+    TU="$(printf '%s' "$t" | tr '[:lower:]' '[:upper:]')"
+    "$PSBIN" -NoProfile -ExecutionPolicy Bypass -File verification/verify.ps1 \
+        -Track "$TU" -Runs 1 >/tmp/sd-vps-$t.txt 2>&1 || true
+    if grep -q 'determinism:' /tmp/sd-vps-$t.txt; then
+      ok "verify.ps1 track $TU ran the binary and hashed its output"
+    else
+      tail -6 /tmp/sd-vps-$t.txt | sed 's/^/  /'
+      fail "verify.ps1 track $TU never reached the hash gate — it cannot execute the binary"
+    fi
+  done
+fi
+
+# ── 13. the K arithmetic quoted in the documentation ──────────────────────
+# Every strategy decision in this project is expressed as "worth X points of
+# K", and a wrong K in a doc propagates into a plan and from the plan into code.
+# tooling/check_doc_k.py treats the arithmetic in the docs as testable code --
+# and until now it was referenced by nothing, so it had never run in CI.
+step "K ARITHMETIC IN THE DOCS (tooling/check_doc_k.py)"
+if "$PY" tooling/check_doc_k.py >/tmp/sd-dock.txt 2>&1; then
+  grep -E 'checked|mismatch' /tmp/sd-dock.txt | tail -2 | sed 's/^/  /'
+  ok "every K value quoted in the documentation recomputes correctly"
+else
+  tail -12 /tmp/sd-dock.txt | sed 's/^/  /'
+  fail "a K value in the documentation does not match the frozen formula"
 fi
 
 printf '\n%s\n' "============================================================"

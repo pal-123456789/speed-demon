@@ -48,6 +48,8 @@ check.py
 # Verification scratch and generated fixtures: reproducible from the public
 # generators, and large.
 verification/data/
+verification/data-full/
+verification/data-fixtures/
 verification/data2/
 verification/tmp/
 verification/tmp2/

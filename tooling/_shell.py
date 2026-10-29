@@ -22,6 +22,13 @@ import os
 import shutil
 import sys
 from pathlib import Path
+# Force UTF-8 on stdio. On Windows the default code page mangles every
+# non-ASCII character this tool prints, which corrupts logs and makes
+# mojibake indistinguishable from real output.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 _CANDIDATES = (
     r"C:\Program Files\Git\bin\sh.exe",

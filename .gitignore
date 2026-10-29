@@ -18,6 +18,11 @@
 # rather than in %TEMP% so a Windows Disk Cleanup cannot delete the corpus
 # mid-window. Used by `python check.py <track> --data verification/data-full/track-<track>`.
 /verification/data-full/
+# Synthetic anti-overfit fixtures (tooling/gen-fixtures.py). Deliberately NOT
+# verification/data: that directory holds the organizers' seed-1 corpus, which
+# the per-track .sha256 pins are the expected output for, and these fixtures are
+# a different dataset with no published hash.
+/verification/data-fixtures/
 /verification/adversarial/
 *.out
 

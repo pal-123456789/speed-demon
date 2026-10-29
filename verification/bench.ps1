@@ -70,19 +70,39 @@ function Get-TrimmedMean {
     return [math]::Round((($s[1..($s.Count-2)] | Measure-Object -Average).Average), 4)
 }
 
+function Resolve-Runnable {
+    # Windows executes a PE only when it carries an executable extension. The
+    # host build is named `run` because the Dockerfile needs
+    # `COPY --from=build /src/run /app/run` on Linux, and rustc on Windows writes
+    # exactly `run` plus `run.pdb` -- so on this host the binary cannot be run at
+    # all: PowerShell's call operator falls through to the shell handler and sets
+    # no exit code, and cmd reports "not recognized". Stage a byte-identical copy
+    # under a name the OS accepts; the program is unchanged.
+    param([string]$Path)
+    if ($Path -match '\.exe$') { return $Path }
+    if ($env:OS -ne 'Windows_NT') { return $Path }
+    $track = Split-Path (Split-Path $Path -Parent) -Leaf
+    $staged = Join-Path ([System.IO.Path]::GetTempPath()) "sd-$track-run.exe"
+    Copy-Item -LiteralPath $Path -Destination $staged -Force
+    return $staged
+}
+
 $dataDir = "$Root\verification\data\track-$Track"
 $outDir  = "$Root\verification\out\track-$Track"
 New-Item -ItemType Directory -Force -Path $dataDir, $outDir | Out-Null
 
 # -PathType Leaf matters: Test-Path returns TRUE for a directory, so without it
 # a missing binary would silently select a directory path and fail obscurely
-# when executed.
+# when executed. run.exe is checked first -- see Resolve-Runnable.
 $bin = "$Root\track-$Track\run"
-if (-not (Test-Path $bin -PathType Leaf)) { $bin = "/app/run" }
+foreach ($c in @("$Root\track-$Track\run.exe", "$Root\track-$Track\run", "/app/run")) {
+    if (Test-Path $c -PathType Leaf) { $bin = $c; break }
+}
 if (-not (Test-Path $bin -PathType Leaf)) {
     Write-Host "  [FAIL] binary not found — run: sh track-$Track/build.sh" -ForegroundColor Red
     exit 1
 }
+$bin = Resolve-Runnable $bin
 
 Write-Host "`n=== BENCH: Track $Track ($($info.Name)) ===" -ForegroundColor Cyan
 Write-Host "binary : $bin" -ForegroundColor Gray
