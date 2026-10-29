@@ -236,3 +236,56 @@ including the driver; justify every line above 43.
 | C all | same with `--track c` (the worked example is in the corpus) |
 | D all | same with `--track d` |
 | Any | `.\tooling\run.ps1 determinism-check.sh all` (36 configs × 3 runs) and `.\tooling\run.ps1 ci` |
+
+---
+
+# CORRECTIONS — from the hostile review (accepted 20 of 21, before any code)
+
+Every item below was verified against the specs and the oracle before being
+accepted. These are the bugs that would each have cost a track's SHA gate.
+
+## Correctness (accepted, must be implemented)
+
+| # | Failure it found | The fix now in the design |
+|---|---|---|
+| **A1** | Percentile narrowing: for n = 17–19, `k95 == k99`, so selecting inside `v[..k99-1]` is out of range (panics, and n ≤ 16 never hits it because those are fully sorted). | Narrow **inclusively** (`v[..k99]`) and reuse the p99 value when `k95 == k99`. The acceptance test sweeps **n = 1..200** against `sorted[(p*n+99)/100 - 1]`. |
+| **A2** | A missing final LF would drop or mis-own the last line. | The tail slab carries a **virtual LF**; EOF is a terminator. (CR handling stays defensive only — the A spec guarantees LF-only, no CR.) |
+| **B1** | "Ascending u32 postings" assumed sorted unique ids; gallop/merge and "ten smallest" are silently wrong otherwise. | **Assert ascending + unique** during the build (one compare per document); rank-map if it ever fails. |
+| **B2** | Global token positions could let a phrase span the end of doc *i* and the start of doc *i+1*. | Positions are **document-relative** and the cursor is reset at every document start. |
+| **B3** | Counting occurrences instead of documents (`go go go` matched by `go go` twice); repeated terms need a cursor **per slot**. | **Break after the first match per document**; one cursor per phrase slot, offset by slot index (`pos[slot] >= prev + slot`). |
+| **B4** | "Concatenate then merge" **double-counts** documents present in both operands. | Union is a **dedup-merge** on equality (equality implies the same id, so drop the duplicate); `NOT` is a set **difference**. |
+| **B5** | **Query text must go through the same tokeniser.** `PHRASE "visit Zürich"` is *three* tokens (`visit … z … rich`), not two. | Tokenise every query term/phrase with the document tokeniser; **k = the token count**, and a term that yields zero tokens can never match. |
+| **C1** | Parity gives the quote state, **not** whether an offset is a record start; naive "skip to the next record start" loses a record. | Offset `s` is a record start **iff `buf[s-1] == '\n'` and the state is even**; a record belongs to the chunk holding its **first byte**. |
+| **C2** | Parity is exact only if every `"` is structural — a bare `"` in an unquoted field (`5" nail`) or text after a closing quote flips the state for the rest of the file. | **Validate**: the walker's end state must equal the next chunk's predicted start state. On mismatch, **re-parse that chunk serially** and continue. Exactness becomes verified, not assumed. |
+| **C3** | Comparing raw `(start,len,quoted)` slices counts `Bob` and `"Bob"` as two names, `,,` and `,"",` as two empties, and inflates `name_bytes` by the quotes. | Distinctness and `name_bytes`/`note_bytes` use the **decoded content**: the slice minus the outer quotes with `""` collapsed to `"`. Exact byte comparison on content — no hashing on the correctness path. |
+| **C4** | For `|cents| < 100`, truncating division loses the sign: −5 prints `0.05`. | `neg = c < 0; u = c.unsigned_abs();` print the sign, then `u/100`, `.`, `u%100` as exactly two digits. |
+| **C5** | A quoted numeric (`"12.34"`) keeps its quotes in the slice; a CRLF file leaves `\r` on the last field. | Parse **over the content**; terminator is CRLF/LF and a CR inside quotes stays data. |
+| **C6** | `id_sum`/`amount_sum` can wrap in 64 bits where the reference uses bigints. | **`u128`/`i128` accumulators** (free in registers; removes the class). |
+| **D1** | With `INF = u32::MAX`, `du + w + other[v]` **wraps** to a tiny µ, so µ becomes wrong; `tf + tb` with an empty heap treated as ∞ wraps too. | **No INF in arithmetic**: `INF = u64::MAX/4`, `saturating_add`, and an **explicit break when either heap is empty**. |
+| **D2** | `s == t` with a cycle through `s` returned the cycle's weight instead of 0. | **Return 0 early** when `s == t`. |
+| **D3** | `key << 32 | node` needs key < 2^32, but µ can reach roughly **twice** the one-direction bound `(n−1)·wmax`. | Pack a **21-bit node** (`n ≤ 2^21` at 1.74M), which allows keys to 2^43; **all sums in u64**. |
+| **D4** | Touching only *popped* nodes leaves relaxed-but-never-popped labels stale into the next query — wrong answers that vary with thread count. | Push to the touched list on the **first label write** (`INF → finite`), in **both** directions; a debug build asserts both tables are all-INF after every query. |
+
+## Structural changes (accepted)
+
+1. **A: drop the per-slot arenas.** Use one per-thread flat `Vec<u64>` of
+   `gid(31) | err(1) | lat(32)` appended per line, then a **counting sort by
+   gid** after remapping thread-local endpoint ids. This removes the arena
+   memory blowup (a 4 KiB page per tiny group, ~44k groups ⇒ hundreds of MB,
+   potentially worse than the reference's 228 MB), removes the non-contiguous
+   select (percentiles now run on **contiguous slices**), and deletes the arena
+   code. Largest single win in the review.
+2. **D: lazy labels.** Store `dist + 1` with **0 meaning unset**, so the
+   `alloc_zeroed` pages stay untouched until written (a `vec![INF; n]` fill
+   faults every page eagerly: 12 threads × 2 directions × 1.74M × 8 B ≈ 334 MB).
+   Combined with the touched list, residency tracks work actually done.
+3. **Measure before upgrading.** The radix heap, the u64-label path and the
+   transpose CSR are **not built until a measurement shows the win**: count pops
+   per query on the std-`BinaryHeap` baseline and require bidirectional to beat
+   it by ≥2×. This removes D1–D3 risk and ~50 MB until it is earned.
+
+## The one finding I did not accept as a defect
+
+**A2's CRLF case** is outside Track A's contract — the spec states every line
+ends with a single LF and there is no CR — so it is not a correctness risk. The
+EOF-as-terminator half is adopted anyway because the tail slab needs it.
