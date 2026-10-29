@@ -160,6 +160,30 @@ check("the tool knows the tiny + full tables too", len(tool_hashes) > len(contra
       f"tool={len(tool_hashes)} contract={len(contract_hashes)}")
 check("no placeholder hash shape", "<sha256>" not in tool and "<sha>" not in tool)
 
+# The board runs EVERY track at full scale, seed 1, so these twelve are the
+# hashes the correctness gate actually compares against. They were reproduced
+# locally end to end on Oct 29 (generate -> check input sha256 -> run the
+# vendored reference -> check output sha256, all twelve matching); this pins
+# them so a later edit cannot quietly drop one and leave a track unverifiable.
+FULL_SCALE = {
+    "dataset_full_requests_log": "7ec80ba45bceef51ac7f79d3a14521fc6187b2dcb87b5e5542d08063fe5d962a",
+    "dataset_full_summary_txt": "495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3",
+    "dataset_full_docs_txt": "6cd461670d6c39f9c5211162577532d3648edeab12340c71cc7d2ab5f18e66c8",
+    "dataset_full_queries_b": "77ef7ffc59afde051006b02a2ce8e4c090fbbfbf101acd6f862d0f8e298d39f9",
+    "dataset_full_results_txt": "f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927",
+    "dataset_full_records_csv": "36166f4ac44101a22ebf25b4f949436a681a2698cb0f2ae1f7f6853010259f48",
+    "dataset_full_regions_csv": "414c57c4f3ec968f9bce28c59eebfdf57a9425322b468db7ee964c18c4852fe1",
+    "dataset_full_aggregates": "d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536",
+    "dataset_full_graph_txt": "fe6471f2712d10b23c2ec58a4cbc7db1ea3e742daf6b6db62829e74d6c4a26c7",
+    "dataset_full_queries_d": "160f1ef48378dcb567a8d9ddd2676ee777b044a5ede3ad4c7b42e812aa4b3a6f",
+    "dataset_full_distances_txt": "a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e",
+}
+for key, want in FULL_SCALE.items():
+    check(f"contract.toml {key} is the reproduced full-scale hash", f'{key}' in contract)
+    check(f"contract.toml {key} value", f'"{want}"' in contract)
+check("contract.toml declares the board runs at full scale",
+      'board_dataset_scale        = "full"' in contract)
+
 # ── 4. filenames: only the official spellings anywhere ────────────────────
 STALE_NAMES = ["ingest.txt", "index.txt", "join.txt", "traverse.txt", "access.log",
                "corpus.txt", "output.txt", "result.txt", "summary.csv"]

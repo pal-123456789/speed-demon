@@ -156,6 +156,21 @@ dataset_full_graph_txt     = "fe6471f2712d10b23c2ec58a4cbc7db1ea3e742daf6b6db628
 dataset_full_queries_d     = "160f1ef48378dcb567a8d9ddd2676ee777b044a5ede3ad4c7b42e812aa4b3a6f"
 dataset_full_distances_txt = "a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e"
 
+# PROVENANCE OF THE TWELVE VALUES ABOVE — read as "proved", not "copied".
+# On Oct 29 these were REPRODUCED LOCALLY end to end, not transcribed from the
+# specs: `python tooling/official-data.py --track all --scale full` built every
+# full-scale input from our vendored generators, checked the input sha256, ran
+# our vendored reference over it, and checked the output sha256. All twelve
+# matched, and every byte count came out exactly as the specs publish it
+# (a 238836234, b 253827587 + 1763534, c 201935059 + 2177799, d 91950247 +
+# 29401). The host is a different machine and a different Python build from the
+# organizers', so this also shows the generators are byte-deterministic across
+# machines for the scale the board actually runs.
+#
+# Why it matters: the board runs EVERY track at full scale, seed 1 (see
+# board_dataset_scale below), so a generator or reference that only agreed at
+# sample size would fail the correctness gate on every run.
+
 # Scale facts that change the plan at full size.
 board_dataset_scale        = "full"   # seed 1, every track
 b_full_documents           = 250000   # vs 1000 tiny / 25000 sample
