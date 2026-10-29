@@ -1,0 +1,50 @@
+# ── Line endings, pinned ──────────────────────────────────────────────────
+#
+# WHY THIS FILE EXISTS (it is load-bearing, not housekeeping):
+#
+# The scored image runs `RUN ./build.sh` inside Linux. Git decides a file's
+# line endings at CHECKOUT time, from the cloner's own configuration -- not
+# from the committed bytes. Git for Windows ships `core.autocrlf=true` as the
+# SYSTEM default, so a fresh `git clone` of this repository on a stock Windows
+# box rewrites every shell script to CRLF, and then:
+#
+#     $ docker build ... track-a
+#     /bin/sh: 1: ./build.sh: not found            (or: bad interpreter: ^M)
+#
+# That is a silent zero on the track, and it is invisible on this machine
+# because a local `core.autocrlf=false` was set here and `.git/config` is
+# never committed. Pinning the endings in a tracked file is the only fix that
+# survives a clone.
+#
+# Default: text normalised to LF in the repository, and written back as LF on
+# every checkout, whatever the cloner's git config says.
+* text=auto eol=lf
+
+# The files whose bytes are executed directly by the scored build, or parsed
+# by a tool that would treat a stray CR as data. Forced explicitly rather than
+# left to content detection.
+*.sh         text eol=lf
+*.py         text eol=lf
+*.ps1        text eol=lf
+*.rs         text eol=lf
+*.toml       text eol=lf
+*.md         text eol=lf
+Dockerfile   text eol=lf
+
+# ── Byte-exact exceptions (later rules win) ───────────────────────────────
+
+# The organizers' vendored tree is byte-identical by contract: its hashes are
+# checked against upstream. Marked binary so git never rewrites a byte of it,
+# on commit or on checkout.
+/reference/** -text
+
+# The Track C tiny corpus is deliberately hostile. It mixes CRLF and bare LF
+# record terminators (~489 / ~651) because section 2.2 of the spec requires a
+# parser to handle both, and it carries a UTF-8 BOM. Those bytes ARE the test;
+# normalising them to LF would silently delete the coverage on the track the
+# organizers call the DQ minefield. Never rewritten.
+/verification/cases/track-c/records.csv -text
+
+# Profiles are opaque binary data.
+*.profdata binary
+*.profraw  binary

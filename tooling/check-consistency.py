@@ -224,6 +224,86 @@ for p in (TOOLING / "rule05_guard.py", TOOLING / "spec_intake.py"):
     named = re.findall(r"(\d{2}:\d{2})(?::\d{2})?", t)
     check(f"{p.name} names a 15:00 boundary", "15:00" in named, str(sorted(set(named))[:6]))
 
+# ── 12. line endings are pinned, and no accidental CR survives ───────────
+# The scored build runs `RUN ./build.sh` on Linux. A CR before a newline makes
+# that "bad interpreter" and zeroes the track. Git chooses line endings at
+# CHECKOUT time from the CLONER's configuration, and Git for Windows ships
+# core.autocrlf=true as its SYSTEM default -- so the committed bytes are not
+# sufficient, and a local core.autocrlf=false does not travel with a clone.
+# The only durable fix is a tracked .gitattributes. (Found live: this machine
+# had core.autocrlf=true system-wide and there was no .gitattributes at all.)
+ga = ROOT / ".gitattributes"
+check(".gitattributes exists (pins line endings across every clone)", ga.is_file())
+if ga.is_file():
+    gat = ga.read_text(encoding="utf-8")
+    check(".gitattributes forces LF for shell scripts",
+          re.search(r"^\*\.sh\s+text\s+eol=lf", gat, re.M) is not None)
+    check(".gitattributes forces LF for Dockerfiles",
+          re.search(r"^Dockerfile\s+text\s+eol=lf", gat, re.M) is not None)
+    check(".gitattributes protects the byte-identical vendored tree",
+          "/reference/** -text" in gat)
+    check(".gitattributes protects the hostile Track C corpus",
+          "/verification/cases/track-c/records.csv -text" in gat)
+
+# Files whose bytes ARE the test. A blanket CRLF->LF sweep would silently
+# delete the coverage, so they are exempted from the check below and asserted
+# to still be hostile instead.
+BYTE_EXACT = ("verification/cases/track-c/records.csv",)
+for rel in BYTE_EXACT:
+    p = ROOT / rel
+    if not p.is_file():
+        check(f"{rel} exists", False)
+        continue
+    raw = p.read_bytes()
+    crlf = raw.count(b"\r\n")
+    bare = raw.count(b"\n") - crlf
+    check(f"{rel} keeps BOTH CRLF and bare-LF terminators (spec 2.2)",
+          crlf > 0 and bare > 0, f"crlf={crlf} bare_lf={bare}")
+    check(f"{rel} keeps its UTF-8 BOM", raw.startswith(b"\xef\xbb\xbf"))
+
+CR_SENSITIVE = re.compile(r"\.(sh|py|ps1|rs|toml|md)$|(^|/)Dockerfile$")
+cr_offenders = []
+for rel in sorted(tracked):
+    if rel.startswith("reference/") or rel in BYTE_EXACT or not CR_SENSITIVE.search(rel):
+        continue
+    p = ROOT / rel
+    if not p.is_file():
+        continue
+    raw = p.read_bytes()
+    if b"\x00" in raw:
+        continue  # binary
+    if b"\r" in raw:
+        cr_offenders.append(rel)
+check("no CR in any tracked first-party source, config or doc",
+      not cr_offenders, ", ".join(cr_offenders[:8]))
+
+# ── 13. the abandoned architecture is never referenced as if it were current ─
+# This repository once carried a different design: five tracks named A-ingest
+# .. E-compress, a shared core/ rlib, a vendored toolchain and a musl static
+# link. It was replaced by four self-contained track-* folders built with the
+# stock rust image. A stray reference to the old layout is exactly how a doc,
+# a build script or an ignore file comes to describe files that do not exist.
+DEAD = ("tracks/A-ingest", "tracks/B-index", "tracks/C-join", "tracks/D-traverse",
+        "tracks/E-compress", "build-all.sh", "vendor-toolchain.sh",
+        "libspeeddemon_core", "core/src/lib.rs")
+dead_hits = [f"{rel}: {dead}" for rel, text in texts() for dead in DEAD if dead in text]
+check("no abandoned-architecture paths referenced as current",
+      not dead_hits, "; ".join(dead_hits[:6]))
+
+# ── 14. a doc that names a script must name a script that exists ──────────
+# CAMPAIGN-STATUS.md claimed "Guarded by `tooling/check_pgo_wiring.sh`" while
+# no such file existed: prose is where a removed tool leaves a present-tense
+# claim behind. Only root-relative tooling/ and verification/ paths are
+# policed, because those are unambiguous.
+script_hits = []
+for rel, text in texts():
+    for m in re.finditer(r"`((?:tooling|verification)/[A-Za-z0-9_.-]+\.(?:sh|py|ps1))`", text):
+        if not (ROOT / m.group(1)).is_file():
+            script_hits.append(f"{rel} -> {m.group(1)}")
+check("every script named in first-party prose exists",
+      not script_hits, "; ".join(script_hits[:6]))
+check("check_pgo_wiring is wired into ci.sh", "check_pgo_wiring" in ci)
+
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:
     for f in FAILS:

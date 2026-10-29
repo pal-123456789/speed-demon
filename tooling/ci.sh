@@ -504,6 +504,31 @@ else
   fi
 fi
 
+# ── 10. line endings and PGO wiring ───────────────────────────────────────
+# Two hazards that fail silently, or fail far from their cause:
+#
+#   * A CR before a newline turns `RUN ./build.sh` into "bad interpreter" on
+#     the Linux scoring box. Git writes line endings at CHECKOUT time from the
+#     CLONER's config, and Git for Windows defaults core.autocrlf=true — so
+#     the committed bytes are not enough and the fix must be a tracked
+#     .gitattributes. A local core.autocrlf=false does not travel with a clone.
+#
+#   * `-C profile-use=<directory>` makes rustc warn and EXIT 0 while compiling
+#     with no profile, and a profile outside the track folder never reaches the
+#     scored image, because the track folder is the whole build context.
+step "LINE ENDINGS AND PGO WIRING (two silent-zero hazards)"
+if [ ! -f .gitattributes ]; then
+  fail ".gitattributes is missing — a clone with core.autocrlf=true rewrites build.sh to CRLF"
+else
+  ok ".gitattributes pins LF, so a fresh clone cannot convert the build scripts"
+fi
+if sh tooling/check_pgo_wiring.sh >/tmp/sd-pgo.txt 2>&1; then
+  ok "$(tail -1 /tmp/sd-pgo.txt)"
+else
+  cat /tmp/sd-pgo.txt
+  fail "PGO wiring is unsound (the build would report success and run unprofiled)"
+fi
+
 printf '\n%s\n' "============================================================"
 if [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
   printf '\033[32mCI: ALL GATES GREEN\033[0m\n'

@@ -1,58 +1,65 @@
-# The build context for the SCORED image.
+# Build context hygiene.
 #
-# Everything here is excluded from the image, so the image contains only the
-# submission itself: the dispatcher, the five track sources, the shared
-# core, and the vendored toolchain.
+# READ THIS FIRST, because the name is misleading. A SCORED image does NOT use
+# this file. The board and the organizers' checker build each track with the
+# TRACK FOLDER as the context:
 #
-# vendor/ is deliberately NOT excluded — that is where the vendored Rust
-# toolchain lives, and the build runs with --network=none, so it has to
-# come from the context. Run tooling/vendor-toolchain.sh before the hack.
+#     docker build --network=none -t speeddemon/$TEAM-$TRACK:$COMMIT track-$TRACK
+#
+# so the ignore file that would apply to a scored build is
+# `track-$TRACK/.dockerignore`, and there deliberately is none: a track folder
+# holds only Dockerfile, build.sh, src/, README.md, PERF.md,
+# .speed-demon.toml and verification/expected/, and every one of those belongs
+# in the image. The Dockerfile's `COPY . /src` is intentional -- the spec makes
+# the folder the whole build context.
+#
+# This root file therefore has one job: make a local `docker build .` from the
+# repository root safe and unsurprising, so the two build paths cannot
+# disagree about what the submission is. If you ever build from the root, this
+# is what keeps the campaign's own tooling, documentation and datasets out of
+# the image.
 
-# Build cache and VCS
-target/
+# Version control.
 .git/
+.github/
 .gitignore
+.gitattributes
 
-# Host build output. build-all.sh rebuilds these inside the image, so
-# shipping the developer's stale copies would put binaries of unknown
-# provenance into the scored context and could hide a broken build.
+# Host build output. Never ship the developer's copy: it is a binary of
+# unknown provenance, and shipping it would hide a broken in-image build.
+target/
 bin/
+track-*/run
+track-*/run.exe
+track-*/run.pdb
 
-# Test scratch left behind by local runs
-verification/data2/
-verification/tmp2/
-
-# Verification infrastructure — never part of the submission
-verification/
+# The campaign's own infrastructure. Tooling, documentation and reference
+# material are explicitly outside the four track folders, so they are never
+# scored and must never enter an image.
 tooling/
 docs/
+prep/
+reference/
+verification/
+Makefile
+check.py
+*.bak
 
-# Generated fixtures — large, and reproducible with gen-fixtures.py
+# Verification scratch and generated fixtures: reproducible from the public
+# generators, and large.
 verification/data/
+verification/data2/
+verification/tmp/
+verification/tmp2/
+
+# Profiles and logs.
 *.profdata
 *.profraw
+*.log
 
-# ...EXCEPT the one profile the SCORED build consumes. build-one.sh compiles
-# with -C profile-use=pgo/merged.profdata, and a profile that is not in the
-# build context cannot be used. target/ is excluded above, so a profile left in
-# target/pgo/prof never reached the image and every scored build was silently
-# unprofiled — the log said "PGO profile found" while rustc compiled without it.
-# Later patterns win, so this re-includes it deliberately.
-!pgo/
-!pgo/*.profdata
-
-# Per-track documentation and metadata
-tracks/*/verification/
-tracks/*/PERF.md
-tracks/*/README.md
-
-# Editor and OS noise
+# Editor and OS noise.
 .vscode/
 .idea/
 *.swp
 .DS_Store
 Thumbs.db
-
-# CI and editor config that the container has no use for
-.github/
-*.log
