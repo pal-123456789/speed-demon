@@ -96,7 +96,7 @@ B is still submitted (completeness, highest-K-anywhere) but is not where the dee
   queries over a 250 MB corpus · C 204 MB / 3.32M records · D 92 MB / 5M edges.
 - **One reference language:** one naive Python reference per track, not Go, Python
   and Rust.
-- **Timeline:** Oct 28 18:00 UTC specs+refs+harness frozen · Oct 30 06:00 UTC sample
+- **Timeline:** Oct 28 15:00 UTC specs+refs+harness frozen · Oct 30 06:00 UTC sample
   datasets + expected hashes · **Oct 30 15:00 UTC kickoff** · **Nov 2 15:00 UTC code
   freeze** · scoring Nov 2–4 (gate pass/fail published by Nov 4) · judging Nov 3–12 ·
   Nov 13 winners. Write-up deadline **Nov 10**. The **live board** closes at code
@@ -183,7 +183,7 @@ keeps the D axis at 1.0. The write-up reuses PERF.md for the **$200** write-up p
 No solution code is written or committed before kickoff. These hours lock the design so H0 is pure
 typing:
 
-- **Oct 28 18:00 UTC (specs/refs/harness freeze):** read every frozen spec end to end. **Pin the
+- **Oct 28 15:00 UTC (specs/refs/harness freeze):** read every frozen spec end to end. **Pin the
   deferred values** this plan currently defers: exact input filenames + the single `/out` filename
   per track; exact output format / rounding / ordering / comparator; Track C's amount scale +
   tie-break + BOM rule; Track D's output contract (distance-only vs path) + unreachable spelling.

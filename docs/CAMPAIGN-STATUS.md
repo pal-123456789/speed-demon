@@ -134,7 +134,7 @@ of the biggest track.
 
 `verification/contract.toml` is the single source of truth. Every value the
 plan could not honestly know is listed there as `DEFERRED` rather than
-invented. On **Oct 28 18:00 UTC** (specs + harness freeze) fill them in and
+invented. On **Oct 28 15:00 UTC** (specs + harness freeze) fill them in and
 every K budget in the plan becomes real.
 
 **Pinned already (from the public event page):**
@@ -188,7 +188,7 @@ cargo test --offline --manifest-path verification/harness/Cargo.toml # 20/20 har
 sh tooling/install-hooks.sh            # installs the pre-commit gate
 ```
 
-### Oct 28 18:00 UTC — spec freeze
+### Oct 28 15:00 UTC — spec freeze
 
 1. Read all four frozen specs end to end.
 2. Fill `verification/contract.toml` — every `DEFERRED` becomes a fact.
@@ -256,7 +256,7 @@ Then record the final commit hash in every `PERF.md`.
 
 ---
 
-## 3a. Oct 28 18:00 UTC — SPEC.md intake
+## 3a. Oct 28 15:00 UTC — SPEC.md intake
 
 The organizers freeze the specs on Oct 28; the window opens Oct 30 15:00 UTC.
 36 values in `verification/contract.toml` are marked `DEFERRED` until then;

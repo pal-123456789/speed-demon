@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """SPEC.md intake — turn Oct 28 from a scramble into a checklist.
 
-On Oct 28 18:00 UTC the organizers freeze the specs. Every value this
+On Oct 28 15:00 UTC the organizers freeze the specs. Every value this
 repository has honestly marked DEFERRED becomes a fact at that moment. The
 risk is not the work; it is the *bookkeeping*: a dozen values scattered
 across a contract file, four track manifests, a Rust table and the K

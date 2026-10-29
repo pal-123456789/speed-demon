@@ -1,5 +1,5 @@
 # Contract registry — the single source of truth for every value the
-# organizer freezes on Oct 28 18:00 UTC.
+# organizer freezes on Oct 28 15:00 UTC.
 #
 # Every row marked DEFERRED is a value this plan cannot honestly know yet.
 # The plan deliberately does NOT invent them. On Oct 28, fill them in, and
