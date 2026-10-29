@@ -322,7 +322,7 @@ machine (no SIMD, no cleverness) and deferring all C speed work to the H43 deep 
   ✓ · sample SHA green ✓ · byte-identical ×10 ✓ · peak mem + time under floors ✓ · exactly one
   `/out` file ✓ · empty filesystem diff ✓ · PERF.md numbers reproduce ✓ · README + `.speed-demon.toml`
   present, dep count honest ✓ · repo public + OSI license ✓ · final commit recorded before Nov 2
-  18:00 UTC ✓. Then the **clean-checkout test**: `git clone` the public repo, checkout the final
+  15:00 UTC ✓. Then the **clean-checkout test**: `git clone` the public repo, checkout the final
   commit, `docker build --network=none` all four, re-run SHA/determinism/sandbox from that tree.
 
 **Highest-leverage move (Astra's capstone, endorsed):** freeze a correct, deterministic baseline for

@@ -258,7 +258,7 @@ spectacular track carry two mediocre ones: 90/40/40 → 52.4 loses to 60/60/60 �
        judged on insight; tag Hackathon Raptors)
 
 ===== TIMELINE (all UTC) =====
-  Oct 28 18:00 (T-48h): specs + reference impls (Go/Python/Rust) + FULL harness published;
+  Oct 28 15:00 (T-48h): specs + reference impls (Go/Python/Rust) + FULL harness published;
                         frozen — nothing about scoring changes after this.
   Oct 30 06:00 (T-12h): 10% sample datasets + their expected output hashes (verify locally).
   Oct 30 15:00 (T-0):   KICKOFF — full datasets, live leaderboard opens, clocks start.
@@ -310,7 +310,7 @@ no hedging, no generic advice. Output in GitHub-flavored Markdown with tables. D
 
 4. THE MASTER 72-HOUR SCHEDULE — hour-blocked, the centerpiece. Requirements:
    - A PRE-KICKOFF prep phase (legal: env, reading, design, local harness, profiling the
-     published references, skeleton repos + Dockerfiles) spanning Oct 28 18:00 (specs/harness
+     published references, skeleton repos + Dockerfiles) spanning Oct 28 15:00 (specs/harness
      freeze) and Oct 30 06:00 (sample+hashes) up to Oct 30 15:00 kickoff.
    - The 72h from Oct 30 15:00 → Nov 2 15:00 in blocks (≈2–4h each) mapped to tracks and
      milestones, with a hard "all five pass the SHA gate on the sample by hour X" checkpoint,

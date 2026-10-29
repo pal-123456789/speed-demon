@@ -170,7 +170,7 @@ holdout seed. PERF.md steps must cite live-board run IDs.
 
 | When (UTC) | What |
 |---|---|
-| Oct 28 18:00 | Specs + refs + harness frozen — pin all deferred values in `verification/contract.toml` |
+| Oct 28 15:00 | Specs + refs + harness frozen — pin all deferred values in `verification/contract.toml` |
 | Oct 30 06:00 | Sample datasets + expected hashes — load into `track-*/verification/expected/` |
 | Oct 30 15:00 | **KICKOFF — H0** — replace stubs with real baselines, first SHA-green |
 | ~H17 | **All 4 SHA-green + deterministic** — tag `baseline-green` |
