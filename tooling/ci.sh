@@ -258,13 +258,25 @@ else
 fi
 
 step "ORACLE CONFORMANCE (our data is accepted by the official references)"
-if "$PY" tooling/conformance.py --track all --oracle >/tmp/sd-oracle.txt 2>&1 \
-   && "$PY" tooling/conformance.py --track all --oracle --data-root verification/data-adversarial \
-      >>/tmp/sd-oracle.txt 2>&1; then
-  ok "all 8 corpora (standard + adversarial x 4 tracks) are oracle-valid"
-else
+# The corpora are GENERATED, not committed: hundreds of megabytes, reproducible
+# from the public generators via tooling/official-data.py. A fresh clone has
+# none of them. conformance.py exits 2 for "absent, nothing was checkable" and
+# 1 for "the oracle looked at real data and disagreed" -- a distinction that
+# matters, because conflating them made this gate announce "a fixture generator
+# emits data the reference rejects" on a clean checkout.
+rc_std=0
+"$PY" tooling/conformance.py --track all --oracle >/tmp/sd-oracle.txt 2>&1 || rc_std=$?
+rc_adv=0
+"$PY" tooling/conformance.py --track all --oracle --data-root verification/data-adversarial \
+  >>/tmp/sd-oracle.txt 2>&1 || rc_adv=$?
+if [ "$rc_std" = "1" ] || [ "$rc_adv" = "1" ]; then
   grep -E 'FAIL|rejected' /tmp/sd-oracle.txt | head -12 | sed 's/^/  /'
   fail "a fixture generator emits data the reference rejects — the contract is broken"
+elif [ "$rc_std" = "2" ] || [ "$rc_adv" = "2" ]; then
+  grep -E 'ABSENT' /tmp/sd-oracle.txt | head -4 | sed 's/^/  /'
+  skip "generated corpora are absent — produce them with: python tooling/official-data.py --track all --scale tiny"
+else
+  ok "all 8 corpora (standard + adversarial x 4 tracks) are oracle-valid"
 fi
 
 # The correctness gate is a SHA-256 of ONE file with an exact name. A rename

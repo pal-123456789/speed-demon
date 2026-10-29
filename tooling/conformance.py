@@ -23,6 +23,13 @@ Usage:
     python tooling/conformance.py --track all --oracle          # fixture validity gate
     python tooling/conformance.py --track c --diff --build
     python tooling/conformance.py --track c --diff --minimize
+
+Exit codes (the distinction is deliberate — see `absent` in main()):
+    0   every data dir that exists was accepted by the oracle
+    1   the oracle looked at real data and disagreed: a genuine contract break
+    2   nothing was checkable, because a data dir is absent. The corpora are
+        generated and gitignored, so a fresh clone exits 2. A caller must
+        report this as "not run", never as "the generators are broken".
 """
 
 from __future__ import annotations
@@ -175,6 +182,14 @@ def main(argv=None) -> int:
     if not (args.oracle or args.diff):
         args.oracle = True
     failures = 0
+    # A data dir that is simply NOT THERE is not a finding about the fixtures.
+    # The corpora are generated (hundreds of MB, reproducible from the public
+    # generators) and therefore gitignored, so a fresh clone has none of them.
+    # Counting that as a failure made `ci.sh` announce "a fixture generator
+    # emits data the reference rejects" on a clean checkout, which sent the
+    # reader hunting for a broken generator that was working perfectly. Absence
+    # is reported separately and surfaces as exit 2: nothing was checkable.
+    absent = 0
 
     for t in tracks:
         if args.data:
@@ -185,8 +200,8 @@ def main(argv=None) -> int:
             data = ROOT / "verification" / "data" / f"track-{t}"
         print(f"[track {t}] data={data}")
         if not data.is_dir():
-            print(f"  FAIL no data dir {data}")
-            failures += 1
+            print(f"  ABSENT no data dir {data}")
+            absent += 1
             continue
 
         if args.build:
@@ -244,6 +259,13 @@ def main(argv=None) -> int:
     if failures:
         print(f"conformance: {failures} FAILED", file=sys.stderr)
         return 1
+    if absent:
+        # Exit 2 means "nothing was checkable", which a caller must not report
+        # as a broken contract. Distinguishing it from 1 is the whole point:
+        # 1 = the oracle looked at real data and disagreed.
+        print(f"conformance: {absent} data dir(s) absent — nothing was checked",
+              file=sys.stderr)
+        return 2
     print("conformance: the oracle accepts every data dir checked")
     return 0
 
