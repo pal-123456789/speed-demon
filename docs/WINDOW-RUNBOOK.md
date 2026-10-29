@@ -6,8 +6,9 @@
 > failure, and everything after is measured from there.
 >
 > Design depth: `docs/depth/` (per-track DEEP files, the model digest
-> `97-MODEL-OUTPUT-DIGEST.md`, the events-page pins `99-EVENTS-PAGE-PINS.md`).
-> The scoring formula is the compass; `k_whatif.py` is the calculator.
+> `docs/depth/97-MODEL-OUTPUT-DIGEST.md`, the events-page pins
+> `docs/depth/99-EVENTS-PAGE-PINS.md`).
+> The scoring formula is the compass; `tooling/k_whatif.py` is the calculator.
 
 ## The tool map
 

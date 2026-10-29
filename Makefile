@@ -1,5 +1,5 @@
 .PHONY: help verify bench freeze-check fmt clippy kcalc test axes fixtures docs \
-        guard harness ci plan prewarm hash build spec clean
+        guard harness ci plan prewarm hash build spec clean pgo-wiring
 
 # The tracks are self-contained rustc-only folders (track-a..track-d); the
 # verification harness is a standalone Rust package at verification/harness;
@@ -35,6 +35,7 @@ help:
 	@echo ""
 	@echo "  TOOLING"
 	@echo "    make guard          — rule 05 pre-kickoff compliance check"
+	@echo "    make pgo-wiring     — guard against a silently unprofiled build"
 	@echo "    make spec           — the Oct 28 SPEC.md intake checklist"
 	@echo "    make axes           — the S and D axes"
 	@echo "    make fixtures       — regenerate the anti-overfit fixture corpus"
@@ -90,6 +91,12 @@ hash:
 
 guard:
 	$(PY) tooling/rule05_guard.py
+
+# `-C profile-use=<a directory>` makes rustc warn and EXIT 0 while compiling
+# with no profile at all. This catches that, plus a profile that lives outside
+# the track folder and therefore never reaches the scored build context.
+pgo-wiring:
+	sh tooling/check_pgo_wiring.sh
 
 spec:
 	$(PY) tooling/spec_intake.py --status

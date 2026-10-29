@@ -28,14 +28,19 @@
 D:\SpeedDemon-Campaign\
 ├── Makefile                    # `make verify`, `make bench`, `make freeze-check`, `make ci`
 ├── LICENSE                     # MIT (OSI-approved, public at freeze)
-├── .gitignore                  # excludes track-*/run, run.pdb, .exe build artifacts
-├── track-a/                    # Track A — Ingest  (ref 32.05 s, timeout 321 s, S_ref 56 lines)
-├── track-b/                    # Track B — Index   (ref 56.35 s, timeout 564 s)
-├── track-c/                    # Track C — Join    (ref 14.44 s, timeout 144 s) — DQ minefield
-├── track-d/                    # Track D — Traverse (ref 72.69 s, timeout 727 s)
+├── check.py                    # the organizers' own checker: offline build + sandbox run + sha256
+├── .gitattributes              # pins LF across clones — a CR in build.sh is a silent zero
+├── .dockerignore               # root-context hygiene (scored builds use track-*/ as the context)
+├── .gitignore                  # ignores track-*/run, host binaries, generated data, scratch
+├── track-a/                    # Track A — Ingest   (ref 32.05 s, timeout 321 s, S_ref 56 lines)
+├── track-b/                    # Track B — Index    (ref 56.35 s, timeout 564 s, S_ref 91 lines)
+├── track-c/                    # Track C — Join     (ref 14.44 s, timeout 144 s, S_ref 108 lines) — DQ minefield
+├── track-d/                    # Track D — Traverse (ref 72.69 s, timeout 727 s, S_ref 43 lines)
 │   (each: Dockerfile, build.sh, README.md, PERF.md, .speed-demon.toml, src/, verification/expected/)
-├── verification/               # fsn1 harness replica, 3 gates, bench, lockdown, contract.toml, sample data
-├── tooling/                    # k_calc, measure_axes, gen-fixtures, gen_docs, ci.sh, hooks, base-image.txt
+├── prep/                       # track-agnostic H0 primitives (rule 05: deliberately outside every track folder)
+├── reference/                  # the organizers' byte-identical references, generators and harness
+├── verification/               # fsn1 harness replica, contract.toml, tiny corpora, ledger
+├── tooling/                    # official-data, conformance, ci.sh, k_whatif, gates, hooks
 └── docs/                       # MASTER-PLAN, per-track deep dives, CAMPAIGN-STATUS, RULE-CHANGES-oct28
 ```
 
