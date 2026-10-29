@@ -59,13 +59,18 @@ the reference (final scoring 10x).
 
 ### 2a. What was measured
 
-> **Generated from `verification/ledger.jsonl`** — every row below is a
-> measurement a machine produced, trimmed the same way the organizers
-> trim theirs (high and low discarded, mean of the middle three).
-> Commits represented: 241e64c, 2609713, 8bd3624, 9515425, 95389e5, 997e6cb, f31c3e2.
-> **Do not edit this table by hand.** It is regenerated.
+<!-- BEGIN GENERATED measured (tooling/gen_docs.py)
+     Everything between this marker and the matching END marker is REPLACED on
+     every run of `python tooling/gen_docs.py`. Change the ledger, or the
+     TRACKS config at the top of that file -- never this text, because your edit
+     will be overwritten. Everything OUTSIDE the two markers, including the
+     board-run table above, is hand-written and is preserved. -->
+> **No measurements yet.** This table is filled automatically from
+> `verification/ledger.jsonl` the moment the harness records a run.
+> A hand-written number in this section would be a guess.
 
 _(no measurements recorded yet)_
+<!-- END GENERATED measured -->
 
 ### 2b. What was planned
 

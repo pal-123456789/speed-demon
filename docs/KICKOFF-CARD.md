@@ -107,7 +107,12 @@ optimisation**. A slow green beats a fast gate failure. See
 2. `sh tooling/ci.sh` green.
 3. Commit and push to `speed-demon`.
 4. **Record the board run ID** in the track's `PERF.md`, section
-   `## 1b. Board runs`, one row per push, in step order.
+   `## 1b. Board runs`, one row per push, in step order. That table is yours —
+   it sits *outside* the marked region, and the generator preserves it byte for
+   byte across regenerations. Anything between the
+   `BEGIN GENERATED measured` / `END GENERATED measured` markers is rewritten
+   from `verification/ledger.jsonl` on every run of `tooling/gen_docs.py`, so
+   change the ledger or that tool's `TRACKS` config, never the marked text.
    Judges check that every cited run exists and that the numbers moved the way
    the log claims — and that no run ID is invented.
 
@@ -140,6 +145,21 @@ gh repo edit pal-123456789/speed-demon --visibility public --accept-visibility-c
 
 Publishing is the one deadline with a hard penalty attached: a repo still
 private an hour after the freeze cannot be scored.
+
+---
+
+## 4 · After the freeze — the write-up side quest, by November 10
+
+A separate $200 pot: two prizes of $100, judged on insight, not audience size.
+The post must live on a **public blog** (dev.to, Medium, Hashnode or your own
+site) — a README or a GitHub Pages repo does not count — must mention Hackathon
+Raptors, and must link the repository.
+
+The raw material is already banked in
+[WRITEUP-EVIDENCE.md](WRITEUP-EVIDENCE.md): eight real findings from this
+repository, each with the measurement that proves it and a note on why it stayed
+invisible. Add to that file as the window produces more, then write the post
+from it. The deadline is after the freeze, so this costs no window time.
 
 ---
 

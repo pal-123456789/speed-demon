@@ -300,10 +300,14 @@ for rel in BYTE_EXACT:
           crlf > 0 and bare > 0, f"crlf={crlf} bare_lf={bare}")
     check(f"{rel} keeps its UTF-8 BOM", raw.startswith(b"\xef\xbb\xbf"))
 
-CR_SENSITIVE = re.compile(r"\.(sh|py|ps1|rs|toml|md)$|(^|/)Dockerfile$")
+# EVERY tracked first-party text file, not just the obvious code extensions. An
+# earlier version of this check listed .sh/.py/.rs/.toml/.md/Dockerfile, so it
+# could not see the four `track-*/verification/expected/*.sha256` pins -- which
+# had CRLF for exactly that reason. Binaries are skipped by content, not by
+# extension.
 cr_offenders = []
 for rel in sorted(tracked):
-    if rel.startswith("reference/") or rel in BYTE_EXACT or not CR_SENSITIVE.search(rel):
+    if rel.startswith("reference/") or rel in BYTE_EXACT:
         continue
     p = ROOT / rel
     if not p.is_file():
@@ -313,7 +317,7 @@ for rel in sorted(tracked):
         continue  # binary
     if b"\r" in raw:
         cr_offenders.append(rel)
-check("no CR in any tracked first-party source, config or doc",
+check("no CR in any tracked first-party text file",
       not cr_offenders, ", ".join(cr_offenders[:8]))
 
 # ── 13. the abandoned architecture is never referenced as if it were current ─
@@ -353,6 +357,75 @@ check("check_pgo_wiring is wired into ci.sh", "check_pgo_wiring" in ci)
 for probe in ("track-a/pgo/merged.profdata", "track-a/merged.profdata"):
     r = subprocess.run(["git", "check-ignore", "-q", probe], cwd=ROOT)
     check(f"{probe} is committable (not gitignored)", r.returncode != 0)
+
+# ── 16. generators must force LF when they write committed files ──────────
+# The check above catches the SYMPTOM (a CR in a tracked file). This catches
+# the CAUSE, before it lands. `Path.write_text()` and `open()` in text mode
+# both inherit newline=None, and Python then translates every "\n" into
+# os.linesep -- CRLF on Windows. Two tools here did exactly that and wrote CRLF
+# into ten PERF.md/README.md files and all four `.sha256` pins, so the working
+# tree and the committed bytes disagreed on a repository whose whole build runs
+# on Linux. Parsed with ast, not a regex, so multi-line calls are handled
+# exactly and a `newline=` on a continuation line still counts.
+import ast
+
+
+def writers_missing_newline(path: Path):
+    """Line numbers of text-writing calls in `path` that omit newline=."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return []
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = (fn.attr if isinstance(fn, ast.Attribute)
+                else fn.id if isinstance(fn, ast.Name) else None)
+        if name not in ("write_text", "open"):
+            continue
+        if any(k.arg == "newline" for k in node.keywords):
+            continue
+        if name == "write_text":
+            hits.append(node.lineno)
+            continue
+        # open(): only text-mode writes can translate newlines.
+        mode = None
+        if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+            mode = node.args[1].value
+        for k in node.keywords:
+            if k.arg == "mode" and isinstance(k.value, ast.Constant):
+                mode = k.value.value
+        if isinstance(mode, str) and any(c in mode for c in "wax") and "b" not in mode:
+            hits.append(node.lineno)
+    return hits
+
+
+writer_hits = [f"{p.name}:{ln}" for p in sorted(TOOLING.glob("*.py"))
+               for ln in writers_missing_newline(p)]
+check("every text writer forces an explicit newline (CRLF cannot be written by accident)",
+      not writer_hits, ", ".join(writer_hits[:8]))
+
+# ── 17. PERF.md keeps its generated region marked ─────────────────────────
+# gen_docs.py replaces ONLY the text between these two markers, which is what
+# lets the board-run table survive regeneration -- run IDs are transcribed by
+# hand from the board UI and no tool can generate them. Before the markers
+# existed the generator rewrote the whole file, so regenerating the docs would
+# have silently deleted every run ID Pal recorded, and reported the result
+# "fresh" because it compares its own output against itself. If a marker is
+# lost, that fallback comes back, so the markers are load-bearing.
+for t in tracks:
+    pf = ROOT / t / "PERF.md"
+    if not pf.is_file():
+        check(f"{t}/PERF.md exists", False)
+        continue
+    pf_text = pf.read_text(encoding="utf-8")
+    check(f"{t}/PERF.md marks its generated region (so regeneration cannot delete hand-written rows)",
+          pf_text.count("<!-- BEGIN GENERATED measured") == 1
+          and pf_text.count("<!-- END GENERATED measured -->") == 1)
+    check(f"{t}/PERF.md keeps the board-run table the judges check",
+          "Board runs" in pf_text and "| Run ID |" in pf_text)
 
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:

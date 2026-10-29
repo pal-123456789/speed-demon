@@ -207,7 +207,11 @@ def main(argv=None) -> int:
         if not args.no_pin and exp_out and (refout / outname).is_file():
             pin = ROOT / f"track-{t}" / "verification" / "expected" / f"{outname}.sha256"
             pin.parent.mkdir(parents=True, exist_ok=True)
-            pin.write_text(exp_out + "\n", encoding="utf-8")
+            # newline="\n": this pin is a committed 65-byte file that other
+            # tools read back and compare. Without it Python writes os.linesep,
+            # so on Windows every pin became "<64 hex>\r\n" -- which is how all
+            # four of these arrived with CRLF in the first place.
+            pin.write_text(exp_out + "\n", encoding="utf-8", newline="\n")
             print(f"  pinned {pin.relative_to(ROOT)} <- the OFFICIAL expected hash")
 
         shutil.rmtree(refout, ignore_errors=True)

@@ -492,9 +492,16 @@ the reference (final scoring 10x).
 
 ### 2a. What was measured
 
+<!-- BEGIN GENERATED measured (tooling/gen_docs.py)
+     Everything between this marker and the matching END marker is REPLACED on
+     every run of `python tooling/gen_docs.py`. Change the ledger, or the
+     TRACKS config at the top of that file -- never this text, because your edit
+     will be overwritten. Everything OUTSIDE the two markers, including the
+     board-run table above, is hand-written and is preserved. -->
 {measured_intro}
 
 {measured_ladder}
+<!-- END GENERATED measured -->
 
 ### 2b. What was planned
 
@@ -824,6 +831,37 @@ def build_measured_intro(track, records):
     )
 
 
+GEN_BEGIN = "<!-- BEGIN GENERATED measured"
+GEN_END = "<!-- END GENERATED measured -->"
+
+
+def splice_generated(current, generated):
+    """Replace only the marked region of `current` with the generated one.
+
+    PERF.md is PART-generated, and the other part cannot be generated at all:
+    the board-run table is a transcription of run IDs read off the board UI,
+    and the ladder narrative is the human account the judges are told to reward.
+    Rewriting the file wholesale therefore DELETED every run ID on every run of
+    this tool -- silently, because the tool compares its own output against
+    itself and would have reported the result "fresh".
+
+    Everything outside the two markers is preserved byte for byte. A file with
+    no markers yet (the pre-marker template) adopts the generated text whole,
+    which is the one-time migration.
+    """
+    gb = generated.find(GEN_BEGIN)
+    ge = generated.find(GEN_END)
+    if gb < 0 or ge < 0:
+        return generated          # nothing marked: nothing to splice
+    cb = current.find(GEN_BEGIN)
+    ce = current.find(GEN_END)
+    if cb < 0 or ce < 0:
+        return generated          # pre-marker file: adopt the whole thing
+    return (current[:cb]
+            + generated[gb:ge + len(GEN_END)]
+            + current[ce + len(GEN_END):])
+
+
 def main(argv=None) -> int:
     """Generate the per-track PERF.md and README.md from the ledger.
 
@@ -864,8 +902,16 @@ def main(argv=None) -> int:
         m_label = "peak memory"
 
         track_records = [r for r in read_ledger() if r.get("track") == track]
-        measured = build_measured_ladder(track, track_records)
-        measured_intro = build_measured_intro(track, track_records)
+        # Filter ONCE, and hand the same set to the intro and the table. Doing
+        # it only inside build_measured_ladder made the intro announce
+        # "Commits represented: 241e64c, 2609713, ..." of seven commits directly
+        # above "_(no measurements recorded yet)_" -- a judge-facing log
+        # crediting measurements to a table with no rows in it. A scaffold run
+        # is not a measurement of the submission, so both readers of the ledger
+        # must agree on that before either reads it.
+        real_records = [r for r in track_records if not _is_scaffold_record(r)]
+        measured = build_measured_ladder(track, real_records)
+        measured_intro = build_measured_intro(track, real_records)
 
         perf = PERF_TEMPLATE.format(
             track=track,
@@ -899,8 +945,19 @@ def main(argv=None) -> int:
 
         for rel, text in (("PERF.md", perf), ("README.md", readme)):
             dest = tdir / rel
-            current = dest.read_text(encoding="utf-8") if dest.is_file() else None
-            if current == text:
+            # Read WITHOUT universal-newline translation. `read_text()` uses
+            # newline=None, which folds CRLF to LF, so a file whose line endings
+            # were wrong read back byte-identical to a correct one: `--check`
+            # called it fresh, this loop skipped it, and gen_docs printed
+            # "nothing to do" while four PERF.md files sat there in CRLF. Read
+            # the bytes and decode, so the comparison sees what a judge sees.
+            current = dest.read_bytes().decode("utf-8") if dest.is_file() else None
+            # PERF.md keeps its hand-written parts; only the marked region is
+            # ever rewritten. README.md is wholly generated, so it is compared
+            # and written exactly.
+            target = text if current is None else (
+                splice_generated(current, text) if rel == "PERF.md" else text)
+            if current == target:
                 continue
             stale.append((track, dest))
             if dry:
@@ -908,9 +965,17 @@ def main(argv=None) -> int:
                 continue
             # Atomic: write a sibling then rename, so an interrupted run cannot
             # leave a truncated PERF.md (the previous direct write_text could).
+            #
+            # newline="\n" is load-bearing, not tidiness. These files are
+            # committed and a judge reads them, and without it Python translates
+            # every "\n" into os.linesep, which on Windows is CRLF. Regenerating
+            # the docs on this host therefore wrote CRLF into ten tracked files
+            # while their committed bytes were LF -- the working tree and the
+            # repository disagreeing, and check-consistency failing on all four
+            # PERF.md files the first time this ran.
             tdir.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_suffix(dest.suffix + ".tmp")
-            tmp.write_text(text, encoding="utf-8")
+            tmp.write_text(target, encoding="utf-8", newline="\n")
             os.replace(tmp, dest)
             written.append(dest)
             print(f"  wrote  {dest}")

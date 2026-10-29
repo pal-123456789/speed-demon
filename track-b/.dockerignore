@@ -1,0 +1,25 @@
+# Keep host build artefacts out of the SCORED build context.
+#
+# `git` ignoring a file is NOT the same as `docker` ignoring it. This folder IS
+# the build context, and the Dockerfile's `COPY . /src` copies whatever is on
+# disk. A local `sh build.sh` leaves `run` behind, and rustc on Windows also
+# writes `run.pdb`; if the in-image compile ever failed to replace `run` -- or
+# produced it under a different name -- then `COPY --from=build /src/run
+# /app/run` would ship a stale host binary of unknown provenance to the scoring
+# box. `.gitignore` only stops the COMMIT, never the CONTEXT, and every
+# tracked-file audit stays green while it happens.
+#
+# These rules do not affect the build itself: `RUN ./build.sh` creates /src/run
+# *inside* the build stage, and .dockerignore is applied only to the context
+# upload, so the freshly compiled binary is what gets copied to the runtime
+# stage. Every name below is asserted by tooling/check-track-folders.sh, which
+# fails if a forbidden file sits in this folder without a matching line here.
+run
+run.exe
+run.pdb
+*.pdb
+*.exe
+*.o
+*.rlib
+*.log
+*.tmp
