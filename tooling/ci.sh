@@ -218,6 +218,22 @@ fi
 # ORGANIZERS' OWN code against our artifacts: harness/dockerfile_check.py (the
 # pre-build guardrail that refuses a build) and harness/dependencies.py (the D
 # axis). A reimplementation can drift; the authority cannot.
+# Repeated hand audits kept finding "one more" inconsistency because facts are
+# duplicated across the contract, the harness, the tools and the docs. This gate
+# compares every shared fact against its single authority mechanically: the
+# deadlines, all four sets of reference axes (T/M/S) across contract.toml,
+# contract.rs and k_whatif, the published hashes, the official filenames, the
+# track set and team name, any numeric gate claim, plus compilation, shell
+# parsing, link resolution and the gitignore/tracked-data boundary.
+step "CROSS-FILE CONSISTENCY (every shared fact vs its single source)"
+if "$PY" tooling/check-consistency.py >/tmp/sd-consistency.txt 2>&1; then
+  head -1 /tmp/sd-consistency.txt | sed 's/^/  /'
+  ok "every duplicated fact agrees with its authority"
+else
+  grep 'FAIL' /tmp/sd-consistency.txt | head -10 | sed 's/^/  /'
+  fail "a fact disagrees with its single source"
+fi
+
 step "OFFICIAL GUARDRAIL + D AXIS (their dockerfile_check.py, their dependencies.py)"
 OFFICIAL_OK=1
 for t in a b c d; do

@@ -123,7 +123,7 @@ repository, the write-up and the live leaderboard history — not a live demo.
 
 My submission: four Rust std-only tracks (no dependencies), each exactly one
 output file gated by SHA-256, verified against the organizers' own reference and
-their published expected hashes, with 22 CI gates, a differential-testing lab, a
+their published expected hashes, with a CI gate wall, a differential-testing lab, a
 conformance corpus covering every documented edge case, and per-commit evidence.
 
 Tell me, concretely: (1) the exact section structure for a PERF.md that earns the
@@ -154,7 +154,7 @@ in integer cents; D answers 2000 shortest-path queries on a 1.74M-node,
 (Dref/D)^0.15, speed = 50*log10(K); the reference implementations are naive
 Python. The work was verified against the organizers' own published reference,
 their test suite (58 tests), their Dockerfile guardrail, and published SHA-256
-expected-output hashes, with 22 CI gates.
+expected-output hashes.
 
 Deliver: (1) a slide-by-slide outline for 4 minutes (about 12-16 slides) with the
 speaker note for each and a suggested on-screen visual; (2) ONE continuous

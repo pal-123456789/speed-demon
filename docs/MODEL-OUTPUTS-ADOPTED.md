@@ -98,7 +98,7 @@ failing loudly) · **unsafe inventory** · formula trade-off accounting ·
 **edge-case traceability matrix** (documented case → fixture → test → code
 location) · **commit history with measured deltas** and milestone tags.
 
-**Cut these five:** "22 CI gates" as a headline (group by the failure class they
+**Cut these five:** the gate count as a headline (group by the failure class they
 prevent, and show which actually caught a bug) · superlatives and unbounded
 claims ("fastest", "zero overhead", "byte-identical on all inputs" → "on the
 tested corpus, and by construction under these assumptions") · predicted scores

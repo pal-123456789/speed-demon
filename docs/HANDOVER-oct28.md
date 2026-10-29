@@ -4,7 +4,7 @@
 > operating plan, the module loop and the video plan are in
 > [`docs/KICKOFF-PLAN-pal.md`](KICKOFF-PLAN-pal.md).
 > Written Oct 28 19:10 UTC. HEAD at the time: `d4790a9`, working tree clean,
-> 256 tracked files, 22 CI gates all green.
+> 256 tracked files, the whole CI gate wall green.
 >
 > Everything below is committed. Nothing is pending except four human actions
 > (§6). This file is the reminder: the state, the commands, and the exact
@@ -95,7 +95,7 @@ python tooling/conformance.py --track a --diff --build   # full-sample byte diff
 .\tooling\run.ps1 bench-rung.sh a --label rung-01        # or: sh tooling/bench-rung.sh a
 python tooling/k_whatif.py --scoreboard `
     --t a=1.07 b=1.88 c=0.48 d=2.42 --m a=15 b=120 c=80 d=70 --l a=150 b=260 c=180 d=220
-.\tooling\run.ps1 ci                                    # or: sh tooling/ci.sh  (22 gates)
+.\tooling\run.ps1 ci                                    # or: sh tooling/ci.sh
 
 # 3. before every green commit
 .\tooling\run.ps1 determinism-check.sh all               # or: sh tooling/determinism-check.sh all
@@ -133,7 +133,7 @@ reference/             the organizers' references + generators + the full offici
 verification/cases/    the tiny conformance corpora + the oracle's expected answers
 verification/data/     the official sample data (gitignored, regenerable)
 tooling/               38 tools: official-data, spec-cases, conformance, profile-reference, official-tests,
-                       official-axes, ci.sh (22 gates), bench-rung, pin-hash, determinism-check, k_whatif,
+                       official-axes, ci.sh (the gate wall), bench-rung, pin-hash, determinism-check, k_whatif,
                        gen-fixtures, context-replay, check-output-names, check-track-folders, …
 docs/depth/            92 profiles · 93 PGO/codegen · 94 visuals · 95 ground blueprints · 97 model digest
                        (all engines, to the byte) · 98 model prompts · 99 events-page pins
@@ -142,5 +142,5 @@ docs/WINDOW-RUNBOOK.md the hour-by-hour plan, tool map, and the submission logis
 
 **Bottom line at the freeze:** the contract is closed, the data and expected
 hashes are official and verified, the organizers' own tests and checkers pass,
-and 22 gates prove it on every commit. What remains is writing the four
+and the CI gate wall proves it on every commit. What remains is writing the four
 implementations inside the window — and the four external items above.

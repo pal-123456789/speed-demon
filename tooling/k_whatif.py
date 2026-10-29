@@ -40,11 +40,17 @@ from k_calc import (  # noqa: E402  (reuse the single source of truth)
 
 # Reference values from the events page (measured, 5 runs each). M/S_ref for
 # B/C/D are still DEFERRED at Oct 28 — supply them or use --ratios.
+# The organizers' reference axes, EXACT (harness/calibration-seed1.json and
+# harness/reference_axes.json). m_ref/s_ref were None for B/C/D while the
+# organizers had not published them; a None here SILENTLY drops that ratio from
+# K, so every scoreboard row for B/C/D was optimistic until this was filled in.
+# tooling/check-consistency.py now cross-checks all three tables against
+# verification/contract.toml.
 REFS = {
-    "A": {"t_ref": 32.05, "m_ref": 228.0, "s_ref": 56, "d_ref": 1.0},
-    "B": {"t_ref": 56.35, "m_ref": None, "s_ref": None, "d_ref": 1.0},
-    "C": {"t_ref": 14.44, "m_ref": None, "s_ref": None, "d_ref": 1.0},
-    "D": {"t_ref": 72.69, "m_ref": None, "s_ref": None, "d_ref": 1.0},
+    "A": {"t_ref": 32.047276, "m_ref": 227.98336, "s_ref": 56, "d_ref": 1.0},
+    "B": {"t_ref": 56.352376, "m_ref": 2199.9616, "s_ref": 91, "d_ref": 1.0},
+    "C": {"t_ref": 14.444059, "m_ref": 367.435776, "s_ref": 108, "d_ref": 1.0},
+    "D": {"t_ref": 72.692655, "m_ref": 892.915712, "s_ref": 43, "d_ref": 1.0},
 }
 
 
