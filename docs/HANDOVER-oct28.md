@@ -132,14 +132,17 @@ Priority order from the measured profiles: **A** hour-key/timestamp first ·
 below ~0.4 points/hour, within ~1.5× of its floor, or when a rung needs ≥10%
 more lines for <3% time.
 
-## 6. The only open items (all external)
+## 6. Open items
 
 | # | Item | Where |
 |---|---|---|
-| 1 | ~~Real team name~~ **DONE**: `Pal Ghevariya` (solo) | the four `track-*/.speed-demon.toml` |
-| 2 | GitHub repo from the starter template + push to the `speed-demon` branch | external (0 remotes configured) |
-| 3 | One Docker smoke build: `python check.py a --data verification/data/track-a --expected ca6311bbeb53...` | a Docker-capable machine (this host has none) |
-| 4 | Submission form (repo URL, tracks, the three confirmations) | speeddemon.dev |
+| 1 | ~~Real team name~~ **DONE**: `Pal Ghevariya` (solo), `language = "Rust"`, `dependency_count = 0` | the four `track-*/.speed-demon.toml` |
+| 2 | ~~GitHub repo + push to `speed-demon`~~ **DONE**: `pal-123456789/speed-demon`, private, default branch `speed-demon`, created from the official starter template, pushed at `6750a40` | github.com |
+| 3 | ~~Docker smoke build~~ **DONE — and the premise was wrong.** Docker runs inside WSL Ubuntu on this host, so the whole scored path is testable locally. All four tracks verified at full scale: allowlisted digest-pinned `FROM`s, `docker build --network=none`, a 30 MB image, the container reading the board's dataset from the read-only `/data` mount, exactly one output file, exit 0, 4.4–5.6 s. The correctness hash fails only because `track-*/src/main.rs` is the rule-05 scaffold, and reconstructing that hash from `#SCAFFOLD_NOT_IMPLEMENTED` plus the line/byte count reproduces it exactly. Commands: `docs/KICKOFF-CARD.md`. | WSL Ubuntu |
+| 4 | **Install the board app** on the repo (browser, ~30 s) | github.com/apps/speed-demon-board |
+| 5 | **Register, and file the team form** (repo URL, all four tracks, members). No form, no score. | speeddemon.dev |
+
+Only items 4 and 5 remain, and both are browser steps that need you.
 
 ## 7. Where everything lives
 

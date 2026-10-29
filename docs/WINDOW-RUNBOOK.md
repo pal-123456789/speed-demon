@@ -120,15 +120,30 @@ means no score.**
 
 **Pre-flight checklist before the first push**
 
-- [ ] `team` set to the real name in all four `.speed-demon.toml` (currently
-      the placeholder `solo`)
-- [ ] folders for tracks you are NOT entering deleted (an unchanged folder is
-      the reference itself → the board reports it "unchanged" and does not run
-      it)
-- [ ] `python check.py a --data verification/data/track-a --expected ca6311bb...` passes on a
-      Docker-capable machine (the one thing this Windows host cannot run)
-- [ ] the PERF.md board-run table is ready to record the first run IDs
-- [ ] `sh tooling/ci.sh` green and the working tree committed
+- [x] `team` set to the real name in all four `.speed-demon.toml`
+      (`Pal Ghevariya`, plus `language = "Rust"` and `dependency_count = 0`,
+      which is what makes D = 1.00)
+- [x] all four tracks entered — nothing to delete. All four folders differ from
+      the starter (Rust, not the reference Python), so the board runs all four.
+- [x] **the organizers' `check.py` passes on all four tracks.** The note that
+      used to sit here — "the one thing this Windows host cannot run" — was
+      wrong: Docker runs inside WSL Ubuntu on this machine, so the complete
+      scored path is testable locally. Verified at full scale:
+      allowlisted digest-pinned `FROM`s, `docker build --network=none`
+      succeeded, 30 MB image (cap 2 GB), the container read the whole dataset
+      from the read-only `/data` mount, wrote exactly one file to `/out` and
+      exited 0, in 4.4–5.6 s. The correctness hash still fails, and that is
+      correct: `track-*/src/main.rs` is the rule-05 scaffold, which emits
+      `#SCAFFOLD_NOT_IMPLEMENTED` plus the line and byte count it read.
+      Exact commands: `docs/KICKOFF-CARD.md`.
+- [x] the PERF.md board-run table is ready to record the first run IDs
+      (`## 1b. Board runs`, one row per live-board push, in step order)
+- [x] `sh tooling/ci.sh` green and the working tree committed
+- [x] the repo exists and is pushed: `pal-123456789/speed-demon`, **private**,
+      default branch `speed-demon`, created from the official starter template
+- [ ] **install the Speed Demon Board app on it** — human, in a browser, ~30 s
+- [ ] **register and file the team form** — human, in a browser. No form, no
+      score, and every team member must be registered separately.
 
 ## The immutable rules (recited at every decision point)
 

@@ -12,6 +12,12 @@
 /out-*/
 /verification/out/
 /verification/data/
+# The FULL-scale seed-1 datasets, the exact bytes the live board runs on. About
+# 765 MB: too large to commit, and reproducible in ~9 minutes with
+# `python tooling/official-data.py --track all --scale full`. Kept in the tree
+# rather than in %TEMP% so a Windows Disk Cleanup cannot delete the corpus
+# mid-window. Used by `python check.py <track> --data verification/data-full/track-<track>`.
+/verification/data-full/
 /verification/adversarial/
 *.out
 

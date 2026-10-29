@@ -4,12 +4,30 @@
 > All source under `track-*/src/` is a **correctness-green stub** that compiles offline
 > via `rustc` (no cargo fetch). Real optimization replaces stubs at H0 inside the 72h window.
 > Rules 04/05 explicitly permit reading, designing, and preparing the environment beforehand.
+> The full scored path is already verified locally: offline build, allowlisted
+> digest-pinned base images, a 30 MB image and a sandboxed run that reads the board's
+> full-scale dataset and writes exactly one output file, on all four tracks.
+>
+> **▶ AT KICKOFF, OPEN THIS: [`docs/KICKOFF-CARD.md`](docs/KICKOFF-CARD.md)** — the
+> three browser steps, then the exact command sequence for 15:00 UTC / 20:30 IST,
+> the freeze-day publish command, and the three facts that decide the score.
 >
 > **Start here: [`docs/HANDOVER-oct28.md`](docs/HANDOVER-oct28.md)** — what was
 > done on Oct 28, the kickoff facts (15:00 UTC), the exact H0 command sequence,
-> and the four open external items. Written to be read first when we resume.
+> and the external items that remain.
 >
 > **Judge-facing + video: [`docs/MODEL-OUTPUTS-ADOPTED.md`](docs/MODEL-OUTPUTS-ADOPTED.md)**
+>
+> **The architecture: [`docs/MODULE-PLAN.md`](docs/MODULE-PLAN.md)** — the modules
+> per track, their acceptance tests, the build order and the risks.
+>
+> **The plan: [`docs/KICKOFF-PLAN-pal.md`](docs/KICKOFF-PLAN-pal.md)** — the
+> 72-hour schedule, the module loop, and the video plan.
+>
+> **Then: [`docs/WINDOW-RUNBOOK.md`](docs/WINDOW-RUNBOOK.md)** — the hour-by-hour
+> plan and the submission logistics; and
+> [`docs/CAMPAIGN-STATUS.md`](docs/CAMPAIGN-STATUS.md)** — the operational
+> dashboard and the contract of values.
 >
 > **The architecture: [`docs/MODULE-PLAN.md`](docs/MODULE-PLAN.md)** — the modules
 > per track, their acceptance tests, the build order and the risks.
