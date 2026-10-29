@@ -95,3 +95,81 @@ formula and the spec's worked example, (b) a property test that compares against
 the Python reference, or (c) one of the three items explicitly deferred to the
 oracle. Nothing is taken on faith, and the property tests are cheap enough to run
 as the first thing after each module lands.
+
+---
+
+# SELF-REVIEW (the P-E pass, done in-house — no further model credits spent)
+
+I attacked the two items that carried residual proof obligations, plus the
+termination rule. Result: **no new defects**, two proofs closed, one nuance
+recorded. What follows is the reasoning, so it can be re-checked at H1.
+
+## 1. Phrase matcher — cursor monotonicity holds, and the anchor is arbitrary
+
+*Claim under test:* `cp[s] = gallop_ge(P[s], cp[s], tgt)` is sound "because
+targets only grow".
+
+- The outer loop walks the anchor slot's positions ascending, so
+  `st = p - b` is non-decreasing, and `tgt = st + s` is non-decreasing for each
+  slot. Therefore every `cp[s]` is only ever searched forward from its previous
+  value — monotone, valid, no rescan. ✓
+- **Completeness does not depend on which slot is the anchor.** A valid match
+  occupies `st .. st+k-1`, so slot `b`'s term sits at `st + b`, which is in
+  `P[b]`; the anchor loop reaches `p = st + b` and reconstructs exactly that
+  start. Choosing the *shortest position list* is therefore purely a speed
+  choice, not a correctness one — which is why `argmin` cannot introduce a wrong
+  answer. ✓
+- `if cp[s] == P[s].len() { return false }` is correct rather than premature:
+  later anchors have strictly larger `tgt`, so once a slot has no position at or
+  after `tgt`, it has none for any later anchor either. ✓
+- Repeated terms are safe because cursors are indexed **per slot**, not per term
+  (`"x x x"` holds three independent cursors over one shared slice). ✓
+- `if p < b { continue }` correctly rejects starts that would begin before
+  position 0.
+
+## 2. Bidirectional termination — the empty-heap break is sound, and `top()` is a valid lower bound
+
+*Claim under test:* breaking when either heap empties cannot miss a shorter path.
+
+- If the forward heap empties, forward has **settled every node reachable from
+  `s`** (a node is settled exactly when popped; the heap empties only after all
+  of them are popped). On any shortest `s→t` path, the tail edge `(u,v)` has `u`
+  reachable, so `u` was settled, and at that moment forward relaxed `(u,v)` and
+  set `mu <= df(u) + w + db(v) = dist(s,t)`. Since `mu` is always the length of a
+  real walk, `mu >= dist(s,t)`. Hence `mu == dist(s,t)`. ✓ The symmetric
+  argument covers an emptied backward heap.
+- `F.d[s] = 0` and `B.d[t] = 0` at init, so `lab(other, t)` / `lab(other, s)` are
+  real values (never INF-from-unset) on those relaxations — which is what makes
+  the argument above land. ✓
+- **`top(S) = heap.peek() >> NB` is a lower bound on the minimum *unsettled*
+  distance, so the `top(F) + top(B) >= mu` break is conservative.** Keys in the
+  heap are >= their node's current label (labels only decrease), and the minimum
+  unsettled label is itself present in the heap, so `top() <= min unsettled`.
+  Settled nodes can leave **stale, smaller** keys behind, which makes `top()`
+  *weaker* (smaller) — that only extends the search, it can never break early and
+  return a too-large answer. This nuance was not in the original answer; it is
+  the part of the proof that makes the rule safe rather than merely plausible. ✓
+
+## 3. Adopted as-is, with the one nuance above noted
+
+`mu` is updated **unconditionally** on every relaxation (including when `nd` is
+not an improvement) — this is required, not optional: the value that completes
+the shortest path may come from a relaxation of an edge whose target already had
+a smaller label.
+
+## 4. Decision: stop asking models about the design
+
+The remaining risk is no longer in the algorithms — the arithmetic is verified
+and the two proof obligations are closed. It sits in three places a model cannot
+help with:
+
+1. **Three empirical behaviours** deferred to the oracle (unterminated quote /
+   bytes after a closing quote; empty phrase query; `-0.00` as a minimum). One
+   `conformance --oracle` run each settles them, at H1.
+2. **Implementation discipline** — the property tests (n = 1..200 vs the
+   reference; CH = 1..80 sweeps; edge-order and thread sweeps; the all-zero
+   assertion between queries) are what actually catch coding mistakes.
+3. **Measurement**, which decides every later optimisation.
+
+So: no further model passes on the design. Spend the remaining budget on the
+oracle runs and the property tests at H1.
