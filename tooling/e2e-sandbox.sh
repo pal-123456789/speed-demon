@@ -34,46 +34,96 @@ bad()  { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
 # ── seed plausible input for each track ─────────────────────────────────────
 # Enough structure that a real implementation would produce real output, small
 # enough to stay instant. These are shapes, not the scored datasets.
+#
+# TWO BUGS LIVED HERE, and both made this gate unable to fail:
+#
+#  1. The `case` labels were UPPERCASE (`A)`) while `$tid` is lowercase, so no
+#     arm ever matched: seed() made the directory and wrote no files at all.
+#     Every binary then correctly refused to run, and the gate reported the
+#     refusal as the binary's fault. It passed for weeks only because the
+#     pre-kickoff scaffolds wrote their sentinel output regardless of input --
+#     the gate was never exercising the real path, and the moment real
+#     implementations landed it went red for a reason that was not their fault.
+#
+#  2. The fixtures were written for those same scaffolds and do not match the
+#     frozen formats. Track A had no METHOD field, so a correctly parsed line
+#     would have been rejected. Track C had no `note` or `region_id` column and
+#     no regions.csv, and Track D had no weight column. A gate whose input is
+#     malformed tests nothing but the error path.
+#
+# The shapes below follow the specs, and deliberately include the hostile cases
+# each track is scored on: a 5xx for A's error rate, a quoted comma and a CRLF
+# for C, an unknown region for `_UNMATCHED`, and a self-loop plus an unreachable
+# pair for D.
 seed() {
     d="$1"
     tid="$2"
     mkdir -p "$d"
     case "$tid" in
-        A)
+        a)
             {
                 i=0
                 while [ $i -lt 200 ]; do
-                    printf '2026-01-01T%02d:%02d:00Z /api/v1/item/%d 200 %d\n' \
-                        $((i % 24)) $((i % 60)) $((i % 17)) $((10 + i % 400))
+                    # ts(27 bytes) SP method SP endpoint SP status SP latency
+                    if [ $((i % 17)) -eq 0 ]; then st=503; else st=200; fi
+                    printf '2026-01-01T%02d:%02d:00.000000Z GET /api/v1/item/%d %s %d\n' \
+                        $((i % 24)) $((i % 60)) $((i % 17)) "$st" $((10 + i % 400))
                     i=$((i + 1))
                 done
             } > "$d/requests.log"
             ;;
-        B)
+        b)
             {
                 i=0
                 while [ $i -lt 120 ]; do
-                    printf 'document %d alpha beta gamma delta epsilon\n' "$i"
+                    # id TAB text
+                    printf '%d\talpha beta gamma delta epsilon doc%d\n' "$i" "$i"
                     i=$((i + 1))
                 done
             } > "$d/docs.txt"
-            printf 'alpha\nbeta\ngamma\ndelta\n' > "$d/queries.txt"
-            ;;
-        C)
+            # BOOL with no operator, a left-to-right chain, and a phrase
             {
-                printf 'id,name,amount\n'
+                printf 'BOOL alpha\n'
+                printf 'BOOL alpha AND beta\n'
+                printf 'BOOL alpha OR beta NOT gamma\n'
+                printf 'PHRASE "alpha beta"\n'
+            } > "$d/queries.txt"
+            ;;
+        c)
+            printf 'region_id,country\n1,AAA\n2,BBB\n' > "$d/regions.csv"
+            {
+                printf 'id,name,note,region_id,amount\r\n'
                 i=1
                 while [ $i -le 120 ]; do
-                    printf '%d,user%d,%d\n' "$i" $((i % 9)) $((i * 7 % 1000))
+                    rid=$((i % 4))
+                    if [ $i -eq 3 ]; then
+                        # quoted comma, quoted quote, and an embedded CRLF
+                        printf '%d,"Sume, Sufo","said ""no"" twice",%d,%d.%02d\r\n' \
+                            "$i" "$rid" $((i % 900)) $((i % 100))
+                    elif [ $i -eq 5 ]; then
+                        # trailing space in the name is a DISTINCT value
+                        printf '%d,"Betts ",note,%d,%d.%02d\r\n' \
+                            "$i" "$rid" $((i % 900)) $((i % 100))
+                    else
+                        printf '%d,user%d,note %d,%d,%d.%02d\r\n' \
+                            "$i" "$i" "$i" "$rid" $((i % 900)) $((i % 100))
+                    fi
                     i=$((i + 1))
                 done
             } > "$d/records.csv"
             ;;
-        D)
+        d)
             {
-                printf '5 6\n'
-                printf '0 1\n1 2\n2 3\n3 4\n4 0\n1 3\n'
+                # header: n m, then exactly m lines of "u v w"
+                printf '5 7\n'
+                printf '0 1 2\n1 2 3\n2 3 4\n3 4 5\n4 0 6\n0 0 9\n1 3 1\n'
             } > "$d/graph.txt"
+            # reachable, unreachable, and a zero-edge query
+            {
+                printf '0 4\n'
+                printf '0 2\n'
+                printf '0 0\n'
+            } > "$d/queries.txt"
             ;;
     esac
 }
