@@ -3,6 +3,10 @@
 > **Schedule:** one canonical H-table, UTC and IST, at the top of
 > [docs/KICKOFF-CARD.md](docs/KICKOFF-CARD.md). The plan documents below defer to
 > it; if any of them disagrees about *when*, the table is right.
+>
+> **Everything else, by intent:** [docs/INDEX.md](docs/INDEX.md) — "I want to…"
+> to the file that answers it. **Pre-kickoff boundary and evidence:**
+> [docs/RULE-05.md](docs/RULE-05.md).
 
 
 > **Status: PRE-KICKOFF SCAFFOLD — no project code committed before Oct 30 15:00 UTC.**
@@ -57,8 +61,8 @@
 ## Map
 
 ```
-D:\SpeedDemon-Campaign\
-├── Makefile                    # `make verify`, `make bench`, `make freeze-check`, `make ci`
+<repository root>                 # this repo; clone it anywhere
+├── Makefile                    # convenience targets; `make` is not required
 ├── LICENSE                     # MIT (OSI-approved, public at freeze)
 ├── check.py                    # the organizers' own checker: offline build + sandbox run + sha256
 ├── .gitattributes              # pins LF across clones — a CR in build.sh is a silent zero
