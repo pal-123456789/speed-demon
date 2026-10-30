@@ -33,40 +33,57 @@ Our own bisect of the build: tokenise 0.51 s, +hash lookup 2.67 s, +dedupe/push
 
 **Those are memory-latency numbers, not arithmetic numbers.** A hash probe into a
 75,747-slot table plus a term-arena compare is two cache-line touches, and a push
-into one of 75,747 separate `Vec<u32>` headers is a third, a fourth and sometimes
-a fifth when the `Vec` reallocates.
+into one of 75,747 separate `Vec<u32>` headers is a third.
 
-48× is not achievable by shaving cycles off a per-token random access. **It
-requires not doing a random access per token at all.**
+### But that is NOT the main story — and an earlier version of this section was wrong
 
-### The shape that fits the budget
+An earlier revision of this file concluded that the 48× gap required abandoning
+the hash probe for a flat-append plus radix sort. **That diagnosis was wrong, and
+one grep overturns it: Track B contains no threads at all.** No
+`thread::scope`, no `spawn`, no `available_parallelism`. It is one pass over
+254 MB on one core, while Track A uses twelve threads, Track C twelve and Track D
+eight.
 
-Append, then sort. Per token, append a fixed-width record to a flat buffer —
-sequential writes, one or two cycles, no probe, no per-term `Vec`:
-
-```
-records: 28.7 M (term id, doc id) pairs, packed into u64  =  230 MB
-append:  ~2 cycles per token                              =  ~25 ms
-radix:   8 passes of 8 bits, each a sequential stream      = ~370 ms of traffic
-```
-
-Every byte of that is sequential, which is also why it would scale where the
-current design cannot. Compare the cost of the thing being replaced: 36.28 M
-independent ~200-cycle stalls is on the order of seconds.
-
-**The trade, priced on the real formula.** Memory rises from 132 MB to roughly
-230 MB plus the query side, so the M factor falls:
+The arithmetic is unambiguous:
 
 ```
-M:  (2199.96/132)^0.2 = 1.76   ->   (2199.96/260)^0.2 = 1.53      = -13%
-T:  (3.938/1.0)^0.5   = 1.00   ->   (3.938/1.2)^0.5   = 2.09      = +109%
-K_B: 4.863 -> ~11.2      PTS 34.35 -> 52.5                        = +18 points
+ours  : 254 MB in 3.938 s  =  64.5 MB/s   on ONE core
+leader: 254 MB in 0.329 s  = 772  MB/s   772 / 64.5 = 11.97
 ```
 
-Overall becomes `(60.08 × 52.5 × 42.34)^(1/3) = 51.1`, against 44.375 now.
+**11.97 is twelve.** The leader is not doing radically less work per byte; it is
+doing the same work on about twelve cores. The gap is the parallelism we never
+added to this track.
 
-**That single change is worth more than everything else on this list combined**,
-and it is the only one that closes a 48× gap.
+### So the fix is the one already applied twice
+
+Parallelise `build_index` exactly the way Track A and Track C were parallelised:
+
+* `docs.txt` is `id TAB text LF` with no quoting, so it splits at **newline
+  boundaries** — far simpler than Track C's quote-parity proof.
+* Each worker takes a byte range, its own `postings: Vec<Vec<u32>>` and its own
+  `stamp` array (75,747 `u32`, 303 KB — cheap to duplicate).
+* Merge is a **concatenation per term**, in worker order. Because each worker's
+  posting list is already doc-ascending and the ranges are increasing, the
+  concatenation comes out globally ascending with no sort and no dedupe.
+
+Memory cost is only the duplicated `Vec` headers: 8 × 75,747 × 24 B = 14 MB.
+
+Priced, with the build at 7.15 s of a 9.03 s run and 79% of it parallel:
+`9.03 → ~2.8 s`, so the board's 3.938 s should land near **1.25 s**.
+
+```
+T factor: (3.938/1.25)^0.5 = 1.77   ->  K_B 4.863 -> 8.6  ->  PTS 34.35 -> 46.5
+overall : (60.08 x 46.5 x 42.34)^(1/3) = 49.1   against 44.375 now
+```
+
+The 50,000 queries are the remaining 1.9 s and are embarrassingly parallel too, so
+there is more behind that.
+
+**This is a ~60-line change using a pattern already proven twice in this repository,
+not a radix-sort rewrite.** The lesson is worth recording: I profiled the loop,
+found real cache misses, and then explained a 12× gap with them — when the simpler
+explanation was that we had simply never used more than one core.
 
 ## Track C — the peak is per-thread parse state, and it is released
 
