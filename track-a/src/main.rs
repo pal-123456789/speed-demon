@@ -47,10 +47,11 @@ use std::vec::IntoIter;
 
 /// 6 physical cores with SMT: 12 slices keep every hardware thread fed.
 const NTHREADS: usize = 12;
-/// Per-worker read buffer. Deliberately not several MiB: M is scored, and
-/// twelve buffers are the whole input-side footprint. 512 KiB still amortises
-/// the ~20 MB each worker reads down to ~40 reads.
-const CHUNK: usize = 1 << 19;
+/// Per-worker read buffer. Deliberately small: M is scored, and twelve buffers
+/// are the whole input-side footprint. Measured with the harness's trimmed mean
+/// on the full 238 MB set: 64 KiB 0.241 s < 128 KiB 0.254 s < 512 KiB 0.274 s,
+/// while 16 KiB loses to syscall overhead (0.308 s).
+const CHUNK: usize = 1 << 16;
 
 /// One (hour, endpoint) group: its latencies, its 5xx count, its percentiles.
 #[derive(Default)]
@@ -206,7 +207,9 @@ fn take(line: &[u8], key: &mut Vec<u8>, map: &mut Map) {
 /// `end` and stops only before a line that begins after it. The next worker then
 /// drops that straddling line, so the two rules meet exactly: dropping on the
 /// left and `<=` on the right is a partition — no line counted twice, none lost,
-/// including the case where a line begins exactly on a cut.
+/// including the case where a line begins exactly on a cut. The one line that
+/// has no terminator at all — a file that does not end in `\n` — is picked up by
+/// the `<= end` rule at EOF, because `nl` can never find it.
 fn scan(path: &str, start: u64, end: u64) -> Vec<Row> {
     let mut map = Map::default();
     if start >= end {
@@ -235,7 +238,18 @@ fn scan(path: &str, start: u64, end: u64) -> Vec<Row> {
             buf.resize(buf.len() * 2, 0); // pathological line, never in practice
         }
         let n = match file.read(&mut buf[have..]) {
-            Ok(0) => break,
+            Ok(0) => {
+                // EOF. A file that does not end in `\n` leaves its last line
+                // unterminated in the buffer: the loop above cannot see it and
+                // no later worker will either (it would drop it as residue). It
+                // is taken here under the same rule the loop uses — own it when
+                // it starts at or before `end`, and only if the first-line skip
+                // has already happened.
+                if !skip && have > 0 && pos <= end {
+                    take(&buf[..have], &mut key, &mut map);
+                }
+                break;
+            }
             Ok(n) => n,
             Err(e) => {
                 eprintln!("[track-a] read error: {e}");
