@@ -78,15 +78,36 @@ before optimising ours.
 
 ## What is NOT worth doing
 
-* **Cutting lines.** B is already smaller than the leader's B and 11.9× slower.
+* **Rewriting the byte scanners.** Track A's `next_space` was a byte-at-a-time
+  loop sitting right next to `nl`, which is eight-at-a-time, so I rewrote it to
+  match. Correctness was never in doubt (5/5 on the published hash), and the
+  interleaved A/B rejected it: **0.3550 s vs 0.3645 s, 3% slower.** The reason
+  redirects the search — `buf[i..].iter().position(|&c| c == b' ')` **already
+  compiles to SIMD.** rustc vectorises that pattern into a 16- or 32-byte scan, so
+  the source only *looks* byte-at-a-time and my hand-written 8-byte loop processed
+  fewer bytes per iteration than the compiler's. The idiom appears in all four
+  tracks, so none of the per-byte gaps are in scanning.
+
+* **Replacing Track A's tree merge with a single-level k-way merge.** The tree
+  merge folds twelve lists in ~4 levels and re-copies each group's latencies at
+  every level, which looked like ~180 MB of memcpy for 50 MB of data. Rewritten,
+  correctness held (5/5), and the A/B was flat: **0.4955 s vs 0.4975 s.** The
+  copied-bytes theory was wrong, or the cost is far below the measurement floor.
+  The k-way version is also ~24 lines longer, so it is strictly worse and was
+  reverted. The "45 ms merge" figure that motivated it came from a single loaded
+  run and should not be trusted until it is measured on a quiet box.
+
+* **Cutting lines.** B is already smaller than the leader's B (723 vs 790) and
+  11.9× slower, so S is not what separates us.
 * **Micro-tuning C.** C is dropped from the best three, so its score does not
-  reach the Overall until it passes B (34.347). It currently needs +37% for that.
-  Its **memory** is still worth fixing on engineering grounds, but not for points.
-* **Parallelising Track D's parse further.** Tried; the board measured it slower
-  (1.579 → 1.874 s) and it was reverted.
-* **Chasing local timings.** Changes have measured +46% locally and +2.3% on the
-  board, and 3% locally and 13.7% on the board. Local numbers are for direction
-  and for the hash; the hash is exact either way.
+  reach the Overall until it passes B. Its **memory** is still worth fixing on
+  engineering grounds, but not for points.
+* **Trading memory for time by hand**, e.g. Track D at 8 workers instead of 12:
+  measured, reverted, and the sign of the local measurement was opposite to the
+  board's.
+* **Chasing local timings.** Six changes have now measured differently locally
+  and on the board, and in both directions. Local numbers are for direction and
+  for the hash; the hash is exact either way.
 
 ## The order I would work in
 
