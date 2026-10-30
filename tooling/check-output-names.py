@@ -63,6 +63,27 @@ def from_scaffold(track: str) -> tuple[str, str]:
     return (i.group(1) if i else ""), (o.group(1) if o else "")
 
 
+def writes_output(track: str, want: str) -> bool:
+    """Does the track's real implementation name the organizer's output file?
+
+    The pre-kickoff scaffolds carried a `DEFAULT_OUTPUT` constant, and this gate
+    used to compare that constant against `check.py`. The real implementations do
+    not have it -- they build the path with `format!("{outd}/summary.txt")` -- so
+    the old check read an empty string and reported a disagreement that did not
+    exist.
+
+    The INTENT is unchanged and still worth enforcing: the file we actually write
+    must be the file the organizer's checker looks for, because disagreeing about
+    the name is a guaranteed zero. So fall back to searching the source for the
+    literal, which is true of any implementation style.
+    """
+    p = ROOT / f"track-{track}" / "src" / "main.rs"
+    if not p.is_file():
+        return False
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return f'"{want}"' in text or f"/{want}" in text
+
+
 def from_harness() -> dict[str, tuple[str, str]]:
     p = ROOT / "verification" / "harness" / "src" / "contract.rs"
     text = p.read_text(encoding="utf-8", errors="replace")
@@ -103,8 +124,14 @@ def main(argv: list[str] | None = None) -> int:
 
         if sc_out == want:
             ok += 1
+        elif sc_out == "" and writes_output(t, want):
+            # no scaffold constant any more -- the real implementation writes it
+            ok += 1
         else:
-            failures.append(f"track-{t}: scaffold DEFAULT_OUTPUT={sc_out!r} != check.py {want!r}")
+            failures.append(
+                f"track-{t}: the code does not name the organizer's output "
+                f"{want!r} (scaffold constant was {sc_out!r})"
+            )
         if h_out == want:
             ok += 1
         else:
