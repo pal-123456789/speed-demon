@@ -344,18 +344,17 @@ fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mu
     }
 }
 
-/// One streaming pass building the postings.  Returns the document count
-/// (max parsed id + 1).
+/// One streaming pass building the postings.
 fn build_index(
     path: &PathBuf,
     tt: &TermTable,
     postings: &mut [Vec<u32>],
     stamp: &mut [u32],
-) -> io::Result<u32> {
+) -> io::Result<()> {
     let f = File::open(path)?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let mut line: Vec<u8> = Vec::with_capacity(2048);
-    let mut ndocs: u32 = 0;
+    let mut doc: u32 = 0;
     loop {
         line.clear();
         let n = r.read_until(b'\n', &mut line)?;
@@ -366,19 +365,16 @@ fn build_index(
         if line[end - 1] == b'\n' {
             end -= 1;
         }
-        let tab = line[..end].iter().position(|&b| b == b'\t');
-        let (id, tstart) = match tab {
+        let (id, tstart) = match line[..end].iter().position(|&b| b == b'\t') {
             Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => (ndocs, end),
+            None => (doc, end),
         };
         let text = &mut line[tstart..end];
         ascii_lower_in_place(text);
         index_text(text, tt, postings, stamp, id);
-        if id >= ndocs {
-            ndocs = id + 1;
-        }
+        doc += 1;
     }
-    Ok(ndocs)
+    Ok(())
 }
 
 // ── set algebra on ascending id vectors ────────────────────────────────
@@ -560,6 +556,7 @@ fn verify_phrases(
     let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
     let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
     let mut pi = 0usize;
+    let mut doc: u32 = 0;
     loop {
         if pi >= pairs.len() {
             break;
@@ -573,11 +570,11 @@ fn verify_phrases(
         if line[end - 1] == b'\n' {
             end -= 1;
         }
-        let tab = match line[..end].iter().position(|&b| b == b'\t') {
-            Some(t) => t,
-            None => continue,
+        let (id, tstart) = match line[..end].iter().position(|&b| b == b'\t') {
+            Some(t) => (parse_u32(&line[..t]), t + 1),
+            None => (doc, end),
         };
-        let id = parse_u32(&line[..tab]);
+        doc += 1;
         while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
             pi += 1;
         }
@@ -587,7 +584,7 @@ fn verify_phrases(
         if (pairs[pi] >> 32) as u32 != id {
             continue;
         }
-        let text = &mut line[tab + 1..end];
+        let text = &mut line[tstart..end];
         ascii_lower_in_place(text);
         tokenize_spans(text, &mut spans);
         loop {
@@ -717,13 +714,10 @@ fn main() {
     let nterms = tt.len();
     let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
     let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
-    let ndocs = match build_index(&docs_path, &tt, &mut postings, &mut stamp) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
-            return;
-        }
-    };
+    if let Err(e) = build_index(&docs_path, &tt, &mut postings, &mut stamp) {
+        eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
+        return;
+    }
     drop(stamp);
     lap!("build index");
 
@@ -806,6 +800,5 @@ fn main() {
     if io_err {
         eprintln!("[track-{TRACK}] write error on {}", out_path.display());
     }
-    let _ = ndocs;
     lap!("write");
 }
