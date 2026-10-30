@@ -1,4 +1,4 @@
-//! Speed Demon 2026 — Track B (Index).
+//! Speed Demon 2026 â€” Track B (Index).
 //!
 //! Strategy
 //! --------
@@ -12,26 +12,32 @@
 //!   one side is much smaller than the other.
 //! * PHRASE: intersect the terms' id lists (rarest first) for candidates,
 //!   collect the `(document, phrase)` pairs, and verify them in a second
-//!   sequential pass over `docs.txt` — the pairs are sorted by document id,
+//!   sequential pass over `docs.txt` â€” the pairs are sorted by document id,
 //!   so the file is read front to back with no random access at all.
 //!
 //! Tokenisation is exactly `re.findall(rb"[a-z0-9]+", text.lower())` on bytes:
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
 //! (including every byte >= 0x80) is a separator.
 //!
-//! `std` only — no crates, no Cargo.toml.
+//! `std` only â€” no crates, no Cargo.toml.
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::thread;
 
 const TRACK: &str = "B";
 const DEFAULT_INPUT: &str = "docs.txt";
 const DEFAULT_OUTPUT: &str = "results.txt";
 const QUERIES_FILE: &str = "queries.txt";
 
-// ── paths ──────────────────────────────────────────────────────────────
+/// Workers used for the index build. The container is pinned to twelve hardware
+/// threads on six P-cores; the build was previously single-threaded, which is
+/// where this track's 12x gap to the leader came from.
+const NWORKERS: usize = 12;
+
+// â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn data_dir() -> PathBuf {
     env::var("SD_DATA_DIR")
@@ -55,7 +61,7 @@ fn output_path() -> PathBuf {
     out_dir().join(name)
 }
 
-// ── tokenisation ───────────────────────────────────────────────────────
+// â”€â”€ tokenisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const fn build_is_tok() -> [bool; 256] {
     let mut t = [false; 256];
@@ -96,7 +102,7 @@ fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
     }
 }
 
-// ── term interning ─────────────────────────────────────────────────────
+// â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn hash_bytes(b: &[u8]) -> u64 {
@@ -227,7 +233,7 @@ impl TermTable {
     }
 }
 
-// ── queries ────────────────────────────────────────────────────────────
+// â”€â”€ queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const OP_AND: u8 = 0;
 const OP_OR: u8 = 1;
@@ -305,7 +311,7 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
     }
 }
 
-// ── corpus scan ────────────────────────────────────────────────────────
+// â”€â”€ corpus scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn parse_u32(b: &[u8]) -> u32 {
@@ -344,40 +350,127 @@ fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mu
     }
 }
 
-/// One streaming pass building the postings.
-fn build_index(
-    path: &PathBuf,
-    tt: &TermTable,
-    postings: &mut [Vec<u32>],
-    stamp: &mut [u32],
-) -> io::Result<()> {
-    let f = File::open(path)?;
+/// Streaming pass over one byte range of `docs.txt`, returning that range's own
+/// postings.
+///
+/// Splitting is trivial compared to Track C: `docs.txt` is `id TAB text LF` with
+/// no quoting and no embedded newlines, so a byte offset can be aligned to a line
+/// start by discarding to the next `\n`. The document id is taken from the line's
+/// own id field, so a worker needs no global document counter and the ranges are
+/// independent.
+///
+/// The partition rule is the one Track A uses: a worker processes every line whose
+/// FIRST byte is `< end`, discarding the partial line at its own `start`. The line
+/// that straddles a cut therefore belongs to exactly one worker -- the one to its
+/// left -- and the next worker drops it. `start == 0` is the only range that has
+/// nothing to drop.
+fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Vec<Vec<u32>> {
+    let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
+    let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
+
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return postings,
+    };
     let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut pos = start;
+    if start > 0 {
+        // Discard the partial line that the worker to our left already owned.
+        // `pos` must advance by exactly the bytes discarded: it is what the
+        // `pos < end` test below measures against, so leaving it at `start`
+        // makes that boundary wrong by the discarded length and this worker
+        // then claims lines that belong to the next one.
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
+        if r.seek(SeekFrom::Start(start)).is_err() {
+            return postings;
+        }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return postings,
+            Ok(k) => pos += k as u64,
+        }
+    }
+
     let mut line: Vec<u8> = Vec::with_capacity(2048);
-    let mut doc: u32 = 0;
     loop {
         line.clear();
-        let n = r.read_until(b'\n', &mut line)?;
+        let n = match r.read_until(b'\n', &mut line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
         if n == 0 {
             break;
         }
-        let mut end = n;
-        if line[end - 1] == b'\n' {
-            end -= 1;
+        // A line that begins at or after `end` belongs to the next worker.
+        if pos >= end {
+            break;
         }
-        let (id, tstart) = match line[..end].iter().position(|&b| b == b'\t') {
+        pos += n as u64;
+
+        let mut stop = n;
+        if line[stop - 1] == b'\n' {
+            stop -= 1;
+        }
+        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
             Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => (doc, end),
+            // The spec guarantees the TAB; this keeps a malformed line from
+            // borrowing an id that belongs to another worker's range.
+            None => continue,
         };
-        let text = &mut line[tstart..end];
+        let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, postings, stamp, id);
-        doc += 1;
+        index_text(text, tt, &mut postings, &mut stamp, id);
+    }
+    postings
+}
+
+/// Build the postings across every worker over disjoint byte ranges.
+///
+/// This track was the only one of the four with NO parallelism at all -- one pass
+/// over 254 MB on one core, at 64.5 MB/s, against a leader doing the same work at
+/// 772 MB/s. That ratio is twelve, and it was twelve because we were using one
+/// core and they were using about twelve.
+///
+/// Merging is a concatenation per term in worker order. Each worker's list is
+/// already ascending in document id and the ranges increase, so the concatenation
+/// comes out globally ascending with no sort and no dedupe. The only cost is the
+/// duplicated `Vec` headers: `NWORKERS * nterms * 24` bytes, about 14 MB.
+fn build_index(path: &Path, tt: &TermTable, postings: &mut [Vec<u32>]) -> io::Result<()> {
+    let nterms = postings.len();
+    let size = fs::metadata(path)?.len();
+    if size == 0 || nterms == 0 {
+        return Ok(());
+    }
+
+    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
+    let mut parts: Vec<Vec<Vec<u32>>> = thread::scope(|s| {
+        let mut handles = Vec::with_capacity(nworkers);
+        for i in 0..nworkers {
+            let (a, b) = (
+                size * i as u64 / nworkers as u64,
+                size * (i as u64 + 1) / nworkers as u64,
+            );
+            handles.push(s.spawn(move || build_range(path, tt, nterms, a, b)));
+        }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+
+    for (ti, slot) in postings.iter_mut().enumerate() {
+        let total: usize = parts.iter().map(|p| p[ti].len()).sum();
+        if total == 0 {
+            continue;
+        }
+        slot.reserve(total);
+        for p in parts.iter_mut() {
+            slot.append(&mut p[ti]);
+        }
     }
     Ok(())
 }
 
-// ── set algebra on ascending id vectors ────────────────────────────────
+// â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// First index `>= from` whose value is `>= x`.
 #[inline]
@@ -507,7 +600,7 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     }
 }
 
-// ── phrase verification ────────────────────────────────────────────────
+// â”€â”€ phrase verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Does `text` (already lowercased) contain `terms` at `terms.len()`
 /// consecutive token positions?
@@ -605,7 +698,7 @@ fn verify_phrases(
     Ok(())
 }
 
-// ── output ─────────────────────────────────────────────────────────────
+// â”€â”€ output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn push_u64(out: &mut Vec<u8>, mut v: u64) {
@@ -684,7 +777,7 @@ fn eval_bool(
     }
 }
 
-// ── main ───────────────────────────────────────────────────────────────
+// â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn main() {
     let docs_path = input_path();
@@ -713,12 +806,11 @@ fn main() {
 
     let nterms = tt.len();
     let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
-    let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
-    if let Err(e) = build_index(&docs_path, &tt, &mut postings, &mut stamp) {
+    if let Err(e) = build_index(&docs_path, &tt, &mut postings) {
         eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
         return;
     }
-    drop(stamp);
+
     lap!("build index");
 
     // Phrase candidates, gathered as `(document << 32) | query index` so the
