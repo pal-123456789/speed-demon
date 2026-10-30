@@ -40,7 +40,14 @@ awk -v la="$LA" -v lb="$LB" '
     asort(a); asort(b)
     ma = (na%2) ? a[(na+1)/2] : (a[na/2]+a[na/2+1])/2
     mb = (nb%2) ? b[(nb+1)/2] : (b[nb/2]+b[nb/2+1])/2
-    printf "  median %s = %.4fs   median %s = %.4fs   ->  %s is %.2fx %s\n",
-           la, ma, lb, mb, (mb<ma?lb:la), (ma<mb?mb/ma:ma/mb), (mb<ma?"faster":"slower")
+    # Work out the winner and the ratio in one place. An earlier version chose
+    # the label and the ratio with two separate conditionals that disagreed when
+    # B was slower, and printed "A is 0.87x slower" for a case where A was
+    # faster. A measurement tool that misreports its own verdict is worse than
+    # no tool, so the direction is computed once here.
+    if (ma <= mb) { win = la; r = mb/ma }
+    else          { win = lb; r = ma/mb }
+    printf "  median %s = %.4fs   median %s = %.4fs\n", la, ma, lb, mb
+    printf "  -> %s is %.2fx faster\n", win, r
   }' /tmp/sd-ab-a.txt /tmp/sd-ab-b.txt
 rm -f /tmp/sd-ab-a.txt /tmp/sd-ab-b.txt
