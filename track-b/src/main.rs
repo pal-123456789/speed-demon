@@ -867,21 +867,54 @@ fn main() {
     };
     let mut w = BufWriter::with_capacity(1 << 20, file);
 
-    let mut line: Vec<u8> = Vec::with_capacity(256);
-    let mut cur: Vec<u32> = Vec::new();
-    let mut nxt: Vec<u32> = Vec::new();
-    let mut io_err = false;
+    // ── evaluate and format the answers across every worker ────────────────
+    //
+    // Each query is independent and produces exactly one line, so splitting the
+    // list changes no output byte: the chunks are concatenated in query order and
+    // the write stays serial. This is the same shape as Track D's query phase.
+    //
+    // Only BOOL queries are evaluated here; the phrase answers were already
+    // computed by the single sequential pass above, and they must stay that way.
+    // `verify_phrases` reads all 254 MB of docs.txt, so splitting it by query
+    // would have twelve workers read 3 GB instead of 254 MB -- which is why this
+    // parallelises the *answers* and not the phrase scan.
+    let nthreads = NWORKERS.min(queries.len().max(1));
+    let chunk = queries.len().div_ceil(nthreads).max(1);
+    let parts: Vec<Vec<u8>> = thread::scope(|s| {
+        let postings = &postings;
+        let hits = &hits;
+        let mut handles = Vec::with_capacity(nthreads);
+        for (base, part) in queries.chunks(chunk).enumerate() {
+            let start = base * chunk;
+            handles.push(s.spawn(move || {
+                let mut cur: Vec<u32> = Vec::new();
+                let mut nxt: Vec<u32> = Vec::new();
+                let mut line: Vec<u8> = Vec::with_capacity(256);
+                let mut out: Vec<u8> = Vec::with_capacity(part.len() * 24 + 16);
+                for (k, q) in part.iter().enumerate() {
+                    let qi = start + k;
+                    let r: &[u32] = match q {
+                        Query::Bool { terms, ops } => {
+                            eval_bool(terms, ops, postings, &mut cur, &mut nxt);
+                            &cur
+                        }
+                        Query::Phrase(_) => &hits[qi],
+                    };
+                    format_result(&mut line, r);
+                    out.extend_from_slice(&line);
+                }
+                out
+            }));
+        }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
 
-    for (qi, q) in queries.iter().enumerate() {
-        let r: &[u32] = match q {
-            Query::Bool { terms, ops } => {
-                eval_bool(terms, ops, &postings, &mut cur, &mut nxt);
-                &cur
-            }
-            Query::Phrase(_) => &hits[qi],
-        };
-        format_result(&mut line, r);
-        if w.write_all(&line).is_err() {
+    let mut io_err = false;
+    for p in &parts {
+        if w.write_all(p).is_err() {
             io_err = true;
             break;
         }
