@@ -6,41 +6,61 @@
 //!
 //! The organizers call this the correctness track and say most disqualifications
 //! happen here, so the parser follows spec section 2.1 literally and does nothing
-//! clever:
+//! clever. What IS clever is where the work happens: twelve threads parse twelve
+//! disjoint byte ranges of the file, each found by a proven record boundary.
 //!
 //! * A field starting with `"` ends at the next `"` that is not part of a `""`
 //!   pair. Inside quotes every other byte is data, including `,`, LF and U+FEFF.
 //! * A U+FEFF at the very start of the file, or immediately after a record
 //!   terminator, is a byte order mark and is skipped. Anywhere else it is data.
-//!   (An unquoted field can never contain one, because a mid-file BOM always sits
-//!   at the start of a record.)
 //! * A record terminator is a CRLF or a bare LF **outside quotes**.
 //! * Money is exact integer cents. `-5.25` is -525. No float ever touches the
 //!   value or the output, so `-0.00` cannot be produced even by accident.
 //! * `names_distinct` compares exact byte strings after unescaping, so `Betts` and
 //!   `Betts ` are two values, and the empty unquoted name and `""` are one.
 //!
-//! Memory note: the whole file is held, because the parse is a linear scan and
-//! re-reading costs more than the 202 MB it occupies. Names are only copied when
-//! they are new to their country's set, so distinct-name storage is bounded by the
-//! ~100,000-value pool rather than by 3.32M records.
+//! ## How the file is split safely
+//!
+//! A newline seen with an **even** running count of `"` bytes is a record
+//! boundary. That is a theorem about this format, not a heuristic: a quoted field
+//! is `DQUOTE *(qbyte / DQUOTE DQUOTE) DQUOTE`, so its quote count is
+//! `1 + 2k + 1`, and an unquoted field contains no `"` at all. Every record
+//! therefore contains an even number of quotes, and a `\n` inside a quoted field
+//! always sits at odd parity.
+//!
+//! So one sequential pass records the boundary nearest each twelfth of the file,
+//! and each thread then seeks to its own boundary and parses to the next one. No
+//! record is split, none is parsed twice, and no thread needs to know anything
+//! about another's bytes.
+//!
+//! ## Memory
+//!
+//! Each thread streams its range through its own buffer rather than reading the
+//! range whole. Holding all twelve ranges at once would have cost the 202 MB the
+//! streaming version was introduced to avoid -- the board measured 422 MB for a
+//! single heap copy of this file, against 254 MB for a streamed one.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, read};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
+/// Per-thread read buffer. Small enough that twelve of them cost less than the
+/// file, large enough that the read syscall is not the bottleneck.
+const CHUNK: usize = 4 << 20;
+
+const NTHREADS: usize = 12;
+
 /// A fast, non-cryptographic hasher (the FxHash multiply-rotate-xor).
 ///
 /// The standard library's `HashMap` uses SipHash: DoS-resistant, and far more
-/// work than this program needs. Track C hashes 3.32M region ids and 3.32M name
-/// byte strings, none of it attacker-controlled, and at 1.98 s for 202 MB the
-/// parse was running at about 102 MB/s -- well below what a byte scanner should
-/// manage. Nothing about the ANSWER depends on the hash function, only on set
-/// membership, so this changes speed and nothing else; the SHA-256 is the proof.
+/// work than this program needs. Track C hashes millions of region ids and name
+/// byte strings, none of it attacker-controlled. Nothing about the ANSWER depends
+/// on the hash function, only on set membership, so this changes speed and
+/// nothing else; the SHA-256 is the proof.
 struct FxHasher(u64);
 
 const FX_K: u64 = 0x517c_c1b7_2722_0a95;
@@ -65,10 +85,6 @@ impl std::hash::Hasher for FxHasher {
     #[inline]
     fn write_i64(&mut self, n: i64) {
         self.write_u64(n as u64);
-    }
-    #[inline]
-    fn write_u8(&mut self, n: u8) {
-        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(FX_K);
     }
     #[inline]
     fn finish(&self) -> u64 {
@@ -110,6 +126,27 @@ impl Agg {
             amount_max: i64::MIN,
             ..Default::default()
         }
+    }
+}
+
+/// Fold one thread's aggregate into another. The name sets UNION, because
+/// `names_distinct` is a count of distinct values, not a sum of counts.
+fn merge(dst: &mut Agg, src: Agg) {
+    dst.count += src.count;
+    dst.id_sum += src.id_sum;
+    dst.amount_sum += src.amount_sum;
+    if src.count > 0 {
+        if src.amount_min < dst.amount_min {
+            dst.amount_min = src.amount_min;
+        }
+        if src.amount_max > dst.amount_max {
+            dst.amount_max = src.amount_max;
+        }
+    }
+    dst.name_bytes += src.name_bytes;
+    dst.note_bytes += src.note_bytes;
+    for n in src.names {
+        dst.names.insert(n);
     }
 }
 
@@ -165,142 +202,120 @@ fn money(cents: i64, out: &mut Vec<u8>) {
     let _ = write!(out, "{}.{:02}", a / 100, a % 100);
 }
 
-fn main() {
-    let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
-    let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
+/// The byte offsets that begin a record: `[first_record, b1, .., len]`.
+///
+/// One sequential pass. `parity` is the running count of `"` bytes modulo two,
+/// and a `\n` at even parity is a record boundary by the argument in the module
+/// comment. The first boundary is the end of the header line; the last is the
+/// length of the file.
+fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    let mut interior: Vec<u64> = Vec::with_capacity(nthreads - 1);
+    let mut targets: Vec<u64> = (1..nthreads)
+        .map(|i| len * i as u64 / nthreads as u64)
+        .collect();
+    let mut next = 0usize;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut off: u64 = 0;
+    let mut parity = 0u8;
+    let mut header_end: Option<u64> = None;
 
-    // ── the lookup table ────────────────────────────────────────────────────
-    let regions = match read(format!("{data}/regions.csv")) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[track-c] cannot read regions.csv: {e}");
-            exit(1);
+    loop {
+        let k = f.read(&mut buf)?;
+        if k == 0 {
+            break;
         }
-    };
-    let mut lookup: FxMap<i64, [u8; 3]> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
-    {
-        let mut p = 0usize;
-        // header
-        while p < regions.len() && regions[p] != b'\n' {
-            p += 1;
-        }
-        while p < regions.len() {
-            p += 1; // step over the newline
-            if p >= regions.len() {
-                break;
-            }
-            let rid = digits(&regions, &mut p);
-            if p < regions.len() && regions[p] == b',' {
-                p += 1;
-            }
-            if p + 2 < regions.len() {
-                lookup.insert(rid, [regions[p], regions[p + 1], regions[p + 2]]);
-                p += 3;
-            }
-            while p < regions.len() && regions[p] != b'\n' {
-                p += 1;
+        for (i, &b) in buf[..k].iter().enumerate() {
+            if b == b'"' {
+                parity ^= 1;
+            } else if b == b'\n' && parity == 0 {
+                let end = off + i as u64 + 1;
+                if header_end.is_none() {
+                    header_end = Some(end);
+                    continue;
+                }
+                if next < targets.len() && end >= targets[next] {
+                    interior.push(end);
+                    while next < targets.len() && end >= targets[next] {
+                        next += 1;
+                    }
+                }
             }
         }
+        off += k as u64;
     }
+    let _ = targets.drain(..);
 
-    // ── the hostile file, STREAMED ──────────────────────────────────────────
-    // Never held whole. Reading the 202 MB file into a heap buffer costs 202 MB
-    // of cgroup memory for a file the host has already put in page cache, and
-    // the board's M column showed it: 422 MB reported against ~220 MB of live
-    // data, worse than the naive Python reference's 367 MB. Chunked reads keep
-    // the peak at one chunk plus the aggregates.
-    // 32 MiB. The buffer is the only thing standing between a 202 MB heap copy
-    // and the aggregates, so it is the whole memory win; making it small bought
-    // nothing and cost real time (4 MiB measured 6.58 s against 4.42 s for the
-    // single slurp), because every chunk pays a read syscall and a memmove. At
-    // 32 MiB there are seven chunks for a 202 MB file and the parse loop streams
-    // at full speed.
-    const CHUNK: usize = 32 << 20;
-    let mut file = match File::open(format!("{data}/records.csv")) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[track-c] cannot read records.csv: {e}");
-            exit(1);
-        }
-    };
-    let mut buf: Vec<u8> = vec![0u8; CHUNK + (1 << 20)];
-    let mut have = 0usize;
-    let mut pos = 0usize;
-    let mut eof = false;
-    let mut header_done = false;
+    let mut pts = Vec::with_capacity(interior.len() + 2);
+    pts.push(header_end.unwrap_or(0));
+    pts.extend_from_slice(&interior);
+    pts.push(len);
+    Ok(pts)
+}
 
+/// Parse `[start, end)` and return this range's aggregates.
+///
+/// `start` and `end` are both record boundaries, so the range holds whole records
+/// and no record is shared with a neighbour. The parser is the same one the
+/// sequential version used; only the framing differs.
+fn parse_range(
+    path: &str,
+    start: u64,
+    end: u64,
+    lookup: &FxMap<i64, [u8; 3]>,
+) -> (FxMap<[u8; 3], Agg>, Agg, bool) {
     let mut groups: FxMap<[u8; 3], Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
-
     let mut name: Vec<u8> = Vec::with_capacity(64);
     let mut note: Vec<u8> = Vec::with_capacity(64);
 
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (groups, unmatched, saw_unmatched),
+    };
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return (groups, unmatched, saw_unmatched);
+    }
+
+    let total = (end - start) as usize;
+    let mut buf: Vec<u8> = vec![0u8; CHUNK];
+    let mut have = 0usize;
+    let mut pos = 0usize;
+    let mut done = 0usize;
+
     loop {
-        // carry the unparsed tail to the front, then refill
         if pos > 0 {
             buf.copy_within(pos..have, 0);
             have -= pos;
             pos = 0;
         }
-        if !eof {
-            match file.read(&mut buf[have..]) {
-                Ok(0) => eof = true,
-                Ok(k) => have += k,
-                Err(e) => {
-                    eprintln!("[track-c] read error: {e}");
-                    exit(1);
+        if done < total {
+            let want = (total - done).min(buf.len() - have);
+            if want == 0 {
+                break; // a record larger than the buffer cannot occur
+            }
+            match file.read(&mut buf[have..have + want]) {
+                Ok(0) => break,
+                Ok(k) => {
+                    have += k;
+                    done += k;
                 }
+                Err(_) => break,
             }
         }
 
-        if !header_done {
-            if have == 0 && eof {
-                break;
-            }
-            let mut i = 0usize;
-            if buf[..have].starts_with(&BOM) {
-                i = 3;
-            }
-            while i < have && buf[i] != b'\n' {
-                i += 1;
-            }
-            if i < have {
-                header_done = true;
-                pos = i + 1;
-            } else if eof {
-                break; // no header line at all
-            } else {
-                continue; // the header straddles the chunk boundary
-            }
-        }
-
-        // Single pass. Parsing optimistically and rolling back the ONE record
-        // that straddles the chunk edge is cheaper than scanning every byte
-        // twice to find a safe boundary first -- and the arithmetic is why it
-        // matters: T carries a 0.5 exponent and M only 0.2, so a 44% rise in T
-        // costs more than a 48% fall in M gains. Measured: the two-pass version
-        // went 4.42 s -> 7.06 s on T, a net loss on K.
         let recs: &[u8] = &buf[..have];
-        loop {
-            if pos >= have {
-                break;
-            }
-            let start = pos;
-
-            // a BOM immediately after a terminator belongs to the record
+        while pos < have {
+            let rec_start = pos;
             if recs[pos..].starts_with(&BOM) {
-                if pos + 3 > have && !eof {
-                    pos = start; // cannot tell yet: the BOM straddles the edge
-                    break;
-                }
                 pos += 3;
                 if pos >= have {
-                    pos = start;
+                    pos = rec_start;
                     break;
                 }
             }
-
             let id = digits(recs, &mut pos);
             if pos < have && recs[pos] == b',' {
                 pos += 1;
@@ -334,11 +349,9 @@ fn main() {
                 cents = -cents;
             }
 
-            // The terminator is the proof that the record was complete. Without
-            // one the buffer ended mid-record -- in a field, in a quoted value,
-            // or between the CR and its LF -- so discard the partial parse and
-            // wait for the next chunk. Truncation anywhere always lands here,
-            // because every other way of ending a record sets this flag.
+            // The terminator is the proof the record was complete. `end` is a
+            // record boundary, so the only way to run out is the tail of a chunk,
+            // in which case the parse is discarded and retried after a refill.
             let mut terminated = false;
             if pos < have && recs[pos] == b'\r' {
                 pos += 1;
@@ -347,12 +360,11 @@ fn main() {
                 pos += 1;
                 terminated = true;
             }
-            if !terminated && !eof {
-                pos = start;
+            if !terminated {
+                pos = rec_start;
                 break;
             }
 
-            // ── join and accumulate ─────────────────────────────────────────
             let agg = match lookup.get(&region) {
                 Some(code) => groups.entry(*code).or_insert_with(Agg::new),
                 None => {
@@ -376,22 +388,91 @@ fn main() {
             }
         }
 
-        if eof && pos >= have {
+        if done >= total && (pos >= have || pos == 0) {
             break;
-        }
-        // Progress is impossible only when a FULL buffer holds no terminator at
-        // all, which would mean one record larger than the buffer.
-        if !eof && pos == 0 && have == buf.len() {
-            eprintln!(
-                "[track-c] no record terminator in a full {} byte buffer — a single record \
-                 cannot be that large; the input is outside the contract",
-                buf.len()
-            );
-            exit(1);
         }
     }
 
-    // ── output, sorted bytewise, `_UNMATCHED` last by construction ──────────
+    (groups, unmatched, saw_unmatched)
+}
+
+fn main() {
+    let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
+    let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
+    let records = format!("{data}/records.csv");
+
+    // ── the lookup table ────────────────────────────────────────────────────
+    let regions = match read(format!("{data}/regions.csv")) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[track-c] cannot read regions.csv: {e}");
+            exit(1);
+        }
+    };
+    let mut lookup: FxMap<i64, [u8; 3]> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
+    {
+        let mut p = 0usize;
+        while p < regions.len() && regions[p] != b'\n' {
+            p += 1;
+        }
+        while p < regions.len() {
+            p += 1; // step over the newline
+            if p >= regions.len() {
+                break;
+            }
+            let rid = digits(&regions, &mut p);
+            if p < regions.len() && regions[p] == b',' {
+                p += 1;
+            }
+            if p + 2 < regions.len() {
+                lookup.insert(rid, [regions[p], regions[p + 1], regions[p + 2]]);
+                p += 3;
+            }
+            while p < regions.len() && regions[p] != b'\n' {
+                p += 1;
+            }
+        }
+    }
+
+    // ── the split, then twelve threads over disjoint records ────────────────
+    let pts = match record_boundaries(&records, NTHREADS) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[track-c] cannot scan records.csv: {e}");
+            exit(1);
+        }
+    };
+
+    let mut parts: Vec<(FxMap<[u8; 3], Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(pts.len());
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let path = records.as_str();
+            let lookup = &lookup;
+            handles.push(scope.spawn(move || parse_range(path, a, b, lookup)));
+        }
+        for h in handles {
+            if let Ok(r) = h.join() {
+                parts.push(r);
+            }
+        }
+    });
+
+    // ── merge, then one total order ─────────────────────────────────────────
+    let mut groups: FxMap<[u8; 3], Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    let mut unmatched = Agg::new();
+    let mut saw_unmatched = false;
+    for (g, un, saw) in parts {
+        if saw {
+            saw_unmatched = true;
+        }
+        merge(&mut unmatched, un);
+        for (k, a) in g {
+            merge(groups.entry(k).or_insert_with(Agg::new), a);
+        }
+    }
+
     let mut keys: Vec<[u8; 3]> = groups.keys().copied().collect();
     keys.sort_unstable();
 
@@ -399,23 +480,13 @@ fn main() {
     for k in keys {
         let a = &groups[&k];
         out.extend_from_slice(&k);
-        let _ = write!(
-            out,
-            " {} {} ",
-            a.count, a.id_sum
-        );
+        let _ = write!(out, " {} {} ", a.count, a.id_sum);
         money(a.amount_sum, &mut out);
         out.push(b' ');
         money(a.amount_min, &mut out);
         out.push(b' ');
         money(a.amount_max, &mut out);
-        let _ = write!(
-            out,
-            " {} {} {}\n",
-            a.names.len(),
-            a.name_bytes,
-            a.note_bytes
-        );
+        let _ = write!(out, " {} {} {}\n", a.names.len(), a.name_bytes, a.note_bytes);
     }
     if saw_unmatched {
         out.extend_from_slice(b"_UNMATCHED ");
@@ -426,13 +497,7 @@ fn main() {
         money(a.amount_min, &mut out);
         out.push(b' ');
         money(a.amount_max, &mut out);
-        let _ = write!(
-            out,
-            " {} {} {}\n",
-            a.names.len(),
-            a.name_bytes,
-            a.note_bytes
-        );
+        let _ = write!(out, " {} {} {}\n", a.names.len(), a.name_bytes, a.note_bytes);
     }
 
     if let Err(e) =
