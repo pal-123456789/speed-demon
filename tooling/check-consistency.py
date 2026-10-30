@@ -469,6 +469,31 @@ check("every Python tool forces UTF-8 stdio", not stdio_missing, ", ".join(stdio
 check("the UTF-8 stdio fixer is present so a new tool can be patched",
       (TOOLING / "add_utf8_stdio.py").is_file())
 
+# ── 20. no stale track paths in the Rust harness ──────────────────────────
+# The DEAD list above names whole `tracks/A-ingest`-style paths, so it missed the
+# general forms: a `join("tracks")` component, and a track directory rebuilt from
+# the track letter instead of taken from the contract. Two of those sat in
+# verification/harness/src/main.rs -- `repo_root` required a `tracks/` directory
+# that exists nowhere, so the probe never matched and it silently returned the
+# working directory; and `expected_hash` looked for the pin under
+# `root/tracks/<dir>/`, so the harness's SHA correctness gate NEVER RAN and every
+# bench reported "no expected hash pinned". The data and output paths were also
+# built as `track-A`. All of it is invisible on Windows and breaks on fsn1, which
+# is where this binary is meant to run.
+harness_src = sorted((ROOT / "verification" / "harness" / "src").glob("*.rs"))
+stale_paths = []
+for p in harness_src:
+    for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if 'join("tracks")' in line:
+            stale_paths.append(f"{p.name}:{i} join(tracks)")
+        if 'format!("track-' in line and "to_ascii_uppercase" in line:
+            stale_paths.append(f"{p.name}:{i} track dir built from the uppercase letter")
+check("no stale 'tracks/' path or letter-built track dir in the harness",
+      not stale_paths, "; ".join(stale_paths[:6]))
+check("the harness resolves track directories through one helper",
+      any("fn track_dir(" in p.read_text(encoding="utf-8", errors="replace")
+          for p in harness_src))
+
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:
     for f in FAILS:

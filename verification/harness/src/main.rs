@@ -162,13 +162,22 @@ fn parse_opts(args: &[String]) -> Opts {
 /// "missing" file failures, and run outside a git repository the git gates
 /// disappeared entirely (see the lockdown's git section). Looking for the
 /// marker files is what makes "run it from anywhere" true.
+///
+/// The second marker used to be `tracks/`, which was the layout of an abandoned
+/// five-track design and exists **nowhere** in this repository. So the probe
+/// never matched, `repo_root()` returned the working directory after all, and
+/// the promise above was false: measured from `verification/` the harness still
+/// reported missing files. The marker is now a sibling `track-*` directory,
+/// which is what actually distinguishes the root from a subdirectory.
 fn repo_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut probe: &Path = &cwd;
     loop {
-        if probe.join("verification").join("contract.toml").is_file()
-            && probe.join("tracks").is_dir()
-        {
+        let has_contract = probe.join("verification").join("contract.toml").is_file();
+        let has_track = contract::tracks()
+            .values()
+            .any(|t| probe.join(t.dir).is_dir());
+        if has_contract && has_track {
             return probe.to_path_buf();
         }
         match probe.parent() {
@@ -224,12 +233,15 @@ fn output_is_scaffold(out_dir: &Path) -> bool {
 }
 
 /// The pinned expected output hash, if the sample has shipped.
+///
+/// The path used to be `root/tracks/<dir>/...`, from the abandoned five-track
+/// layout. This repository keeps each track at `root/<dir>`, which is what
+/// `lockdown.rs::read_pinned_hash` already used -- so this twin looked in a
+/// directory that does not exist, returned `None` every time, and the SHA
+/// correctness gate never ran: `bench` reported "no expected hash pinned" and
+/// `RESULT: FAIL` on a repository whose pin was present and correct.
 fn expected_hash(track: &Track, root: &Path) -> Option<String> {
-    let dir = root
-        .join("tracks")
-        .join(track.dir)
-        .join("verification")
-        .join("expected");
+    let dir = root.join(track.dir).join("verification").join("expected");
     for name in [
         format!("{}.sha256", track.output),
         "sample.sha256".to_string(),
@@ -426,13 +438,29 @@ fn run_container(
 /// The per-track binary produced by track-*/build.sh: the extensionless
 /// `run` in the track folder (the old `target/release/speeddemon-{a}`
 /// dispatcher layout is gone). `--bin` overrides it; on Windows prefer
+/// The canonical directory name for a track letter, from the contract.
+///
+/// This used to be built inline by upper-casing the track letter, producing
+/// `track-A`. The repository uses `track-a` (see `contract.rs`'s `dir`
+/// field), and Windows hides the difference because its filesystem is
+/// case-insensitive -- so the mistake would first show up on fsn1, a Linux box,
+/// where the harness is explicitly meant to run (`make harness`, no PowerShell
+/// and no Python there) and where `track-A` simply does not exist. The contract
+/// already carries the right name, so ask it instead of reformatting the letter.
+fn track_dir(id: char) -> String {
+    contract::tracks()
+        .get(&id)
+        .map(|t| t.dir.to_string())
+        .unwrap_or_else(|| format!("track-{}", id.to_ascii_lowercase()))
+}
+
 /// `run.exe` when present, since CreateProcess cannot launch an
 /// extensionless file.
 fn local_bin(root: &Path, id: char, opts: &Opts) -> PathBuf {
     if let Some(b) = opts.get("bin") {
         return PathBuf::from(b);
     }
-    let dir = root.join(format!("track-{}", id.to_ascii_uppercase()));
+    let dir = root.join(track_dir(id));
     let exe = dir.join("run.exe");
     if cfg!(windows) && exe.is_file() {
         return exe;
@@ -544,11 +572,11 @@ fn cmd_bench(opts: &Opts) -> Result<(), String> {
     }
     let data_dir = PathBuf::from(opts.get_or(
         "data",
-        &format!("{}/verification/data/track-{}", root.display(), id),
+        &format!("{}/verification/data/{}", root.display(), track_dir(id)),
     ));
     let out_dir = PathBuf::from(opts.get_or(
         "out",
-        &format!("{}/verification/out/track-{}", root.display(), id),
+        &format!("{}/verification/out/{}", root.display(), track_dir(id)),
     ));
     let image = opts.get_or("image", "speeddemon/solo:bench");
     let label = opts.get_or("label", "bench");
@@ -1093,4 +1121,97 @@ fn cmd_contract(_opts: &Opts) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the path resolution in THIS file.
+    //!
+    //! `main.rs` had no test module at all, which is exactly why two stale paths
+    //! from an abandoned layout survived in it: a `tracks/` component in both
+    //! `repo_root` and `expected_hash`, and an uppercase `track-A` built from
+    //! the track letter. Every one of them was invisible on Windows and every
+    //! one of them breaks on fsn1, which is where this binary is meant to run.
+
+    use super::*;
+
+    /// A fresh, uniquely-named temporary directory per test (tests run in
+    /// parallel, so a shared name would race).
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sd-harness-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn repo_root_finds_this_repository_from_the_crate_directory() {
+        // The probe used to require a `tracks/` directory, which exists nowhere
+        // in this repository. It therefore never matched, `repo_root()` returned
+        // the working directory after all, and "run it from anywhere" was false.
+        let root = repo_root();
+        assert!(
+            root.join("verification").join("contract.toml").is_file(),
+            "repo_root returned {} which holds no verification/contract.toml",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn track_dir_is_the_lowercase_contract_name() {
+        // The name used to be built by upper-casing the track letter, producing
+        // `track-A`. Windows hides the difference; fsn1 does not.
+        for (id, t) in contract::tracks() {
+            assert_eq!(
+                track_dir(id),
+                t.dir,
+                "track_dir disagrees with the contract"
+            );
+            assert_eq!(track_dir(id), track_dir(id).to_lowercase());
+        }
+        assert_eq!(track_dir('A'), "track-a");
+    }
+
+    #[test]
+    fn expected_hash_finds_the_pin_in_this_repository() {
+        // The regression that mattered: with a `tracks/` component in the path
+        // this returned None on a repository whose pin was present and correct,
+        // so the SHA correctness gate -- the harness's central job -- never ran
+        // and every `bench` reported "no expected hash pinned".
+        let root = repo_root();
+        let tracks = contract::tracks();
+        let t = tracks.get(&'A').expect("track A is in the contract");
+        let found = expected_hash(t, &root)
+            .unwrap_or_else(|| panic!("no pin found for {} under {}", t.dir, root.display()));
+        assert_eq!(found.len(), 64);
+        assert!(found.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn expected_hash_is_none_when_no_pin_exists() {
+        let root = tmp("nopin");
+        let tracks = contract::tracks();
+        let t = tracks.get(&'A').unwrap();
+        assert_eq!(expected_hash(t, &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expected_hash_tolerates_a_bom_and_a_filename_column() {
+        // PowerShell's Out-File writes a UTF-8 BOM by default and a pin that
+        // fails to parse is a gate failure, so a correct pin written from
+        // Windows must still be read correctly.
+        let root = tmp("bom");
+        let t = contract::tracks().get(&'A').cloned().unwrap();
+        let dir = root.join(t.dir).join("verification").join("expected");
+        std::fs::create_dir_all(&dir).unwrap();
+        let hex = "ab".repeat(32);
+        std::fs::write(
+            dir.join(format!("{}.sha256", t.output)),
+            format!("\u{feff}{hex}  {}\n", t.output),
+        )
+        .unwrap();
+        assert_eq!(expected_hash(&t, &root).as_deref(), Some(hex.as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

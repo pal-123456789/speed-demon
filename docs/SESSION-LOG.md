@@ -101,6 +101,24 @@ success, or reports the wrong failure, in a way nothing notices.
 | 14 | **`check_doc_k.py` existed but was wired into nothing** — a real gate that had never run | Orphaned gate |
 | 15 | **My fix for #10 passed locally and failed on a fresh clone**: `$ErrorActionPreference = "Stop"` turns native stderr into a fatal error | Caught by the gate added for #10 |
 
+### Second session — the measurement and gate infrastructure was inert
+
+Found by executing the scripts that run **at** kickoff, which had never been run.
+The theme sharpens: these are not wrong algorithms, they are **machinery that
+reports success while doing nothing**.
+
+| # | Defect | Class |
+|---|---|---|
+| 16 | **The Rust harness's SHA correctness gate never ran.** `expected_hash()` looked for the pin under `root/tracks/<dir>/` — the abandoned five-track layout, which exists nowhere here. It returned `None` on every call, so `bench` printed *"no expected hash pinned — the correctness gate did not run"* and `RESULT: FAIL` on a repository whose pin was present and correct. The harness's central job was dead, and `lockdown.rs` had the correct path all along — two twins in one crate disagreeing. | A gate that can never pass |
+| 17 | **`repo_root()` required a `tracks/` directory** that exists nowhere, so the probe never matched and it silently fell back to the working directory. Its own docstring promised "run it from anywhere"; run from `verification/` it reported ~15 missing files. | A promise that was false |
+| 18 | **Track paths were built as `track-A`** by upper-casing the letter, while the repository uses `track-a`. Windows hides this (case-insensitive); fsn1 does not, and the harness is specifically built to run there. | Invisible on the dev host, fatal on the scoring host |
+| 19 | **CI skipped the three scoring gates on this host** — correctness, timeout and determinism, exactly the gates that decide whether a track scores — behind a `uname -s = Linux` guard, on the theory that the harness needed Linux ELF binaries. It does not: it spawns the binary directly and probes the Windows `run.exe` name itself. The e2e suite credited with covering them never checked output against the published hash. | Capability denied by inference |
+| 20 | **`bench-rung.sh` had the same `uname` guard**, so every rung measured during H1–H21 would have used crude millisecond timing and written **nothing** to `verification/ledger.jsonl`. The measured ladder is generated from that ledger and `PERF.md` is 8% of the track total — it could never have filled in. | Silent absence of evidence |
+
+Fixing #16 also repaired the ledger: `expected_sha256` was `null` in every record
+and is now the official pin, so a ledger row finally links a measurement to the
+answer it was measured against.
+
 ### What each one became
 Nothing was fixed by hand alone. Each is now a mechanical gate, and each gate has
 been **deliberately broken** to confirm it bites:
@@ -124,6 +142,13 @@ been **deliberately broken** to confirm it bites:
 - the K arithmetic quoted in the docs is recomputed
 - every documented PowerShell gate must actually run the binary and reach the
   hashing stage
+- no `join("tracks")` path and no track directory rebuilt from the uppercase
+  letter anywhere in the harness, plus a harness unit test asserting
+  `expected_hash` finds the real pin **in this repository's layout** — the
+  regression test for #16, which is the one that had no test at all
+- the harness is now the CI gate runner on **every** host; the four track gates
+  run instead of being skipped, so the skips went from five to one (the
+  freeze-day lockdown, which is false by design before kickoff)
 
 ---
 

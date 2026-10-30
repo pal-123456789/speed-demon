@@ -468,22 +468,34 @@ for t in $(echo "$TRACKS" | tr ',' ' '); do
   tt="$(echo "$t" | tr '[:lower:]' '[:upper:]')"
   if [ "$FAST" = "1" ]; then
     skip "track $tt gates skipped (--fast)"
-  elif [ "$(uname -s 2>/dev/null)" != "Linux" ]; then
-    # The harness spawns the track binary, which on this host is a Windows PE
-    # build; the definitive ELF semantics need a Linux host (or the WSL e2e
-    # run in gate 10, which covers the same functional gates).
-    skip "track $tt gates skipped (harness verify needs Linux ELF binaries; e2e suite covers this host)"
   else
-    # The Rust harness is the canonical gate runner: the same code runs on
-    # the scoring box, where PowerShell does not exist.
+    # The Rust harness is the canonical gate runner: the same code runs on the
+    # scoring box, where PowerShell does not exist. It runs on EVERY host.
+    #
+    # A `uname -s = Linux` guard used to sit above this branch and skip these
+    # three gates -- correctness against the published hash, the timeout and the
+    # sandbox, exactly the gates that decide whether a track scores at all -- on
+    # every run on this machine. The stated reason was that the harness needs
+    # Linux ELF binaries. It does not: it spawns the track binary directly and
+    # probes the Windows `run.exe` name itself (see local_bin in main.rs), and
+    # the e2e suite that was credited with covering these gates never checked
+    # the output against the published hash. The most important gates in the
+    # project were therefore not running, and the skip message said so in a way
+    # that read like a known limitation.
     t_lc="$(echo "$tt" | tr '[:upper:]' '[:lower:]')"
     if [ -x "$REPO/track-$t_lc/run" ]; then
       BIN="$REPO/track-$t_lc/run"
     else
       BIN="$REPO/track-$t_lc/run.exe"
     fi
-    if "$HARNESS" verify --track "$tt" --no-docker --bin "$BIN" >/tmp/sd-track-$tt.txt 2>&1; then
-      ok "track $tt gates passed"
+    # --ledger to a throwaway path: a GATE CHECK is not a MEASUREMENT. Writing
+    # gate runs into verification/ledger.jsonl put entries into the evidence file
+    # behind PERF.md's measured ladder, and left the working tree dirty after
+    # every CI run -- which the freeze-day lockdown asserts must be clean. Only
+    # the deliberate measurement sandwich (tooling/bench-rung.sh) writes there.
+    if "$HARNESS" verify --track "$tt" --no-docker --bin "$BIN" \
+         --ledger "/tmp/sd-ci-verify-$tt.jsonl" >/tmp/sd-track-$tt.txt 2>&1; then
+      ok "track $tt gates passed (correctness vs the published pin, timeout, determinism)"
     else
       cat /tmp/sd-track-$tt.txt
       fail "track $tt gates failed"

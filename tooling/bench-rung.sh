@@ -59,10 +59,19 @@ else
   echo "  ok SHA-green vs pin"
 fi
 
-# 4. timing: harness when available and spawnable, else a crude sh loop
-if [ -x "$ROOT/verification/harness/target/release/sd-harness" ] && \
-   [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
-  "$ROOT/verification/harness/target/release/sd-harness" bench \
+# 4. timing: the harness when it can actually run here, else a crude sh loop.
+#
+# The guard used to require `uname -s` = "Linux" as a proxy for "can this host
+# spawn the harness binary". That denied the real protocol on Windows even
+# though the harness runs there perfectly well -- and the consequence was not
+# cosmetic: on this host every rung used crude millisecond timing and wrote
+# NOTHING to verification/ledger.jsonl, so the measured ladder in PERF.md (8% of
+# the track total) could never fill in. Test the capability rather than
+# inferring it from the OS name.
+HARNESS="$ROOT/verification/harness/target/release/sd-harness"
+[ -x "$HARNESS" ] || HARNESS="$HARNESS.exe"
+if [ -x "$HARNESS" ] && "$HARNESS" --help >/dev/null 2>&1; then
+  "$HARNESS" bench \
       --track "$t" --runs "$RUNS" --no-docker --bin "$bin" --label "$label"
   rc=$?
 else
