@@ -56,7 +56,7 @@ const INF: u64 = u64::MAX;
 
 /// Hardware threads the scoring container is pinned to (six P-cores, SMT on).
 /// The query phase already used this split; the parse now uses the same pool.
-const NWORKERS: usize = 12;
+const NWORKERS: usize = 8;
 
 /// Next unsigned decimal integer in `buf` starting at `*pos`, skipping any
 /// non-digit bytes but never reading at or beyond `lim`. The grammar is
