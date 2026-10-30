@@ -51,7 +51,7 @@ the reference (final scoring 10x).
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 56.35 s | (pin from the Oct 28 spec) | 0 |
-| 1 | | | | | |
+| 1 | NOT YET IMPLEMENTED — the folder is the scaffold, so the board reports a hash mismatch on every push | `—` | — s | — MB | — |
 
 ---
 
