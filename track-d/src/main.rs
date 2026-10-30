@@ -119,67 +119,108 @@ fn main() {
         }
     };
 
-    let mut dist = vec![INF; n];
-    let mut touched: Vec<u32> = Vec::with_capacity(4096);
-    let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::with_capacity(1 << 16);
-    let mut out: Vec<u8> = Vec::with_capacity(queries.len() * 4 + 16);
-
-    let mut qp = 0usize;
-    while qp < queries.len() {
-        // A trailing newline leaves no further query; stop before reading one.
-        while qp < queries.len() && !queries[qp].is_ascii_digit() {
-            qp += 1;
-        }
-        if qp >= queries.len() {
-            break;
-        }
-        let s = next_int(&queries, &mut qp) as u32;
-        let t = next_int(&queries, &mut qp) as u32;
-
-        let answer: u64 = if s == t {
-            0 // zero-edge path, even on a node with no edges
-        } else {
-            dist[s as usize] = 0;
-            touched.push(s);
-            heap.clear();
-            heap.push(Reverse((0u64, s)));
-            let mut found = INF;
-            while let Some(Reverse((d, u))) = heap.pop() {
-                if d > dist[u as usize] {
-                    continue; // stale entry
-                }
-                if u == t {
-                    found = d;
-                    break; // everything still queued is at least this far
-                }
-                let lo = offset[u as usize] as usize;
-                let hi = offset[u as usize + 1] as usize;
-                for e in lo..hi {
-                    let v = head[e];
-                    let nd = d + weight[e] as u64;
-                    if nd < dist[v as usize] {
-                        dist[v as usize] = nd;
-                        touched.push(v);
-                        heap.push(Reverse((nd, v)));
-                    }
-                }
+    // ── parse the queries up front (2,000 of them: trivial to hold) ─────────
+    let mut qs: Vec<(u32, u32)> = Vec::with_capacity(2200);
+    {
+        let mut qp = 0usize;
+        while qp < queries.len() {
+            while qp < queries.len() && !queries[qp].is_ascii_digit() {
+                qp += 1;
             }
-            for &x in &touched {
-                dist[x as usize] = INF;
+            if qp >= queries.len() {
+                break;
             }
-            touched.clear();
-            found
-        };
-
-        if answer == INF {
-            out.extend_from_slice(b"-1\n");
-        } else {
-            let _ = write!(out, "{answer}\n");
+            let s = next_int(&queries, &mut qp) as u32;
+            let t = next_int(&queries, &mut qp) as u32;
+            qs.push((s, t));
         }
     }
+    drop(queries);
 
-    if let Err(e) = File::create(format!("{outd}/distances.txt"))
-        .and_then(|mut f| f.write_all(&out))
+    // ── answer them in parallel ─────────────────────────────────────────────
+    // The queries are mutually independent and the graph is read-only, so this
+    // is the one place in the submission where threads cost almost nothing: no
+    // locks, no shared writes, and the output order is preserved by collecting
+    // each chunk's bytes in order. The container is pinned to twelve hardware
+    // threads on six P-cores, which is exactly the split below.
+    //
+    // Each thread owns its own distance array, because 1.74M u64 labels cannot
+    // be shared without synchronisation. That is the only cost: 12 x 14 MB of
+    // working state, against a search phase that was 97% of the reference's time.
+    let nthreads = 12usize.min(qs.len().max(1));
+    let chunk = qs.len().div_ceil(nthreads).max(1);
+    let out_cap = qs.len() * 6 + 16;
+
+    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(nthreads);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(nthreads);
+        for part in qs.chunks(chunk) {
+            let offset = &offset;
+            let head = &head;
+            let weight = &weight;
+            handles.push(scope.spawn(move || {
+                let mut dist = vec![INF; n];
+                let mut touched: Vec<u32> = Vec::with_capacity(4096);
+                let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::with_capacity(1 << 14);
+                let mut out: Vec<u8> = Vec::with_capacity(part.len() * 6);
+
+                for &(s, t) in part {
+                    let answer: u64 = if s == t {
+                        0 // zero-edge path, even on a node with no edges
+                    } else {
+                        dist[s as usize] = 0;
+                        touched.push(s);
+                        heap.clear();
+                        heap.push(Reverse((0u64, s)));
+                        let mut found = INF;
+                        while let Some(Reverse((d, u))) = heap.pop() {
+                            if d > dist[u as usize] {
+                                continue; // stale entry
+                            }
+                            if u == t {
+                                found = d;
+                                break; // everything still queued is at least this far
+                            }
+                            let lo = offset[u as usize] as usize;
+                            let hi = offset[u as usize + 1] as usize;
+                            for e in lo..hi {
+                                let v = head[e];
+                                let nd = d + weight[e] as u64;
+                                if nd < dist[v as usize] {
+                                    dist[v as usize] = nd;
+                                    touched.push(v);
+                                    heap.push(Reverse((nd, v)));
+                                }
+                            }
+                        }
+                        for &x in &touched {
+                            dist[x as usize] = INF;
+                        }
+                        touched.clear();
+                        found
+                    };
+
+                    if answer == INF {
+                        out.extend_from_slice(b"-1\n");
+                    } else {
+                        let _ = write!(out, "{answer}\n");
+                    }
+                }
+                out
+            }));
+        }
+        for h in handles {
+            parts.push(h.join().unwrap_or_default());
+        }
+    });
+
+    let mut out: Vec<u8> = Vec::with_capacity(out_cap);
+    for p in parts {
+        out.extend_from_slice(&p);
+    }
+
+    if let Err(e) =
+        File::create(format!("{outd}/distances.txt")).and_then(|mut f| f.write_all(&out))
     {
         eprintln!("[track-d] cannot write distances.txt: {e}");
         exit(1);
