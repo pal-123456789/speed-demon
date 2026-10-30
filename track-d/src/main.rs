@@ -12,11 +12,26 @@
 //!   every sum is computed in u64. A u32 label is a silent wrong answer on this
 //!   dataset, which is the worst failure mode available.
 //!
-//! * **One CSR, built in two counting passes.** Forward-star adjacency with
-//!   linked lists is cache-hostile; a CSR over `(head, weight)` is one linear
-//!   scan per node expansion. Parallel edges and exact duplicate lines need no
-//!   special handling: Dijkstra relaxes both and the lighter one wins. Self-loops
-//!   never shorten a path for the same reason.
+//! * **CSR, built by the whole thread pool.** Forward-star adjacency with
+//!   linked lists is cache-hostile; a CSR is one linear scan per node expansion.
+//!   The graph file is strictly regular -- a header, then exactly `m` lines of
+//!   `u SP v SP w LF` -- so it splits at line boundaries into `NWORKERS` byte
+//!   windows and both build passes run in parallel. Parallel edges and exact
+//!   duplicate lines need no special handling: Dijkstra relaxes both and the
+//!   lighter one wins. Self-loops never shorten a path for the same reason.
+//!
+//! * **One 8-byte edge record, not two 4-byte arrays.** `v` and `w` share a
+//!   single `u64` (`v` low, `w` high). Same 40 MB as `head[] + weight[]`, but an
+//!   expansion touches one cache line per edge instead of two, in both the fill
+//!   pass and every Dijkstra relaxation.
+//!
+//! * **The parallel build does not depend on edge order.** Workers claim slots
+//!   inside a node's block with `fetch_sub`, so the adjacency order within a
+//!   block is whichever worker got there first -- not fixed from run to run. It
+//!   does not matter: shortest-path *distances* are a function of the edge
+//!   multiset alone, and Dijkstra is correct for every adjacency order. Only
+//!   distances are written out, so the output is byte-identical across runs --
+//!   which the SHA-256 gate checks on every run rather than assuming.
 //!
 //! * **Reset by touched list, never by memset.** Clearing 1.74M distances per
 //!   query would dominate the run; only the nodes actually relaxed are restored
@@ -35,26 +50,82 @@ use std::env;
 use std::fs::{File, read};
 use std::io::Write;
 use std::process::exit;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 const INF: u64 = u64::MAX;
 
+/// Hardware threads the scoring container is pinned to (six P-cores, SMT on).
+/// The query phase already used this split; the parse now uses the same pool.
+const NWORKERS: usize = 12;
+
 /// Next unsigned decimal integer in `buf` starting at `*pos`, skipping any
-/// non-digit bytes. The grammar is guaranteed, so this does not validate.
-#[inline]
-fn next_int(buf: &[u8], pos: &mut usize) -> u64 {
-    while *pos < buf.len() && !buf[*pos].is_ascii_digit() {
-        *pos += 1;
+/// non-digit bytes but never reading at or beyond `lim`. The grammar is
+/// guaranteed, so this does not validate.
+#[inline(always)]
+fn next_int(buf: &[u8], pos: &mut usize, lim: usize) -> u64 {
+    let mut p = *pos;
+    while p < lim && !buf[p].is_ascii_digit() {
+        p += 1;
     }
     let mut v: u64 = 0;
-    while *pos < buf.len() {
-        let b = buf[*pos];
-        if !b.is_ascii_digit() {
+    while p < lim {
+        let d = buf[p].wrapping_sub(b'0');
+        if d > 9 {
             break;
         }
-        v = v * 10 + (b - b'0') as u64;
-        *pos += 1;
+        v = v * 10 + d as u64;
+        p += 1;
     }
+    *pos = p;
     v
+}
+
+/// Byte offsets at which the workers' parse windows start. `starts[0]` is the
+/// first edge byte and `starts[NWORKERS]` is end of file, so the windows
+/// partition the `m` edge lines: a line belongs to the worker whose window
+/// holds its first byte, and no line is parsed twice or skipped. Every interior
+/// boundary is the first byte after a `LF`, which is what makes a window safe
+/// to parse in isolation.
+fn chunk_bounds(graph: &[u8], body: usize) -> [usize; NWORKERS + 1] {
+    let len = graph.len();
+    let mut starts = [len; NWORKERS + 1];
+    starts[0] = body;
+    for c in 1..NWORKERS {
+        let mut s = len * c / NWORKERS;
+        if s < body {
+            s = body;
+        }
+        while s < len && graph[s] != b'\n' {
+            s += 1;
+        }
+        if s < len {
+            s += 1;
+        }
+        if s < starts[c - 1] {
+            s = starts[c - 1]; // defensive: boundaries are non-decreasing
+        }
+        starts[c] = s;
+    }
+    starts
+}
+
+/// Walk the edge lines of window `[lo, hi)`, calling `body(u, v, w)` once per
+/// line. Bytes at or after `hi` are never read, so a window cannot see into its
+/// neighbour's first line.
+#[inline(always)]
+fn for_each_edge<F: FnMut(usize, u32, u32)>(graph: &[u8], lo: usize, hi: usize, mut body: F) {
+    let mut p = lo;
+    while p < hi {
+        let u = next_int(graph, &mut p, hi) as usize;
+        let v = next_int(graph, &mut p, hi) as u32;
+        let w = next_int(graph, &mut p, hi) as u32;
+        body(u, v, w);
+        // Consume the rest of the line, including its LF.
+        while p < hi && graph[p] != b'\n' {
+            p += 1;
+        }
+        p += 1;
+    }
 }
 
 fn main() {
@@ -69,45 +140,79 @@ fn main() {
         }
     };
 
+    let len = graph.len();
     let mut pos = 0usize;
-    let n = next_int(&graph, &mut pos) as usize;
-    let m = next_int(&graph, &mut pos) as usize;
-    let body = pos; // first edge byte, reused by both counting passes
+    let n = next_int(&graph, &mut pos, len) as usize;
+    let m = next_int(&graph, &mut pos, len) as usize;
+    let body = pos; // first edge byte
+    let starts = chunk_bounds(&graph, body);
 
-    // ── pass 1: out-degree per node ─────────────────────────────────────────
+    // ── pass 1, parallel: out-degree per node ───────────────────────────────
+    // One counter per node, incremented by whichever worker parses the line.
+    // The counters are reused as the CSR write cursors in pass 2, so the build
+    // needs no second array and no per-worker degree tables.
+    let degree: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
+    std::thread::scope(|scope| {
+        for w in 0..NWORKERS {
+            let (lo, hi) = (starts[w], starts[w + 1]);
+            let graph = &graph;
+            let degree = &degree;
+            scope.spawn(move || {
+                for_each_edge(graph, lo, hi, |u, _v, _w| {
+                    degree[u].fetch_add(1, Ordering::Relaxed);
+                });
+            });
+        }
+    });
+
+    // ── prefix sum: CSR start offset per node ───────────────────────────────
     let mut offset = vec![0u32; n + 1];
-    {
-        let mut p = body;
-        for _ in 0..m {
-            let u = next_int(&graph, &mut p) as usize;
-            let _v = next_int(&graph, &mut p);
-            let _w = next_int(&graph, &mut p);
-            offset[u + 1] += 1;
-        }
-    }
+    let mut acc = 0u32;
     for i in 0..n {
-        offset[i + 1] += offset[i];
+        offset[i] = acc;
+        acc += degree[i].load(Ordering::Relaxed);
+    }
+    offset[n] = acc;
+    let total = acc as usize;
+
+    // The windows partition the file's lines exactly, so the counter total is
+    // the header's `m`. If that ever stopped holding, the CSR would be built
+    // from a truncated edge set and the answers would be quietly wrong: fail
+    // loudly instead. It is a two-integer comparison on the hot path of nothing.
+    if total != m {
+        eprintln!("[track-d] parsed {total} edges but graph.txt declares {m}");
+        exit(1);
     }
 
-    // ── pass 2: fill the CSR ────────────────────────────────────────────────
-    let mut head = vec![0u32; m];
-    let mut weight = vec![0u32; m];
-    let mut cursor = offset.clone();
-    {
-        let mut p = body;
-        for _ in 0..m {
-            let u = next_int(&graph, &mut p) as usize;
-            let v = next_int(&graph, &mut p) as u32;
-            let w = next_int(&graph, &mut p) as u32;
-            let slot = cursor[u] as usize;
-            head[slot] = v;
-            weight[slot] = w;
-            cursor[u] += 1;
+    // ── pass 2, parallel: fill the CSR ──────────────────────────────────────
+    // The degree counter doubles as the write cursor and counts *down*: the
+    // first worker to reach node `u` gets `offset[u + 1] - c`, the last gets
+    // `offset[u]`, so every edge lands inside `u`'s own block and workers never
+    // collide. Counting down is what lets pass 1 keep the counter, so the prefix
+    // sum stays a plain load-and-add loop over 1.74M nodes instead of an atomic
+    // read-modify-write per node.
+    let edge: Vec<AtomicU64> = (0..total).map(|_| AtomicU64::new(0)).collect();
+    std::thread::scope(|scope| {
+        for w in 0..NWORKERS {
+            let (lo, hi) = (starts[w], starts[w + 1]);
+            let graph = &graph;
+            let degree = &degree;
+            let offset = &offset;
+            let edge = &edge;
+            scope.spawn(move || {
+                for_each_edge(graph, lo, hi, |u, v, wt| {
+                    let slot =
+                        offset[u + 1] as usize - degree[u].fetch_sub(1, Ordering::Relaxed) as usize;
+                    edge[slot].store(v as u64 | (wt as u64) << 32, Ordering::Relaxed);
+                });
+            });
         }
-    }
+    });
 
     // The graph bytes are no longer needed; dropping them keeps peak memory at
-    // the CSR rather than CSR + 92 MB of input.
+    // the CSR plus the per-worker distance arrays rather than adding 92 MB on
+    // top of them. (The Vec is a large mmap allocation, so it really is
+    // returned to the OS here.)
     drop(graph);
 
     // ── queries ─────────────────────────────────────────────────────────────
@@ -122,16 +227,17 @@ fn main() {
     // ── parse the queries up front (2,000 of them: trivial to hold) ─────────
     let mut qs: Vec<(u32, u32)> = Vec::with_capacity(2200);
     {
+        let qlen = queries.len();
         let mut qp = 0usize;
-        while qp < queries.len() {
-            while qp < queries.len() && !queries[qp].is_ascii_digit() {
+        while qp < qlen {
+            while qp < qlen && !queries[qp].is_ascii_digit() {
                 qp += 1;
             }
-            if qp >= queries.len() {
+            if qp >= qlen {
                 break;
             }
-            let s = next_int(&queries, &mut qp) as u32;
-            let t = next_int(&queries, &mut qp) as u32;
+            let s = next_int(&queries, &mut qp, qlen) as u32;
+            let t = next_int(&queries, &mut qp, qlen) as u32;
             qs.push((s, t));
         }
     }
@@ -147,7 +253,7 @@ fn main() {
     // Each thread owns its own distance array, because 1.74M u64 labels cannot
     // be shared without synchronisation. That is the only cost: 12 x 14 MB of
     // working state, against a search phase that was 97% of the reference's time.
-    let nthreads = 12usize.min(qs.len().max(1));
+    let nthreads = NWORKERS.min(qs.len().max(1));
     let chunk = qs.len().div_ceil(nthreads).max(1);
     let out_cap = qs.len() * 6 + 16;
 
@@ -156,8 +262,7 @@ fn main() {
         let mut handles = Vec::with_capacity(nthreads);
         for part in qs.chunks(chunk) {
             let offset = &offset;
-            let head = &head;
-            let weight = &weight;
+            let edge = &edge;
             handles.push(scope.spawn(move || {
                 let mut dist = vec![INF; n];
                 let mut touched: Vec<u32> = Vec::with_capacity(4096);
@@ -184,8 +289,9 @@ fn main() {
                             let lo = offset[u as usize] as usize;
                             let hi = offset[u as usize + 1] as usize;
                             for e in lo..hi {
-                                let v = head[e];
-                                let nd = d + weight[e] as u64;
+                                let ev = edge[e].load(Ordering::Relaxed);
+                                let v = ev as u32;
+                                let nd = d + (ev >> 32) as u32 as u64;
                                 if nd < dist[v as usize] {
                                     dist[v as usize] = nd;
                                     touched.push(v);
