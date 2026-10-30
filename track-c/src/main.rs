@@ -202,13 +202,32 @@ fn money(cents: i64, out: &mut Vec<u8>) {
     let _ = write!(out, "{}.{:02}", a / 100, a % 100);
 }
 
+/// Nonzero in byte position `i` when byte `i` of `x` is zero.
+#[inline]
+fn zero_byte(x: u64) -> u64 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    x.wrapping_sub(ONES) & !x & HIGH
+}
+
 /// The byte offsets that begin a record: `[first_record, b1, .., len]`.
 ///
 /// One sequential pass. `parity` is the running count of `"` bytes modulo two,
 /// and a `\n` at even parity is a record boundary by the argument in the module
 /// comment. The first boundary is the end of the header line; the last is the
 /// length of the file.
+///
+/// The scan is word-at-a-time. A byte-at-a-time version of exactly this loop
+/// measured as the dominant cost of the whole track: twelve threads then race
+/// through 202 MB while one thread first walks the same 202 MB one byte at a
+/// time, so the parallel parse was being throttled by its own setup. Eight bytes
+/// per iteration with a zero-byte test on a repeated constant finds both bytes of
+/// interest at once, and the set bits are consumed in ascending address order,
+/// which is what keeps the parity running total correct.
 fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
+    const QUOTE: u64 = 0x2222_2222_2222_2222; // b'"' repeated
+    const NL: u64 = 0x0a0a_0a0a_0a0a_0a0a; // b'\n' repeated
+
     let mut f = File::open(path)?;
     let len = f.metadata()?.len();
     let mut interior: Vec<u64> = Vec::with_capacity(nthreads - 1);
@@ -221,27 +240,56 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
     let mut parity = 0u8;
     let mut header_end: Option<u64> = None;
 
+    // Records a boundary that ends at absolute offset `end`.
+    #[inline]
+    fn note(
+        end: u64,
+        header_end: &mut Option<u64>,
+        interior: &mut Vec<u64>,
+        targets: &[u64],
+        next: &mut usize,
+    ) {
+        if header_end.is_none() {
+            *header_end = Some(end);
+            return;
+        }
+        if *next < targets.len() && end >= targets[*next] {
+            interior.push(end);
+            while *next < targets.len() && end >= targets[*next] {
+                *next += 1;
+            }
+        }
+    }
+
     loop {
         let k = f.read(&mut buf)?;
         if k == 0 {
             break;
         }
-        for (i, &b) in buf[..k].iter().enumerate() {
+        let base = off;
+        let mut i = 0usize;
+        while i + 8 <= k {
+            let w = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
+            let mut m = zero_byte(w ^ QUOTE) | zero_byte(w ^ NL);
+            while m != 0 {
+                let idx = i + (m.trailing_zeros() as usize >> 3);
+                if buf[idx] == b'"' {
+                    parity ^= 1;
+                } else if parity == 0 {
+                    note(base + idx as u64 + 1, &mut header_end, &mut interior, &targets, &mut next);
+                }
+                m &= m - 1;
+            }
+            i += 8;
+        }
+        while i < k {
+            let b = buf[i];
             if b == b'"' {
                 parity ^= 1;
             } else if b == b'\n' && parity == 0 {
-                let end = off + i as u64 + 1;
-                if header_end.is_none() {
-                    header_end = Some(end);
-                    continue;
-                }
-                if next < targets.len() && end >= targets[next] {
-                    interior.push(end);
-                    while next < targets.len() && end >= targets[next] {
-                        next += 1;
-                    }
-                }
+                note(base + i as u64 + 1, &mut header_end, &mut interior, &targets, &mut next);
             }
+            i += 1;
         }
         off += k as u64;
     }
