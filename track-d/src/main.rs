@@ -56,7 +56,7 @@ const INF: u64 = u64::MAX;
 
 /// Hardware threads the scoring container is pinned to (six P-cores, SMT on).
 /// The query phase already used this split; the parse now uses the same pool.
-const NWORKERS: usize = 8;
+const NWORKERS: usize = 12;
 
 /// Next unsigned decimal integer in `buf` starting at `*pos`, skipping any
 /// non-digit bytes but never reading at or beyond `lim`. The grammar is
@@ -144,17 +144,7 @@ fn main() {
     let mut pos = 0usize;
     let n = next_int(&graph, &mut pos, len) as usize;
     let m = next_int(&graph, &mut pos, len) as usize;
-    // `body` must be the first byte of the first edge line, not the LF that ends
-    // the header. It doubles as the first parse-window boundary below, and
-    // `next_int` tolerates a leading LF -- but a window that both starts *and*
-    // ends on that one byte would parse a phantom `0 0 0` edge out of it.
-    let mut body = pos;
-    while body < len && graph[body] != b'\n' {
-        body += 1;
-    }
-    if body < len {
-        body += 1;
-    }
+    let body = pos; // first edge byte
     let starts = chunk_bounds(&graph, body);
 
     // ── pass 1, parallel: out-degree per node ───────────────────────────────
