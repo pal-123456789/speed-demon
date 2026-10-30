@@ -2,17 +2,18 @@
 //!
 //! Strategy
 //! --------
-//! * Parse `queries.txt` first and intern every term it mentions (exactly the
-//!   terms the query set needs — nothing else is indexed).
-//! * Stream `docs.txt` once: ASCII-lowercase the line, tokenise it, and append
-//!   the document id to each mentioned term's posting list.  Only the byte
-//!   range of each document's text is retained, never the text itself.
+//! * Parse `queries.txt` first and intern every term it mentions: exactly the
+//!   terms the query set needs, nothing else is indexed.
+//! * Stream `docs.txt` once, tokenising each document and appending the
+//!   document id to every mentioned term's posting list.  The text itself is
+//!   never retained.
 //! * BOOL: evaluate strictly left to right on ascending `u32` id vectors
-//!   (intersection / union / difference); galloping search is used when one
-//!   side is much smaller than the other.
-//! * PHRASE: intersect the terms' id lists (rarest first) and verify the
-//!   consecutive token run in each candidate document, re-reading only that
-//!   document's bytes through a 1 MiB sliding window.
+//!   (intersection / union / difference).  Galloping search is used whenever
+//!   one side is much smaller than the other.
+//! * PHRASE: intersect the terms' id lists (rarest first) for candidates,
+//!   collect the `(document, phrase)` pairs, and verify them in a second
+//!   sequential pass over `docs.txt` — the pairs are sorted by document id,
+//!   so the file is read front to back with no random access at all.
 //!
 //! Tokenisation is exactly `re.findall(rb"[a-z0-9]+", text.lower())` on bytes:
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
@@ -22,7 +23,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
 const TRACK: &str = "B";
@@ -75,6 +76,26 @@ fn ascii_lower_in_place(b: &mut [u8]) {
     }
 }
 
+/// Token spans (start, len) of the already-lowercased text.
+#[inline]
+fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
+    spans.clear();
+    let n = text.len();
+    let mut i = 0usize;
+    while i < n {
+        while i < n && !IS_TOK[text[i] as usize] {
+            i += 1;
+        }
+        let s = i;
+        while i < n && IS_TOK[text[i] as usize] {
+            i += 1;
+        }
+        if i > s {
+            spans.push((s as u32, (i - s) as u32));
+        }
+    }
+}
+
 // ── term interning ─────────────────────────────────────────────────────
 
 #[inline]
@@ -98,12 +119,14 @@ fn hash_bytes(b: &[u8]) -> u64 {
     h
 }
 
-/// Byte-string interner: open-addressed table of term ids into a byte arena.
+/// Byte-string interner: open-addressed table of term ids over a byte arena.
+/// Each slot is `(hash tag << 32) | (term id + 1)`; 0 marks an empty slot, so
+/// a probe rejects a non-matching slot from one 64-bit load in the common case.
 struct TermTable {
     arena: Vec<u8>,
     offs: Vec<u32>,
     lens: Vec<u32>,
-    slots: Vec<u32>, // 0 = empty, otherwise term id + 1
+    slots: Vec<u64>,
     mask: usize,
 }
 
@@ -113,16 +136,11 @@ impl TermTable {
             arena: Vec::new(),
             offs: Vec::new(),
             lens: Vec::new(),
-            slots: Vec::new(),
-            mask: 0,
+            slots: vec![0u64; 1 << 12],
+            mask: (1 << 12) - 1,
         };
-        t.alloc(1 << 12);
+        t.slots.shrink_to_fit();
         t
-    }
-
-    fn alloc(&mut self, cap: usize) {
-        self.slots = vec![0u32; cap];
-        self.mask = cap - 1;
     }
 
     #[inline]
@@ -139,34 +157,34 @@ impl TermTable {
 
     #[inline]
     fn slot_for(&self, key: &[u8], h: u64) -> usize {
+        let tag = (h >> 32) as u32;
         let mut i = (h as usize) & self.mask;
         loop {
             let e = self.slots[i];
             if e == 0 {
                 return i;
             }
-            let t = (e - 1) as usize;
-            let o = self.offs[t] as usize;
-            let l = self.lens[t] as usize;
-            if l == key.len() && self.arena[o..o + l] == *key {
-                return i;
+            if (e >> 32) as u32 == tag {
+                let t = (e as u32 - 1) as usize;
+                let o = self.offs[t] as usize;
+                let l = self.lens[t] as usize;
+                if l == key.len() && self.arena[o..o + l] == *key {
+                    return i;
+                }
             }
             i = (i + 1) & self.mask;
         }
     }
 
-    /// Look up bytes exactly as they appear after lowercasing.
+    /// Look up bytes exactly as they appear after ASCII-lowercasing.
     #[inline]
     fn get(&self, key: &[u8]) -> Option<u32> {
-        if self.slots.is_empty() {
-            return None;
-        }
         let h = hash_bytes(key);
         let e = self.slots[self.slot_for(key, h)];
         if e == 0 {
             None
         } else {
-            Some(e - 1)
+            Some(e as u32 - 1)
         }
     }
 
@@ -175,13 +193,13 @@ impl TermTable {
         let i = self.slot_for(key, h);
         let e = self.slots[i];
         if e != 0 {
-            return e - 1;
+            return e as u32 - 1;
         }
         let idx = self.offs.len() as u32;
         self.offs.push(self.arena.len() as u32);
         self.lens.push(key.len() as u32);
         self.arena.extend_from_slice(key);
-        self.slots[i] = idx + 1;
+        self.slots[i] = ((h >> 32) << 32) | (idx as u64 + 1);
         if self.offs.len() * 3 >= self.slots.len() * 2 {
             self.grow();
         }
@@ -190,13 +208,13 @@ impl TermTable {
 
     fn grow(&mut self) {
         let cap = self.slots.len() * 2;
-        let old = std::mem::replace(&mut self.slots, vec![0u32; cap]);
+        let old = std::mem::replace(&mut self.slots, vec![0u64; cap]);
         self.mask = cap - 1;
         for e in old {
             if e == 0 {
                 continue;
             }
-            let t = (e - 1) as usize;
+            let t = (e as u32 - 1) as usize;
             let o = self.offs[t] as usize;
             let l = self.lens[t] as usize;
             let h = hash_bytes(&self.arena[o..o + l]);
@@ -221,8 +239,10 @@ enum Query {
     Phrase(Vec<u32>),
 }
 
-/// Mirror the reference parser exactly (it splits on single spaces, so a
-/// malformed line can only ever produce the same words the reference sees).
+/// Mirrors the reference parser: split on single spaces, first word is the
+/// first term, then `(op, term)` pairs.  That also reproduces its behaviour on
+/// malformed lines (an operator-looking word in term position is just a term
+/// that cannot match, because the index keys are lowercase).
 fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
     let n = buf.len();
     let mut start = 0usize;
@@ -246,22 +266,17 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
                     let mut terms = Vec::with_capacity(4);
                     let mut ops = Vec::with_capacity(3);
                     terms.push(tt.intern(first));
-                    loop {
-                        let op = match words.next() {
-                            Some(o) => o,
-                            None => break,
-                        };
+                    while let Some(op) = words.next() {
                         let term = words.next().unwrap_or(b"");
-                        ops.push(match op {
+                        let code = match op {
                             b"AND" => OP_AND,
                             b"OR" => OP_OR,
                             b"NOT" => OP_NOT,
-                            // The reference raises here. Treat anything else as
-                            // an operator that cannot match, i.e. keep the
-                            // running result: this keeps a malformed line from
-                            // taking the whole run down.
+                            // The reference raises here; skip the operation so a
+                            // malformed line cannot take the whole run down.
                             _ => continue,
-                        });
+                        };
+                        ops.push(code);
                         terms.push(tt.intern(term));
                     }
                     out.push(Query::Bool { terms, ops });
@@ -272,11 +287,10 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
                     } else {
                         rest
                     };
-                    let terms: Vec<u32> = inner.split(|&b| b == b' ').map(|t| tt.intern(t)).collect();
+                    let terms: Vec<u32> =
+                        inner.split(|&b| b == b' ').map(|t| tt.intern(t)).collect();
                     out.push(Query::Phrase(terms));
                 } else {
-                    // Unknown kind: the reference raises.  Emit an empty result
-                    // (one output line, in order) rather than aborting.
                     out.push(Query::Bool {
                         terms: vec![tt.intern(line)],
                         ops: Vec::new(),
@@ -307,13 +321,7 @@ fn parse_u32(b: &[u8]) -> u32 {
 }
 
 #[inline]
-fn index_text(
-    text: &[u8],
-    tt: &TermTable,
-    postings: &mut [Vec<u32>],
-    stamp: &mut [u32],
-    doc: u32,
-) {
+fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mut [u32], doc: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -336,22 +344,18 @@ fn index_text(
     }
 }
 
-/// One streaming pass: postings for the mentioned terms + the byte range of
-/// every document's text (ids are the parsed line ids; `offs`/`lens` are
-/// indexed by that id).
+/// One streaming pass building the postings.  Returns the document count
+/// (max parsed id + 1).
 fn build_index(
     path: &PathBuf,
     tt: &TermTable,
     postings: &mut [Vec<u32>],
     stamp: &mut [u32],
-    offs: &mut Vec<u32>,
-    lens: &mut Vec<u32>,
-) -> io::Result<()> {
+) -> io::Result<u32> {
     let f = File::open(path)?;
     let mut r = BufReader::with_capacity(1 << 20, f);
-    let mut line: Vec<u8> = Vec::with_capacity(1024);
-    let mut pos: u64 = 0;
-    let mut doc: u32 = 0;
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    let mut ndocs: u32 = 0;
     loop {
         line.clear();
         let n = r.read_until(b'\n', &mut line)?;
@@ -365,22 +369,16 @@ fn build_index(
         let tab = line[..end].iter().position(|&b| b == b'\t');
         let (id, tstart) = match tab {
             Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => (doc, end),
+            None => (ndocs, end),
         };
         let text = &mut line[tstart..end];
         ascii_lower_in_place(text);
-        let idx = id as usize;
-        if idx >= offs.len() {
-            offs.resize(idx + 1, 0u32);
-            lens.resize(idx + 1, 0u32);
-        }
-        offs[idx] = (pos + tstart as u64) as u32;
-        lens[idx] = text.len() as u32;
         index_text(text, tt, postings, stamp, id);
-        pos += n as u64;
-        doc += 1;
+        if id >= ndocs {
+            ndocs = id + 1;
+        }
     }
-    Ok(())
+    Ok(ndocs)
 }
 
 // ── set algebra on ascending id vectors ────────────────────────────────
@@ -492,8 +490,7 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
             let p = gallop(b, base, v);
             if p == b.len() {
                 out.push(v);
-                base = p;
-                continue;
+                break;
             }
             if b[p] != v {
                 out.push(v);
@@ -507,9 +504,7 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
             while j < b.len() && b[j] < v {
                 j += 1;
             }
-            if j == b.len() {
-                out.push(v);
-            } else if b[j] != v {
+            if j == b.len() || b[j] != v {
                 out.push(v);
             }
         }
@@ -518,83 +513,12 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
 
 // ── phrase verification ────────────────────────────────────────────────
 
-/// Sliding 1 MiB window over `docs.txt`, so candidate verification costs a
-/// handful of reads instead of one `seek`/`read` pair per candidate.
-struct DocReader {
-    file: File,
-    buf: Vec<u8>,
-    base: u64,
-    valid: usize,
-}
-
-impl DocReader {
-    fn open(path: &PathBuf) -> io::Result<Self> {
-        Ok(Self {
-            file: File::open(path)?,
-            buf: vec![0u8; 1 << 20],
-            base: 0,
-            valid: 0,
-        })
-    }
-
-    #[inline]
-    fn text(&mut self, off: u32, len: u32) -> io::Result<&[u8]> {
-        let off = off as u64;
-        let len = len as usize;
-        if off < self.base || off + len as u64 > self.base + self.valid as u64 {
-            // Windows start on a 1 MiB boundary so consecutive candidates
-            // share one read; grow the buffer for the rare oversized document.
-            let win = 1u64 << 20;
-            let start = off - (off % win);
-            let need = (off - start) as usize + len;
-            if self.buf.len() < need {
-                self.buf.resize(need.next_power_of_two(), 0);
-            }
-            self.file.seek(SeekFrom::Start(start))?;
-            let mut got = 0usize;
-            while got < self.buf.len() {
-                let n = self.file.read(&mut self.buf[got..])?;
-                if n == 0 {
-                    break;
-                }
-                got += n;
-            }
-            self.base = start;
-            self.valid = got;
-        }
-        let s = (off - self.base) as usize;
-        Ok(&self.buf[s..s + len])
-    }
-}
-
-/// Does `text` contain `terms` at `terms.len()` consecutive token positions?
-fn phrase_match(
-    text: &[u8],
-    terms: &[&[u8]],
-    lc: &mut Vec<u8>,
-    spans: &mut Vec<(u32, u32)>,
-) -> bool {
+/// Does `text` (already lowercased) contain `terms` at `terms.len()`
+/// consecutive token positions?
+fn spans_contain(text: &[u8], spans: &[(u32, u32)], terms: &[&[u8]]) -> bool {
     let k = terms.len();
     if k == 0 {
         return true;
-    }
-    lc.clear();
-    lc.extend_from_slice(text);
-    ascii_lower_in_place(lc);
-    spans.clear();
-    let n = lc.len();
-    let mut i = 0usize;
-    while i < n {
-        while i < n && !IS_TOK[lc[i] as usize] {
-            i += 1;
-        }
-        let s = i;
-        while i < n && IS_TOK[lc[i] as usize] {
-            i += 1;
-        }
-        if i > s {
-            spans.push((s as u32, (i - s) as u32));
-        }
     }
     if spans.len() < k {
         return false;
@@ -602,19 +526,86 @@ fn phrase_match(
     let first = terms[0];
     'win: for w in 0..=(spans.len() - k) {
         let (s, l) = spans[w];
-        if l as usize != first.len() || &lc[s as usize..s as usize + l as usize] != first {
+        if l as usize != first.len() || &text[s as usize..s as usize + l as usize] != first {
             continue;
         }
         for j in 1..k {
             let (s, l) = spans[w + j];
             let t = terms[j];
-            if l as usize != t.len() || &lc[s as usize..s as usize + l as usize] != t {
+            if l as usize != t.len() || &text[s as usize..s as usize + l as usize] != t {
                 continue 'win;
             }
         }
         return true;
     }
     false
+}
+
+/// Second pass: walk `docs.txt` front to back and verify every
+/// `(document, phrase)` pair.  `pairs` is sorted by document id, so this never
+/// seeks; it stops as soon as the last pair has been looked at.
+fn verify_phrases(
+    path: &PathBuf,
+    pairs: &[u64],
+    queries: &[Query],
+    tt: &TermTable,
+    hits: &mut [Vec<u32>],
+) -> io::Result<()> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let f = File::open(path)?;
+    let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
+    let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
+    let mut pi = 0usize;
+    loop {
+        if pi >= pairs.len() {
+            break;
+        }
+        line.clear();
+        let n = r.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
+        }
+        let mut end = n;
+        if line[end - 1] == b'\n' {
+            end -= 1;
+        }
+        let tab = match line[..end].iter().position(|&b| b == b'\t') {
+            Some(t) => t,
+            None => continue,
+        };
+        let id = parse_u32(&line[..tab]);
+        while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
+            pi += 1;
+        }
+        if pi >= pairs.len() {
+            break;
+        }
+        if (pairs[pi] >> 32) as u32 != id {
+            continue;
+        }
+        let text = &mut line[tab + 1..end];
+        ascii_lower_in_place(text);
+        tokenize_spans(text, &mut spans);
+        loop {
+            let qi = (pairs[pi] & 0xffff_ffff) as usize;
+            if let Query::Phrase(ts) = &queries[qi] {
+                terms.clear();
+                terms.extend(ts.iter().map(|&t| tt.key(t)));
+                if spans_contain(text, &spans, &terms) {
+                    hits[qi].push(id);
+                }
+            }
+            pi += 1;
+            if pi >= pairs.len() || (pairs[pi] >> 32) as u32 != id {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── output ─────────────────────────────────────────────────────────────
@@ -653,6 +644,49 @@ fn format_result(out: &mut Vec<u8>, r: &[u32]) {
     out.push(b'\n');
 }
 
+/// Left-to-right, no precedence: `a OR b AND c` is `(a OR b) AND c`.
+#[inline]
+fn eval_bool(
+    terms: &[u32],
+    ops: &[u8],
+    postings: &[Vec<u32>],
+    cur: &mut Vec<u32>,
+    nxt: &mut Vec<u32>,
+) {
+    cur.clear();
+    cur.extend_from_slice(&postings[terms[0] as usize]);
+    for (i, &op) in ops.iter().enumerate() {
+        let s = &postings[terms[i + 1] as usize];
+        match op {
+            OP_AND => {
+                if cur.is_empty() {
+                    continue;
+                }
+                intersect_into(cur, s, nxt);
+            }
+            OP_OR => {
+                if s.is_empty() {
+                    continue;
+                }
+                union_into(cur, s, nxt);
+            }
+            _ => {
+                if cur.is_empty() || s.is_empty() {
+                    continue;
+                }
+                difference_into(cur, s, nxt);
+            }
+        }
+        std::mem::swap(cur, nxt);
+        if cur.is_empty() {
+            // Empty survives AND and NOT; only a later OR can fill it again.
+            if !ops[i + 1..].iter().any(|&o| o == OP_OR) {
+                break;
+            }
+        }
+    }
+}
+
 // ── main ───────────────────────────────────────────────────────────────
 
 fn main() {
@@ -683,14 +717,57 @@ fn main() {
     let nterms = tt.len();
     let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
     let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
-    let mut offs: Vec<u32> = Vec::with_capacity(1 << 18);
-    let mut lens: Vec<u32> = Vec::with_capacity(1 << 18);
-    if let Err(e) = build_index(&docs_path, &tt, &mut postings, &mut stamp, &mut offs, &mut lens) {
-        eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
-        return;
-    }
+    let ndocs = match build_index(&docs_path, &tt, &mut postings, &mut stamp) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
+            return;
+        }
+    };
     drop(stamp);
     lap!("build index");
+
+    // Phrase candidates, gathered as `(document << 32) | query index` so the
+    // verification pass can walk the corpus in document order.
+    let mut pairs: Vec<u64> = Vec::with_capacity(1 << 18);
+    let mut hits: Vec<Vec<u32>> = vec![Vec::new(); queries.len()];
+    let mut cand: Vec<u32> = Vec::new();
+    let mut nxt: Vec<u32> = Vec::new();
+    let mut order: Vec<usize> = Vec::new();
+    for (qi, q) in queries.iter().enumerate() {
+        if let Query::Phrase(terms) = q {
+            // Rarest list first; intersection is commutative, so the candidate
+            // set is exactly the reference's.
+            order.clear();
+            order.extend(0..terms.len());
+            order.sort_by_key(|&i| postings[terms[i] as usize].len());
+            cand.clear();
+            if let Some(&first) = order.first() {
+                cand.extend_from_slice(&postings[terms[first] as usize]);
+            }
+            for &i in order.iter().skip(1) {
+                if cand.is_empty() {
+                    break;
+                }
+                intersect_into(&cand, &postings[terms[i] as usize], &mut nxt);
+                std::mem::swap(&mut cand, &mut nxt);
+            }
+            for &d in cand.iter() {
+                pairs.push(((d as u64) << 32) | qi as u64);
+            }
+        }
+    }
+    lap!("phrase candidates");
+    pairs.sort_unstable();
+
+    if let Err(e) = verify_phrases(&docs_path, &pairs, &queries, &tt, &mut hits) {
+        eprintln!("[track-{TRACK}] cannot verify phrases: {e}");
+    }
+    drop(pairs);
+    drop(cand);
+    drop(nxt);
+    drop(order);
+    lap!("phrase verify");
 
     if let Err(e) = fs::create_dir_all(out_dir()) {
         eprintln!("[track-{TRACK}] cannot create output dir: {e}");
@@ -704,134 +781,31 @@ fn main() {
     };
     let mut w = BufWriter::with_capacity(1 << 20, file);
 
+    let mut line: Vec<u8> = Vec::with_capacity(256);
     let mut cur: Vec<u32> = Vec::new();
     let mut nxt: Vec<u32> = Vec::new();
-    let mut line: Vec<u8> = Vec::with_capacity(256);
-    let mut lc: Vec<u8> = Vec::new();
-    let mut spans: Vec<(u32, u32)> = Vec::new();
-    let mut doc_reader: Option<DocReader> = None;
-    let mut cand: Vec<u32> = Vec::new();
-    let mut hits: Vec<u32> = Vec::new();
-    let mut order: Vec<usize> = Vec::new();
     let mut io_err = false;
-    let mut t_bool = std::time::Duration::ZERO;
-    let mut t_cand = std::time::Duration::ZERO;
-    let mut t_ver = std::time::Duration::ZERO;
 
-    for q in &queries {
-        match q {
+    for (qi, q) in queries.iter().enumerate() {
+        let r: &[u32] = match q {
             Query::Bool { terms, ops } => {
-                let ts = std::time::Instant::now();
-                cur.clear();
-                cur.extend_from_slice(&postings[terms[0] as usize]);
-                for (i, &op) in ops.iter().enumerate() {
-                    let s = &postings[terms[i + 1] as usize];
-                    match op {
-                        OP_AND => {
-                            if cur.is_empty() {
-                                continue;
-                            }
-                            intersect_into(&cur, s, &mut nxt);
-                        }
-                        OP_OR => {
-                            if s.is_empty() {
-                                continue;
-                            }
-                            union_into(&cur, s, &mut nxt);
-                        }
-                        _ => {
-                            if cur.is_empty() || s.is_empty() {
-                                continue;
-                            }
-                            difference_into(&cur, s, &mut nxt);
-                        }
-                    }
-                    std::mem::swap(&mut cur, &mut nxt);
-                    if cur.is_empty() {
-                        // Stay empty unless a later OR can fill it again.
-                        let more_or = ops[i + 1..].iter().any(|&o| o == OP_OR);
-                        if !more_or {
-                            break;
-                        }
-                    }
-                }
-                format_result(&mut line, &cur);
-                t_bool += ts.elapsed();
+                eval_bool(terms, ops, &postings, &mut cur, &mut nxt);
+                &cur
             }
-            Query::Phrase(terms) => {
-                let ts = std::time::Instant::now();
-                // Intersect rarest list first; intersection is commutative, so
-                // the result is the reference's candidate set.
-                order.clear();
-                order.extend(0..terms.len());
-                order.sort_by_key(|&i| postings[terms[i] as usize].len());
-                cand.clear();
-                if let Some(&first) = order.first() {
-                    cand.extend_from_slice(&postings[terms[first] as usize]);
-                }
-                for &i in order.iter().skip(1) {
-                    if cand.is_empty() {
-                        break;
-                    }
-                    intersect_into(&cand, &postings[terms[i] as usize], &mut nxt);
-                    std::mem::swap(&mut cand, &mut nxt);
-                }
-                hits.clear();
-                if !cand.is_empty() {
-                    t_cand += ts.elapsed();
-                    let ts2 = std::time::Instant::now();
-                    let tbytes: Vec<&[u8]> = terms.iter().map(|&t| tt.key(t)).collect();
-                    if doc_reader.is_none() {
-                        doc_reader = match DocReader::open(&docs_path) {
-                            Ok(d) => Some(d),
-                            Err(e) => {
-                                eprintln!("[track-{TRACK}] cannot reopen docs: {e}");
-                                None
-                            }
-                        };
-                    }
-                    if let Some(dr) = doc_reader.as_mut() {
-                        for &d in cand.iter() {
-                            let di = d as usize;
-                            if di >= offs.len() {
-                                continue;
-                            }
-                            match dr.text(offs[di], lens[di]) {
-                                Ok(text) => {
-                                    if phrase_match(text, &tbytes, &mut lc, &mut spans) {
-                                        hits.push(d);
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("[track-{TRACK}] read error: {e}");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    t_ver += ts2.elapsed();
-                } else {
-                    t_cand += ts.elapsed();
-                }
-                format_result(&mut line, &hits);
-            }
-        }
+            Query::Phrase(_) => &hits[qi],
+        };
+        format_result(&mut line, r);
         if w.write_all(&line).is_err() {
             io_err = true;
             break;
         }
     }
-
     if !io_err && w.flush().is_err() {
         io_err = true;
     }
     if io_err {
         eprintln!("[track-{TRACK}] write error on {}", out_path.display());
     }
-    if timing {
-        eprintln!("[t] {:<16} {:>8.3}s", "bool eval", t_bool.as_secs_f64());
-        eprintln!("[t] {:<16} {:>8.3}s", "phrase cand", t_cand.as_secs_f64());
-        eprintln!("[t] {:<16} {:>8.3}s", "phrase verify", t_ver.as_secs_f64());
-        eprintln!("[t] {:<16} {:>8.3}s", "total", t0.elapsed().as_secs_f64());
-    }
+    let _ = ndocs;
+    lap!("write");
 }
