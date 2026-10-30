@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, read};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::exit;
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -146,14 +146,31 @@ fn main() {
         }
     }
 
-    // ── the hostile file ────────────────────────────────────────────────────
-    let recs = match read(format!("{data}/records.csv")) {
-        Ok(r) => r,
+    // ── the hostile file, STREAMED ──────────────────────────────────────────
+    // Never held whole. Reading the 202 MB file into a heap buffer costs 202 MB
+    // of cgroup memory for a file the host has already put in page cache, and
+    // the board's M column showed it: 422 MB reported against ~220 MB of live
+    // data, worse than the naive Python reference's 367 MB. Chunked reads keep
+    // the peak at one chunk plus the aggregates.
+    // 32 MiB. The buffer is the only thing standing between a 202 MB heap copy
+    // and the aggregates, so it is the whole memory win; making it small bought
+    // nothing and cost real time (4 MiB measured 6.58 s against 4.42 s for the
+    // single slurp), because every chunk pays a read syscall and a memmove. At
+    // 32 MiB there are seven chunks for a 202 MB file and the parse loop streams
+    // at full speed.
+    const CHUNK: usize = 32 << 20;
+    let mut file = match File::open(format!("{data}/records.csv")) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("[track-c] cannot read records.csv: {e}");
             exit(1);
         }
     };
+    let mut buf: Vec<u8> = vec![0u8; CHUNK + (1 << 20)];
+    let mut have = 0usize;
+    let mut pos = 0usize;
+    let mut eof = false;
+    let mut header_done = false;
 
     let mut groups: HashMap<[u8; 3], Agg> = HashMap::with_capacity(256);
     let mut unmatched = Agg::new();
@@ -162,89 +179,158 @@ fn main() {
     let mut name: Vec<u8> = Vec::with_capacity(64);
     let mut note: Vec<u8> = Vec::with_capacity(64);
 
-    let mut pos = 0usize;
-    if recs.starts_with(&BOM) {
-        pos = 3;
-    }
-    // the header record
-    while pos < recs.len() && recs[pos] != b'\n' {
-        pos += 1;
-    }
-    if pos < recs.len() {
-        pos += 1;
-    }
+    loop {
+        // carry the unparsed tail to the front, then refill
+        if pos > 0 {
+            buf.copy_within(pos..have, 0);
+            have -= pos;
+            pos = 0;
+        }
+        if !eof {
+            match file.read(&mut buf[have..]) {
+                Ok(0) => eof = true,
+                Ok(k) => have += k,
+                Err(e) => {
+                    eprintln!("[track-c] read error: {e}");
+                    exit(1);
+                }
+            }
+        }
 
-    while pos < recs.len() {
-        // a BOM immediately after a terminator belongs to the record, not the data
-        if recs[pos..].starts_with(&BOM) {
-            pos += 3;
-            if pos >= recs.len() {
+        if !header_done {
+            if have == 0 && eof {
                 break;
             }
-        }
-        let id = digits(&recs, &mut pos);
-        if pos < recs.len() && recs[pos] == b',' {
-            pos += 1;
-        } else if pos >= recs.len() {
-            break;
-        }
-        field(&recs, &mut pos, &mut name);
-        if pos < recs.len() && recs[pos] == b',' {
-            pos += 1;
-        }
-        field(&recs, &mut pos, &mut note);
-        if pos < recs.len() && recs[pos] == b',' {
-            pos += 1;
-        }
-        let region = digits(&recs, &mut pos);
-        if pos < recs.len() && recs[pos] == b',' {
-            pos += 1;
-        }
-        let mut neg = false;
-        if pos < recs.len() && recs[pos] == b'-' {
-            neg = true;
-            pos += 1;
-        }
-        let mut cents = digits(&recs, &mut pos) * 100;
-        if pos < recs.len() && recs[pos] == b'.' {
-            pos += 1;
-            let d1 = (recs[pos] - b'0') as i64;
-            let d2 = (recs[pos + 1] - b'0') as i64;
-            pos += 2;
-            cents += d1 * 10 + d2;
-        }
-        if neg {
-            cents = -cents;
-        }
-        // terminator
-        if pos < recs.len() && recs[pos] == b'\r' {
-            pos += 1;
-        }
-        if pos < recs.len() && recs[pos] == b'\n' {
-            pos += 1;
+            let mut i = 0usize;
+            if buf[..have].starts_with(&BOM) {
+                i = 3;
+            }
+            while i < have && buf[i] != b'\n' {
+                i += 1;
+            }
+            if i < have {
+                header_done = true;
+                pos = i + 1;
+            } else if eof {
+                break; // no header line at all
+            } else {
+                continue; // the header straddles the chunk boundary
+            }
         }
 
-        // ── join and accumulate ─────────────────────────────────────────────
-        let agg = match lookup.get(&region) {
-            Some(code) => groups.entry(*code).or_insert_with(Agg::new),
-            None => {
-                saw_unmatched = true;
-                &mut unmatched
+        // Single pass. Parsing optimistically and rolling back the ONE record
+        // that straddles the chunk edge is cheaper than scanning every byte
+        // twice to find a safe boundary first -- and the arithmetic is why it
+        // matters: T carries a 0.5 exponent and M only 0.2, so a 44% rise in T
+        // costs more than a 48% fall in M gains. Measured: the two-pass version
+        // went 4.42 s -> 7.06 s on T, a net loss on K.
+        let recs: &[u8] = &buf[..have];
+        loop {
+            if pos >= have {
+                break;
             }
-        };
-        agg.count += 1;
-        agg.id_sum += id;
-        agg.amount_sum += cents;
-        if cents < agg.amount_min {
-            agg.amount_min = cents;
+            let start = pos;
+
+            // a BOM immediately after a terminator belongs to the record
+            if recs[pos..].starts_with(&BOM) {
+                if pos + 3 > have && !eof {
+                    pos = start; // cannot tell yet: the BOM straddles the edge
+                    break;
+                }
+                pos += 3;
+                if pos >= have {
+                    pos = start;
+                    break;
+                }
+            }
+
+            let id = digits(recs, &mut pos);
+            if pos < have && recs[pos] == b',' {
+                pos += 1;
+            }
+            field(recs, &mut pos, &mut name);
+            if pos < have && recs[pos] == b',' {
+                pos += 1;
+            }
+            field(recs, &mut pos, &mut note);
+            if pos < have && recs[pos] == b',' {
+                pos += 1;
+            }
+            let region = digits(recs, &mut pos);
+            if pos < have && recs[pos] == b',' {
+                pos += 1;
+            }
+            let mut neg = false;
+            if pos < have && recs[pos] == b'-' {
+                neg = true;
+                pos += 1;
+            }
+            let mut cents = digits(recs, &mut pos) * 100;
+            if pos + 1 < have && recs[pos] == b'.' {
+                pos += 1;
+                let d1 = (recs[pos] - b'0') as i64;
+                let d2 = (recs[pos + 1] - b'0') as i64;
+                pos += 2;
+                cents += d1 * 10 + d2;
+            }
+            if neg {
+                cents = -cents;
+            }
+
+            // The terminator is the proof that the record was complete. Without
+            // one the buffer ended mid-record -- in a field, in a quoted value,
+            // or between the CR and its LF -- so discard the partial parse and
+            // wait for the next chunk. Truncation anywhere always lands here,
+            // because every other way of ending a record sets this flag.
+            let mut terminated = false;
+            if pos < have && recs[pos] == b'\r' {
+                pos += 1;
+            }
+            if pos < have && recs[pos] == b'\n' {
+                pos += 1;
+                terminated = true;
+            }
+            if !terminated && !eof {
+                pos = start;
+                break;
+            }
+
+            // ── join and accumulate ─────────────────────────────────────────
+            let agg = match lookup.get(&region) {
+                Some(code) => groups.entry(*code).or_insert_with(Agg::new),
+                None => {
+                    saw_unmatched = true;
+                    &mut unmatched
+                }
+            };
+            agg.count += 1;
+            agg.id_sum += id;
+            agg.amount_sum += cents;
+            if cents < agg.amount_min {
+                agg.amount_min = cents;
+            }
+            if cents > agg.amount_max {
+                agg.amount_max = cents;
+            }
+            agg.name_bytes += name.len() as u64;
+            agg.note_bytes += note.len() as u64;
+            if !agg.names.contains(&name[..]) {
+                agg.names.insert(name.clone());
+            }
         }
-        if cents > agg.amount_max {
-            agg.amount_max = cents;
+
+        if eof && pos >= have {
+            break;
         }
-        agg.name_bytes += name.len() as u64;
-        agg.note_bytes += note.len() as u64;
-        if !agg.names.contains(&name[..]) {
-            agg.names.insert(name.clone());
+        // Progress is impossible only when a FULL buffer holds no terminator at
+        // all, which would mean one record larger than the buffer.
+        if !eof && pos == 0 && have == buf.len() {
+            eprintln!(
+                "[track-c] no record terminator in a full {} byte buffer — a single record \
+                 cannot be that large; the input is outside the contract",
+                buf.len()
+            );
+            exit(1);
         }
     }
 
