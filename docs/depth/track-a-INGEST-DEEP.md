@@ -14,7 +14,7 @@
 > groups n=1/2/20/100, tie e=1/t=160, error classes) is in
 > `gen-fixtures.py --track A --adversarial`.
 
-> Pre-kickoff design. No solution code. Companion to `docs/specs/track-a-ingest.md`.
+> Pre-kickoff design. No solution code. Companion to `docs/specs/track-a-ingest.md`, which is **superseded** by docs/MODULE-PLAN.md.
 > **Engine:** latency/epoch aggregator → SLO monitoring. **Ladder goal:** L3.
 > **Contract anchors:** ref T 32.05 s, M 228 MB, S 56 lines, D 1, timeout 321 s;
 > dataset 3.1 M records / 239 MB / 1,842 distinct endpoints (Zipf); fields

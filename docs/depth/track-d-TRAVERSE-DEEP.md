@@ -17,7 +17,7 @@
 > latency-bound loops), prefetch `edge[off[v]]` on label improvement.
 > (6) SIMD on the search loop: skip (degree ≈ 5; no scatter for labels).
 
-> Pre-kickoff design. No solution code. Companion to `docs/specs/track-d-traverse.md`.
+> Pre-kickoff design. No solution code. Companion to `docs/specs/track-d-traverse.md`, which is **superseded** by docs/MODULE-PLAN.md.
 > **Engine:** weighted shortest-path over millions of edges → road-network routing.
 > **Ladder goal:** L3. **Contract anchors:** ref **T 72.69 s** (highest ref in the
 > event → most absolute headroom), timeout 727 s; `graph.txt` = header `n m`, then

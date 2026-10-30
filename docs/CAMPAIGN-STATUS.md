@@ -64,7 +64,7 @@ every run.
 | **Rule 05 compliance guard** | **GREEN** | `tooling/rule05_guard.py` — proved to block a planted violation |
 | **Measurement ledger → generated PERF.md** | **GREEN** | every measurement is a JSONL row; tables are generated, not remembered. `python tooling/gen_docs.py --check` is the CI gate that proves the committed docs *are* the generator's output |
 | **Differential tester** | **GREEN** | `tooling/difftest.py` — pinpoints byte/line/column of a hash mismatch |
-| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, decision-complete, no solution code; the P0/P1/P2 feature inventory + ladder + H0 runbook per track live in `docs/depth/` |
+| **Per-track design specs** | **GREEN** | `docs/specs/*.md` — 4 × ~290 lines, **superseded** by `docs/MODULE-PLAN.md`, kept for reasoning; the P0/P1/P2 feature inventory + ladder + H0 runbook per track live in `docs/depth/` |
 | Build-time training (PGO, AOT) | **DEFERRED** | an in-window decision once real code exists — the rules allow training on generated fixtures, but a profile of a stub is worse than none; nothing pre-built |
 | One-command CI | **AMBER — 1 red gate** | `sh tooling/ci.sh` — cheapest-fails-first (`--fast` skips only the container runs). The red gate is the lockdown above |
 | K calculator | **GREEN** | reproduces the published worked example exactly (K 6.41, speed score 40.4) |
@@ -113,8 +113,11 @@ or exit code:
 
 ## 1b. The four decisions that are already locked
 
-These are made, with the arithmetic behind them, in `docs/specs/`. They are
-locked **before** the window opens so that H0 is typing, not deciding.
+These were first made, with the arithmetic behind them, in `docs/specs/` --
+which is now **superseded**: see the header of each file there, and
+`docs/MODULE-PLAN.md` for the current form. They are locked **before** the
+window opens so that H0 is typing, not deciding, and the authority for every
+number in them is `verification/contract.toml`.
 
 | # | Decision | Why it is locked |
 |---|---|---|
@@ -368,7 +371,12 @@ sh tooling/install-hooks.sh                # the pre-commit gate
 
 ## 6. The pre-kickoff design, in one place
 
-`docs/specs/` holds one decision-complete design specification per track,
+`docs/specs/` holds one design exploration per track, **superseded by
+`docs/MODULE-PLAN.md`**. Its numbers predate the frozen contract, and several
+of its prescriptions were replaced -- days-from-civil timestamp arithmetic
+(now a 13-byte hour key), the per-shard monotonicity shortcut (unsafe: the
+shard is not a field), and radix ordering (now rank selection). Read it for
+reasoning, not for orders. The original sentence follows, for context:
 each with the same eight sections: Reference Teardown, Axis Budget,
 Algorithm & Data Layout, Hash-Gate Correctness & Determinism, Optimization
 Ladder, Scaling Safeguard, Hour Budget, Risk Register & Stop Rule.
@@ -378,9 +386,15 @@ That is both the point and the legal position: rule 05 requires the code to
 be written inside the window, and a design document is what turns H0 into
 typing instead of thinking.
 
-| Spec | Lines | The headline decision |
+**These four are SUPERSEDED** and are listed only so the history is legible.
+Each carries a header naming what changed; the current design is
+`docs/MODULE-PLAN.md`. Two entries below show decisions we have since
+rejected -- radix/StreamVByte postings, and ALT landmarks -- so do not treat
+this table as a work order.
+
+| Spec | Lines | The early headline decision |
 |---|---|---|
-| `docs/specs/track-a-ingest.md` | 285 | Two-level radix histogram for exact percentiles without sorting; the timestamp parse is the second-biggest cost and nobody expects it |
-| `docs/specs/track-b-index.md` | 261 | One total wall time with the queries readable from the start; StreamVByte postings; positions are where the memory goes |
-| `docs/specs/track-c-join.md` | 303 | 12-feature hostile-input matrix with a parallel-vs-sequential parity scan before the fast path is enabled |
-| `docs/specs/track-d-traverse.md` | 291 | Contraction Hierarchies are legal but rarely repay this query mix; CSR + radix heap + bidirectional + ALT landmarks |
+| `docs/specs/track-a-ingest.md` | 285 | ~~Two-level radix histogram~~ now rank selection; the timestamp parse is the second-biggest cost and nobody expects it |
+| `docs/specs/track-b-index.md` | 261 | One total wall time with the queries readable from the start; ~~StreamVByte postings~~ not adopted; positions are where the memory goes |
+| `docs/specs/track-c-join.md` | 303 | Hostile-input matrix with a parity pre-pass before the fast path is enabled |
+| `docs/specs/track-d-traverse.md` | 291 | Contraction hierarchies are legal but rarely repay this query mix; ~~ALT landmarks~~ dropped; CSR + radix heap + bidirectional |

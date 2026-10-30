@@ -3,7 +3,7 @@
 > **Rule-05 status: DESIGN ONLY, no solution code.** Rules 04/05 explicitly
 > permit reading, designing and preparing the environment before the window.
 > This file is the last level of the design pyramid:
-> `docs/specs/*` (contract) → `docs/depth/track-*-DEEP.md` (feature inventory
+> `docs/specs/*` (early design, **superseded** by `docs/MODULE-PLAN.md`) → `docs/depth/track-*-DEEP.md` (feature inventory
 > + ladder) → `97-MODEL-OUTPUT-DIGEST.md` (algorithms from the model) →
 > **this file (the ground: layouts, offsets, constants, per-feature
 > validation)**.

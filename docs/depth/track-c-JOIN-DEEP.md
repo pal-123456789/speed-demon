@@ -14,7 +14,7 @@
 > partition, load 0.4, ~67 MB, prefetched probes, AtomicI64 aggregates,
 > NEVER CAS-insert, sort_unstable emission with full-key tie-break).
 
-> Pre-kickoff design. No solution code. Companion to `docs/specs/track-c-join.md`.
+> Pre-kickoff design. No solution code. Companion to `docs/specs/track-c-join.md`, which is **superseded** by docs/MODULE-PLAN.md.
 > **Engine:** hostile-CSV ETL join + money-safe group aggregation → billing pipeline.
 > **Ladder goal:** L3. **Contract anchors:** ref **T 14.44 s**, timeout 144 s;
 > input 204 MB hostile CSV, **3.32M records, 5 fixed columns WITH a header row
@@ -44,7 +44,7 @@
 
 | # | Feature | Why | Notes |
 |---|---|---|---|
-| C11 | **SIMD quote/locator pass is ONLY a candidate locator**: scan 64 B lanes for `"`/`,`/`\n` hints, but the scalar oracle decides every record boundary and field value | "Never let a fast path near the quoting rules" — the locator suggests split points, the oracle confirms | the doctrine from `docs/specs/track-c-join.md` |
+| C11 | **SIMD quote/locator pass is ONLY a candidate locator**: scan 64 B lanes for `"`/`,`/`\n` hints, but the scalar oracle decides every record boundary and field value | "Never let a fast path near the quoting rules" — the locator suggests split points, the oracle confirms | the doctrine from the (superseded) early design in `docs/specs/` |
 | C12 | **Shard the CSV only at oracle-certified record boundaries** (find the previous record end per 1 MiB block) | 12-thread parse without splitting a record | — |
 | C13 | **Key interning**: join keys → dense u32 via one hash pass, then array lookups | The Zipf-keyed group table stays small | — |
 | C14 | **Chunked group accumulation: (count, cents-sum) per group id, sum in i64 cents** | i64 cents is exact for any realistic total; no float anywhere | — |

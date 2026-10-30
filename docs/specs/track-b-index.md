@@ -1,3 +1,30 @@
+> ## SUPERSEDED — read this before using anything below
+>
+> An **early design exploration** (Oct 26–28), kept for its reasoning, not for its
+> prescriptions. It was written before the frozen specs and harness were read, so
+> its numbers are estimates where the real ones are now published, and several of
+> its prescriptions were replaced.
+>
+> **Authority, in order:** the frozen track spec and harness under
+> `reference/official/`, then `verification/contract.toml`, then
+> `docs/MODULE-PLAN.md`. Where this file disagrees with any of them, this file is
+> wrong.
+>
+> **Stale facts in this file, corrected:**
+>
+> | This file says | Correct |
+> |---|---|
+> | **T = 58.7 s**, timeout **587 s** | **T = 56.352376 s, timeout 563.5 s.** Those were estimates from a brief that predated the scoring-box calibration. |
+> | "Mref, Sref and the exact split are **DEFERRED**" | **Published.** M_ref = 2199.9616 MB, S_ref = 91 lines. |
+> | "Sref = 3180B is Track A's reference source size" | **S is counted in CODE LINES, not bytes.** Track A's S_ref is 56 lines; bytes are not an axis at all. |
+> | build vs query as two phases to trade against each other | **one total wall time.** There is no measured split; the whole run is on one clock. The query distribution is published so the trade can be planned, but nothing is timed separately. |
+>
+> Also note the tokenizer rule, which this file predates: byte-based, ASCII-only,
+> `[a-z0-9]+` on ASCII-lowercased bytes. Bytes of 0x80 and above are separators
+> **even inside a word** (`Zürich` is `z` + `rich`), so no UTF-8 decoding, no
+> Unicode case folding, no NFKC.
+---
+
 # TRACK B · INDEX — Design Specification
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.

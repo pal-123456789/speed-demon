@@ -1,3 +1,28 @@
+> ## SUPERSEDED — read this before using anything below
+>
+> An **early design exploration** (Oct 26–28), kept for its reasoning, not for its
+> prescriptions. It was written before the frozen specs and harness were read, so
+> its numbers are estimates where the real ones are now published, and several of
+> its prescriptions were replaced.
+>
+> **Authority, in order:** the frozen track spec and harness under
+> `reference/official/`, then `verification/contract.toml`, then
+> `docs/MODULE-PLAN.md`. Where this file disagrees with any of them, this file is
+> wrong.
+>
+> **Stale facts in this file, corrected:**
+>
+> | This file says | Correct |
+> |---|---|
+> | M_ref / S_ref **DEFERRED** | **Published.** M_ref = 367.435776 MB, S_ref = 108 lines. T_ref = 14.444059 s, timeout 144.4 s. |
+> | sort-merge join with a **radix sort** of the key column (L6) | The adopted path is a **single-pass hash join** into per-country accumulators — the lookup is ~200,000 regions and the join is one probe per record. Sort-merge remains a candidate only if measurement beats it. |
+> | distinct-name counting by hashing | Adopted: **partitioned dedupe by (country, high hash bits) into cache-sized buckets**, clearing per country. **Keep 128-bit hashes** unless a measured gain exceeds ~5% of T: with a holdout seed, "the output hash matched on seed 1" is not evidence that a 64-bit hash is safe. |
+>
+> The three oracle-deferred behaviours (unterminated quote, bytes after a closing
+> quote, `-0.00` as a minimum) must be settled against the vendored reference
+> before the parser is written — they are not decided in this file.
+---
+
 # TRACK C · JOIN — Design Specification
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.

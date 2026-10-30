@@ -14,7 +14,7 @@
 > ≈ 100–150 MB; wave-of-24-slab build; chunks of 64 queries, heavy-first,
 > slot-ordered emission. Model's T estimate ≈ 0.3–0.5 s vs the 56.35 s ref.
 
-> Pre-kickoff design. No solution code. Companion to `docs/specs/track-b-index.md`.
+> Pre-kickoff design. No solution code. Companion to `docs/specs/track-b-index.md`, which is **superseded** by docs/MODULE-PLAN.md.
 > **Engine:** inverted-index full-text search (boolean + phrase) → Elasticsearch-lite.
 > **Ladder goal:** L3. **Contract anchors:** ref **56.35 s ONE total wall time**
 > (build + all queries; the 40/60 blend is gone), timeout 564 s; corpus ~256 MB

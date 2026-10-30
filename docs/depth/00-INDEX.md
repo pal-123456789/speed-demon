@@ -6,7 +6,7 @@
 > feature inventory, the optimization ladder, the determinism traps, and the
 > hour-by-hour window runbook for each track.
 >
-> These are the **second-level deep dives**. The first level is `docs/specs/*.md`
+> These are the **second-level deep dives**. The first level is `docs/specs/*.md`, which is **superseded by `docs/MODULE-PLAN.md`**
 > (contract teardown and axis budgets); this directory is the *arsenal*: every
 > feature we could implement, ranked and priced, so the 72 hours are spent
 > choosing, not discovering.
@@ -48,7 +48,7 @@ overall = geometric mean of the BEST THREE track totals (≥3 tracks entered)
 - **Tie-breaks:** raw K, then wall time, then earliest commit — every
   optimization also buys tie-break safety.
 
-## Win-condition table (the committed K budgets, from `docs/specs/*`)
+## Win-condition table (K budgets; `verification/contract.toml` is the authority)
 
 | Track | ref T | Safe K / speed | Commit K / speed | Stretch K / speed |
 |---|---|---|---|---|

@@ -1,3 +1,25 @@
+> ## SUPERSEDED — read this before using anything below
+>
+> An **early design exploration** (Oct 26–28), kept for its reasoning, not for its
+> prescriptions. It was written before the frozen specs and harness were read, so
+> its numbers are estimates where the real ones are now published, and several of
+> its prescriptions were replaced.
+>
+> **Authority, in order:** the frozen track spec and harness under
+> `reference/official/`, then `verification/contract.toml`, then
+> `docs/MODULE-PLAN.md`. Where this file disagrees with any of them, this file is
+> wrong.
+>
+> **Stale facts in this file, corrected:**
+>
+> | This file says | Correct |
+> |---|---|
+> | M_ref / S_ref **DEFERRED** | **Published.** M_ref = 892.915712 MB, S_ref = 43 lines. T_ref = 72.692655 s, timeout 726.9 s. |
+> | implicit assumption that distances fit 32 bits | **They do not, and this is a trap.** Weights run to `2^32 - 1` and the spec's own worked example answers `8589934594`. **u32 distance labels are wrong on this dataset.** The bound for u32 labels would be `(n-1) * w_max < 2^32`, i.e. `w_max <= 2468` at n = 1,740,512 — and the generator deliberately injects weights near `2^32`. Use u64 labels (or one generic u64 instantiation), and compute `mu` sums in u64. |
+> | contraction hierarchies / ALT as candidate indexes | Legal but **not worth it here**: queries are drawn at a bounded search distance, so a heavy index has little time to repay its build. |
+> | reset distances per query with `memset` | Use a **touched list or generation stamps**; a full clear per query is pure waste at 1.74M nodes. |
+---
+
 # TRACK D · TRAVERSE — Design Specification
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.

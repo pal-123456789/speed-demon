@@ -9,7 +9,7 @@
 
 > **Supersession notice — read before executing any track block.**
 > The organizers' "Changes before freeze (Oct 26)" list supersedes everything published
-> earlier. `docs/specs/` was written after this plan and carries the per-track strategy of
+> earlier. `docs/specs/` was written after this plan and carries an early, now-superseded per-track strategy of
 > record. Where the two differ, **the spec wins**, and the differences are deliberate:
 >
 > 1. **Track E is cut.** Four tracks, A to D. "Track E (Compress) is cut: storing the input

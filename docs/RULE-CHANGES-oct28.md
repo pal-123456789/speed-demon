@@ -117,7 +117,7 @@ from it must be marked unverifiable.
 * T is still end-to-end wall time, exec to exit: startup and warmup count.
 * No language handicaps; the event page no longer claims the axes cancel
   language differences (this repo never made that claim — verified: no
-  occurrence of "cancel" in `docs/`, `docs/specs/` or `README.md`).
+  occurrence of "cancel" anywhere under `docs/` or in `README.md`).
 * No I/O-bound track this edition (F is deferred); `io_uring` is blocked by
   Docker's default seccomp profile, `mmap` works. Nothing in this repo planned
   an I/O track or relied on `io_uring`.

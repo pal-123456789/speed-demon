@@ -640,6 +640,22 @@ else
   fail "a K value in the documentation does not match the frozen formula"
 fi
 
+# ── 14. every performance number in judge-facing prose is sourced ──────────
+# PERF.md is 8% of a track total on its own, and its stated rule is "measurements,
+# not adjectives". A single invented figure makes the whole log worthless, and a
+# reviewer under time pressure will not re-derive forty numbers -- so this asks,
+# for each one, where it came from: the frozen contract, a ledger measurement, or
+# an explicit label. Verified to bite: three invented numbers planted in README
+# (a time, a memory and a speedup) were all reported.
+step "CLAIM AUDIT (no unmeasured number in README or the PERF logs)"
+if "$PY" tooling/check_claims.py --strict >/tmp/sd-claims.txt 2>&1; then
+  grep -E 'files,|unsourced claim' /tmp/sd-claims.txt | tail -2 | sed 's/^/  /'
+  ok "every performance number in the judge-facing files is sourced"
+else
+  sed -n '1,25p' /tmp/sd-claims.txt | sed 's/^/  /'
+  fail "an unmeasured number reads as a result — measure it, label it, or remove it"
+fi
+
 printf '\n%s\n' "============================================================"
 if [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
   printf '\033[32mCI: ALL GATES GREEN\033[0m\n'

@@ -518,6 +518,32 @@ check("every .ps1 that stops on errors relaxes that around native calls",
 check("the local scoring protocol is reachable (tooling/wsl-harness.ps1)",
       (TOOLING / "wsl-harness.ps1").is_file())
 
+# ── 22. the superseded specs cannot be read as current ────────────────────
+# docs/specs/ is an early design exploration. Its numbers predate the frozen
+# contract (track-b-index.md still quotes T = 58.7 s and a 587 s timeout against
+# the real 56.35 s / 563.5 s, and calls published values DEFERRED), and several of
+# its prescriptions were replaced: days-from-civil timestamp arithmetic, a
+# per-shard monotonicity shortcut that is unsafe because the shard is not a field,
+# radix ordering where rank selection is used, StreamVByte postings, and ALT
+# landmarks in the table of "locked" decisions.
+#
+# The cheapest path for a reader under time pressure is to follow such a
+# prescription, which is how a wrong or merely slower implementation gets written
+# during the window. So every spec carries a SUPERSEDED header, and every
+# MARKDOWN document that points at them must say so. Scoped to .md deliberately:
+# tooling/check_doc_k.py and tooling/spec_intake.py *scan* that directory, which
+# makes no claim about whether it is current.
+spec_dir = ROOT / "docs" / "specs"
+unmarked_specs = [p.name for p in sorted(spec_dir.glob("*.md"))
+                  if "SUPERSEDED" not in p.read_text(encoding="utf-8", errors="replace")]
+check("every docs/specs file carries the SUPERSEDED header",
+      not unmarked_specs, ", ".join(unmarked_specs))
+unwarned = [rel for rel, text in texts()
+            if rel.endswith(".md") and not rel.startswith("docs/specs/")
+            and "docs/specs" in text and "superseded" not in text.lower()]
+check("every Markdown doc that cites docs/specs marks it superseded",
+      not unwarned, ", ".join(unwarned[:5]))
+
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:
     for f in FAILS:

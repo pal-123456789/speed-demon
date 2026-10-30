@@ -1,3 +1,25 @@
+> ## SUPERSEDED — read this before using anything below
+>
+> An **early design exploration** (Oct 26–28), kept for its reasoning, not for its
+> prescriptions. It was written before the frozen specs and harness were read, so
+> its numbers are estimates where the real ones are now published, and several of
+> its prescriptions were replaced.
+>
+> **Authority, in order:** the frozen track spec and harness under
+> `reference/official/`, then `verification/contract.toml`, then
+> `docs/MODULE-PLAN.md`. Where this file disagrees with any of them, this file is
+> wrong.
+>
+> **Stale facts in this file, corrected:**
+>
+> | This file says | Correct |
+> |---|---|
+> | convert the timestamp with **days-from-civil** calendar arithmetic | **not needed.** The group key is the hour, and the hour is the **first 13 bytes** (`YYYY-MM-DDTHH`) of the RFC 3339 timestamp — grouping is a 13-byte bytewise compare. Nothing converts a timestamp to a number. |
+> | the **per-thread monotonicity shortcut** (remember the last timestamp, skip re-deriving the date) | **unsafe, dropped.** The spec says eight shards interleave and that **the shard is not a field** with **no promised bound on disorder** — so the previous line proves nothing about the next. |
+> | **radix ordering** per endpoint (L4b) | **selection, not sorting.** Percentiles use nearest rank at three fixed ranks, so `select_nth_unstable` (p99 first, then narrowing) is the adopted path; a total order is never needed. |
+> | T 32.05 s, M 228 MB, S 56 lines, timeout 321 s | T 32.047276 s, M 227.98336 MB, S 56 **lines**, timeout 320.5 s — `verification/contract.toml` is exact. |
+---
+
 # TRACK A · INGEST — Design Specification
 
 Status: pre-kickoff design document. No solution code, no function bodies, no implementation language.
