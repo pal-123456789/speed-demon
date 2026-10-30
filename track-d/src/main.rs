@@ -44,8 +44,6 @@
 //! * A path may have zero edges, so `d(s, s) = 0` for every node, including a
 //!   node with no edges at all -- that case is answered before any search.
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
 use std::env;
 use std::fs::{File, read};
 use std::io::Write;
@@ -125,6 +123,102 @@ fn for_each_edge<F: FnMut(usize, u32, u32)>(graph: &[u8], lo: usize, hi: usize, 
             p += 1;
         }
         p += 1;
+    }
+}
+
+/// A monotone radix heap for Dijkstra.
+///
+/// Dijkstra extracts keys in non-decreasing order, and that is exactly the
+/// property this structure exploits: under monotone extraction it needs no
+/// comparison at all, only the position of the highest bit where a key differs
+/// from the last one extracted. Push and pop become O(1) amortised instead of a
+/// `sift_up` on every relaxation.
+///
+/// It exists because the solve phase is roughly two thirds of this track's board
+/// time and the binary heap is the only comparison-heavy structure inside it --
+/// one sift per relaxation over a 5,000,000-edge graph, 2,000 times.
+///
+/// The invariant is that no key smaller than `last` is ever pushed. Dijkstra
+/// guarantees it: a new key is `d + w` with `w >= 0`, and `d` is the key just
+/// extracted, which was the minimum in the heap. Zero-weight edges are therefore
+/// legal, landing in bucket 0 alongside `last` itself.
+struct RadixHeap {
+    buckets: [Vec<(u64, u32)>; 65],
+    last: u64,
+    len: usize,
+}
+
+impl RadixHeap {
+    fn new() -> Self {
+        RadixHeap {
+            buckets: std::array::from_fn(|_| Vec::new()),
+            last: 0,
+            len: 0,
+        }
+    }
+
+    /// 0 when the key equals `last`, otherwise one past the highest bit where the
+    /// two differ -- so bucket order is key order.
+    #[inline]
+    fn bucket(key: u64, last: u64) -> usize {
+        let x = key ^ last;
+        if x == 0 {
+            0
+        } else {
+            64 - x.leading_zeros() as usize
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, key: u64, node: u32) {
+        let b = Self::bucket(key, self.last);
+        self.buckets[b].push((key, node));
+        self.len += 1;
+    }
+
+    #[inline]
+    fn pop(&mut self) -> Option<(u64, u32)> {
+        if self.buckets[0].is_empty() {
+            let mut b = 1;
+            while b < 65 && self.buckets[b].is_empty() {
+                b += 1;
+            }
+            if b == 65 {
+                return None;
+            }
+            // Promote the bucket's minimum to `last` and redistribute. Every
+            // element then lands in a strictly lower bucket, because the new
+            // `last` is their minimum and they all shared the higher bits that
+            // defined bucket `b`.
+            let mut min = u64::MAX;
+            for &(k, _) in &self.buckets[b] {
+                if k < min {
+                    min = k;
+                }
+            }
+            self.last = min;
+            let items = std::mem::take(&mut self.buckets[b]);
+            for (k, nd) in items {
+                let nb = Self::bucket(k, self.last);
+                self.buckets[nb].push((k, nd));
+            }
+        }
+        let r = self.buckets[0].pop();
+        if r.is_some() {
+            self.len -= 1;
+        }
+        r
+    }
+
+    /// Empty every bucket but keep the allocations: 2,000 queries reuse the same
+    /// 65 vectors instead of allocating a fresh heap each time.
+    #[inline]
+    fn clear(&mut self) {
+        for b in self.buckets.iter_mut() {
+            b.clear();
+        }
+        self.last = 0;
+        self.len = 0;
     }
 }
 
@@ -276,7 +370,7 @@ fn main() {
             handles.push(scope.spawn(move || {
                 let mut dist = vec![INF; n];
                 let mut touched: Vec<u32> = Vec::with_capacity(4096);
-                let mut heap: BinaryHeap<Reverse<(u64, u32)>> = BinaryHeap::with_capacity(1 << 14);
+                let mut heap = RadixHeap::new();
                 let mut out: Vec<u8> = Vec::with_capacity(part.len() * 6);
 
                 for &(s, t) in part {
@@ -286,9 +380,9 @@ fn main() {
                         dist[s as usize] = 0;
                         touched.push(s);
                         heap.clear();
-                        heap.push(Reverse((0u64, s)));
+                        heap.push(0u64, s);
                         let mut found = INF;
-                        while let Some(Reverse((d, u))) = heap.pop() {
+                        while let Some((d, u)) = heap.pop() {
                             if d > dist[u as usize] {
                                 continue; // stale entry
                             }
@@ -305,7 +399,7 @@ fn main() {
                                 if nd < dist[v as usize] {
                                     dist[v as usize] = nd;
                                     touched.push(v);
-                                    heap.push(Reverse((nd, v)));
+                                    heap.push(nd, v);
                                 }
                             }
                         }
