@@ -33,6 +33,63 @@ use std::process::exit;
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
+/// A fast, non-cryptographic hasher (the FxHash multiply-rotate-xor).
+///
+/// The standard library's `HashMap` uses SipHash: DoS-resistant, and far more
+/// work than this program needs. Track C hashes 3.32M region ids and 3.32M name
+/// byte strings, none of it attacker-controlled, and at 1.98 s for 202 MB the
+/// parse was running at about 102 MB/s -- well below what a byte scanner should
+/// manage. Nothing about the ANSWER depends on the hash function, only on set
+/// membership, so this changes speed and nothing else; the SHA-256 is the proof.
+struct FxHasher(u64);
+
+const FX_K: u64 = 0x517c_c1b7_2722_0a95;
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut b = bytes;
+        while b.len() >= 8 {
+            let v = u64::from_le_bytes(b[..8].try_into().unwrap());
+            self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(FX_K);
+            b = &b[8..];
+        }
+        for &x in b {
+            self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(FX_K);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(FX_K);
+    }
+    #[inline]
+    fn write_i64(&mut self, n: i64) {
+        self.write_u64(n as u64);
+    }
+    #[inline]
+    fn write_u8(&mut self, n: u8) {
+        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(FX_K);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Default, Clone)]
+struct FxBuild;
+
+impl std::hash::BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher(0)
+    }
+}
+
+type FxMap<K, V> = HashMap<K, V, FxBuild>;
+type FxSet<T> = HashSet<T, FxBuild>;
+
 /// Per-country running aggregate.
 #[derive(Default)]
 struct Agg {
@@ -41,7 +98,7 @@ struct Agg {
     amount_sum: i64,
     amount_min: i64,
     amount_max: i64,
-    names: HashSet<Vec<u8>>,
+    names: FxSet<Vec<u8>>,
     name_bytes: u64,
     note_bytes: u64,
 }
@@ -120,7 +177,7 @@ fn main() {
             exit(1);
         }
     };
-    let mut lookup: HashMap<i64, [u8; 3]> = HashMap::with_capacity(200_000);
+    let mut lookup: FxMap<i64, [u8; 3]> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
     {
         let mut p = 0usize;
         // header
@@ -172,7 +229,7 @@ fn main() {
     let mut eof = false;
     let mut header_done = false;
 
-    let mut groups: HashMap<[u8; 3], Agg> = HashMap::with_capacity(256);
+    let mut groups: FxMap<[u8; 3], Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
 
