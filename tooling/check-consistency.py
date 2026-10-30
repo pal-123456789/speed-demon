@@ -494,6 +494,30 @@ check("the harness resolves track directories through one helper",
       any("fn track_dir(" in p.read_text(encoding="utf-8", errors="replace")
           for p in harness_src))
 
+# ── 21. PowerShell stderr is not a fatal error ────────────────────────────
+# With `$ErrorActionPreference = "Stop"`, PowerShell 5.1 raises
+# NativeCommandError when a native command writes to STDERR -- even when it
+# succeeded. That broke verification/verify.ps1, where official-data.py prints
+# "nomatch" to stderr and the gate aborted before reporting anything; and then it
+# broke the brand-new tooling/wsl-harness.ps1 in exactly the same way, because
+# WSL prints a systemd warning on stderr for every invocation. The fix each time
+# was a helper that relaxes the preference around the call. This asserts the
+# relaxation is present in any script that stops on errors, so the third
+# occurrence is caught by CI instead of by running it.
+ps1_strict = []
+for p in sorted(ROOT.rglob("*.ps1")):
+    if any(part in ("target", "target-linux", ".git") for part in p.parts):
+        continue
+    ptxt = p.read_text(encoding="utf-8", errors="replace")
+    stops = 'ErrorActionPreference = "Stop"' in ptxt
+    relaxes = 'ErrorActionPreference = "Continue"' in ptxt
+    if stops and not relaxes:
+        ps1_strict.append(p.relative_to(ROOT).as_posix())
+check("every .ps1 that stops on errors relaxes that around native calls",
+      not ps1_strict, ", ".join(ps1_strict))
+check("the local scoring protocol is reachable (tooling/wsl-harness.ps1)",
+      (TOOLING / "wsl-harness.ps1").is_file())
+
 print(f"check-consistency: {CHECKS} assertions")
 if FAILS:
     for f in FAILS:

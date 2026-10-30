@@ -97,3 +97,7 @@ track-*/run.pdb
 # local self-consistency pins (pin-hash.sh); the official pin is <output>.sha256
 **/*.local.sha256
 
+
+# The Linux harness built inside WSL by tooling/wsl-harness.ps1, kept in its own
+# target dir so it can never shadow the Windows PE that the PowerShell gates run.
+/verification/harness/target-linux/

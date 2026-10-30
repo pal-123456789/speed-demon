@@ -18,6 +18,33 @@ echo "════════════════════════�
 echo " H0 LAUNCH — $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo "══════════════════════════════════════════════════════════════"
 
+# ── rule-05 guard ────────────────────────────────────────────────────────────
+# Step 5 below copies prep/*.rs into track-*/src/. That is legitimate AT and
+# after H0 -- the organizers allow preparing your environment and the prep files
+# are deliberately track-agnostic primitives. It is NOT legitimate before
+# kickoff: it puts our own code inside a track folder before the window opens,
+# which is precisely what rule 05 forbids, and the penalty is disqualification
+# rather than a bad score.
+#
+# The hazard is that this is the obvious script to "just try" beforehand, and
+# nothing about it looks destructive. So it refuses, and the override is
+# explicit rather than a comment nobody reads.
+if [ "${SD_ALLOW_EARLY_H0:-0}" != "1" ]; then
+  KICKOFF_EPOCH="$(date -u -d '2026-10-30T15:00:00Z' +%s 2>/dev/null || echo 0)"
+  NOW_EPOCH="$(date -u +%s)"
+  if [ "$KICKOFF_EPOCH" != "0" ] && [ "$NOW_EPOCH" -lt "$KICKOFF_EPOCH" ]; then
+    echo ""
+    echo "REFUSING to run before kickoff (Oct 30 15:00 UTC)."
+    echo "  Step 5 copies prep/*.rs into track-*/src/. Before the window opens that"
+    echo "  is code in a track folder, which rule 05 forbids."
+    echo ""
+    echo "  Safe to run now:   sh tooling/ci.sh          (the pre-kickoff gate suite)"
+    echo "                     sh tooling/pin-hash.sh a   (writes only a .local.sha256)"
+    echo "  If you really mean it:  SD_ALLOW_EARLY_H0=1 sh tooling/h0-launch.sh"
+    exit 2
+  fi
+fi
+
 # 1. repo state
 echo "== 1. repo state =="
 git status --porcelain | head -5

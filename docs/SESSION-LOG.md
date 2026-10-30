@@ -119,6 +119,38 @@ Fixing #16 also repaired the ledger: `expected_sha256` was `null` in every recor
 and is now the official pin, so a ledger row finally links a measurement to the
 answer it was measured against.
 
+### New capabilities added (both pre-kickoff legal — no track-folder code)
+
+**`tooling/wsl-harness.ps1` — measure the M axis locally.** `check.py` reports
+the time but not the memory, and **M is 20% of K**. Peak memory is the
+container's cgroup v2 `memory.peak`, which needs Linux. This host has WSL Ubuntu
+with Docker on cgroup v2, so the script builds the harness as a Linux binary in
+its own target directory (leaving the Windows artefacts the PowerShell gates use
+untouched) and runs the board's exact `docker run` flags. It now reports
+`peak memory : 268.8 MiB` and `M ratio : 0.85x` where every other local tool says
+`n/a`. That number is what `PERF.md` needs, and nothing else can produce it.
+
+**`tooling/h0-launch.sh` now refuses to run before kickoff.** Step 5 copies
+`prep/*.rs` into `track-*/src/`, which is legitimate at and after H0 and is *code
+in a track folder* before it — rule 05, penalty disqualification. Nothing about
+the script looked destructive, and it was the obvious thing to "just try"
+beforehand. It exits 2 with an explanation and an explicit
+`SD_ALLOW_EARLY_H0=1` override.
+
+### Three of the bugs were in the new code, found by running it
+
+Recorded because it is the method working, not an embarrassment:
+
+| Defect | How it surfaced |
+|---|---|
+| `wsl-harness.ps1` set `$ErrorActionPreference = "Stop"` and called WSL, which prints a systemd warning to **stderr** — a terminating error, so it died before running anything. **The same quirk as #15**, twice in two sessions. | First execution |
+| The same script passed **relative** paths as Docker bind mounts, so Docker read them as named volumes: `exit 125, includes invalid characters for a local volume name`. | Second execution |
+| Running CI appended harness runs to the committed evidence ledger, leaving the tree dirty after every run — and the freeze-day lockdown asserts a clean tree. A gate check is not a measurement; CI now passes `--ledger` to a throwaway path. | Noticed in `git status` |
+
+The `$ErrorActionPreference` pattern is now a gate (assertion 21): any `.ps1`
+that stops on errors must also contain the relaxation, so a third occurrence is
+caught by CI rather than by running it.
+
 ### What each one became
 Nothing was fixed by hand alone. Each is now a mechanical gate, and each gate has
 been **deliberately broken** to confirm it bites:

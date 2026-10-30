@@ -81,6 +81,36 @@ one output file, and a sha256. **The hash will not match the published one** —
 dataset and then emits `#SCAFFOLD_NOT_IMPLEMENTED` with the line and byte count.
 That is the correct state at H0. Verified working before kickoff.
 
+### 1.3b Measure the M axis — it needs Linux, and you have it
+
+`check.py` reports the time but **not** the memory, and M is 20% of K. Peak
+memory is the container's cgroup v2 `memory.peak`, which no Windows process can
+read for a container it did not create. The Rust harness does it properly, and
+this host has a Linux environment with Docker on cgroup v2, so the real protocol
+runs here:
+
+```powershell
+cd D:\SpeedDemon-Campaign
+.\tooling\wsl-harness.ps1 -Track a -Label baseline
+```
+
+It builds the harness as a **Linux** binary inside WSL (into its own target
+directory, so the Windows artefacts the PowerShell gates use are untouched),
+builds the track image the way the board does, then runs the board's exact
+`docker run` flags. Output looks like this:
+
+```
+run 2:    2.700s  peak 179.9 MiB  sha 753bf0feb3ce <- used
+run 3:    2.812s  peak 227.1 MiB  sha 753bf0feb3ce <- used
+T (trimmed mean) : 3.0321 s
+peak memory      : 268.8 MiB (max of the runs)
+M ratio          : 0.85x
+```
+
+That `peak memory` line is the number that goes in `PERF.md`, and it is the one
+the K formula multiplies by `^0.20`. Every other local tool reports
+`peak memory : n/a`.
+
 ### 1.4 Settle the three oracle-deferred behaviours
 
 Resolve these against the vendored reference **before** writing the parser, and
