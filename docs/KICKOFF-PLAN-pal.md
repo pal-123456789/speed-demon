@@ -1,4 +1,9 @@
-# KICKOFF PLAN — Pal Ghevariya (solo) — 72 hours, non-stop
+# KICKOFF PLAN — Pal Ghevariya (solo) — 72 hours, three sleeps
+
+> **Schedule:** defers to the canonical H-table at the top of
+> [`KICKOFF-CARD.md`](KICKOFF-CARD.md). The three sleeps are part of the
+> plan, not a concession: an unbroken 72 hours produces worse decisions
+> than one that stops three times.
 
 > The operating plan for Oct 30 15:00 UTC → Nov 2 15:00 UTC. Read together with
 > `docs/HANDOVER-oct28.md` (state + verified assets) and

@@ -1,5 +1,10 @@
 # Speed Demon — Solo Campaign Monorepo (4 Tracks, Pre-Kickoff Build)
 
+> **Schedule:** one canonical H-table, UTC and IST, at the top of
+> [docs/KICKOFF-CARD.md](docs/KICKOFF-CARD.md). The plan documents below defer to
+> it; if any of them disagrees about *when*, the table is right.
+
+
 > **Status: PRE-KICKOFF SCAFFOLD — no project code committed before Oct 30 15:00 UTC.**
 > All source under `track-*/src/` is a **correctness-green stub** that compiles offline
 > via `rustc` (no cargo fetch). Real optimization replaces stubs at H0 inside the 72h window.

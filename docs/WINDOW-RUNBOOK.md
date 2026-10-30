@@ -1,4 +1,8 @@
 # WINDOW RUNBOOK — Oct 30 15:00 → Nov 2 15:00 UTC (72 hours)
+> **Schedule:** defers to the canonical H-table at the top of
+> [`docs/KICKOFF-CARD.md`](KICKOFF-CARD.md). If this file disagrees with
+> it about *when* something happens, that table is right.
+
 
 > The single document for the window. Every tool below is committed and
 > gate-verified. The goal of H0–H12 is **a SHA-green single-thread baseline on

@@ -656,6 +656,22 @@ else
   fail "an unmeasured number reads as a result — measure it, label it, or remove it"
 fi
 
+# ── 15. mutation evidence ─────────────────────────────────────────────────
+# "The tests pass" is a claim about the tests. This corrupts the tiny corpora in
+# ways that correspond to the specific bugs each track spec warns about, re-runs
+# the ORACLE on the corrupted data, and requires the stored expected answer to
+# stop matching. Two controls are included that MUST NOT be caught (Track A
+# ignores `method`; Track C skips a mid-file BOM wherever it appears), so a
+# harness that simply reports "everything changed" cannot pass.
+step "MUTATION EVIDENCE (injected bugs must be caught, controls must not fire)"
+if "$PY" tooling/mutate.py >/tmp/sd-mutate.txt 2>&1; then
+  grep -E 'behaved correctly|every injected bug' /tmp/sd-mutate.txt | sed 's/^/  /'
+  ok "every injected bug was caught and both controls held"
+else
+  sed -n '1,30p' /tmp/sd-mutate.txt | sed 's/^/  /'
+  fail "a mutation went undetected, or a control fired — the apparatus is blind somewhere"
+fi
+
 printf '\n%s\n' "============================================================"
 if [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
   printf '\033[32mCI: ALL GATES GREEN\033[0m\n'

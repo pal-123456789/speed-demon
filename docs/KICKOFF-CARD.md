@@ -1,3 +1,36 @@
+## The schedule — canonical, UTC and IST
+
+**This table is the schedule.** Every other document in this repository that
+describes when something happens defers to it; if one disagrees, this one is
+right. H is hours since kickoff, so H72 is the freeze. Local time is IST
+(UTC+5:30), this machine's zone.
+
+| H | UTC | IST | What happens |
+|---|---|---|---|
+| **H0** | Oct 30 15:00 | Oct 30 **20:30** | **KICKOFF.** Full datasets and hashes land. Live board opens. |
+| H0–H1 | 15:00–16:00 | 20:30–21:30 | Bootstrap: repo sanity, data present, four-track smoke test, settle the three oracle-deferred behaviours. **Human steps in §0 below.** |
+| H1–H7 | 16:00–22:00 | 21:30–03:30 | First SHA-green on one track, then the rest. One module per commit. |
+| *H7–H12* | 22:00–03:00 | 03:30–08:30 | **SLEEP 1** |
+| H12–H17 | Oct 31 03:00–08:00 | 08:30–13:30 | Baselines on all four tracks. |
+| **H17** | Oct 31 08:00 | Oct 31 **13:30** | **GATE: all four tracks SHA-green and deterministic.** Tag it. Slow green beats fast red. |
+| H17–H21 | 08:00–12:00 | 13:30–17:30 | Commit the green baseline, regenerate `PERF.md`, first board push and record the run IDs. |
+| H21–H31 | 12:00–22:00 | 17:30–Nov 1 03:30 | Ladder work, highest exchange rate first. Every rung measured and pushed. |
+| *H31–H36* | Nov 1 22:00–03:00 | Nov 1 03:30–08:30 | **SLEEP 2** |
+| H36–H45 | Nov 1 03:00–12:00 | 08:30–17:30 | Ladder continued. |
+| **H45** | Nov 1 12:00 | Nov 1 **17:30** | **Mid-point review.** Re-solve the hour allocation with measured doubling times; keep a verified fourth track as insurance. |
+| H45–H55 | 12:00–22:00 | 17:30–Nov 2 03:30 | Polish by measured return. Price one PGO round. Write `VERIFY.md`. |
+| *H55–H60* | Nov 2 22:00–03:00 | Nov 2 03:30–08:30 | **SLEEP 3** |
+| H60–H66 | Nov 2 03:00–09:00 | 08:30–14:30 | Final ladder rungs; stop a track when the next rung is worth under 0.4 points per hour. |
+| **H66** | Nov 2 09:00 | Nov 2 **14:30** | **FEATURES FROZEN.** Nothing new after this; only documentation, verification and polish. |
+| H66–H70 | 09:00–13:00 | 14:30–18:30 | Wrap-up: `PERF.md` ladders, `VERIFY.md`, README, slide deck, the one-minute capture. |
+| **H70** | Nov 2 13:00 | Nov 2 **18:30** | **LAST PUSH.** The board queue lengthens near the freeze; do not leave it to the last hour. |
+| H72 | Nov 2 15:00 | Nov 2 **20:30** | **CODE FREEZE.** Repo locked at the recorded commit. Publish within the hour (§3). |
+
+Three sleeps, and the H17 gate is the only one that must not slip: a slow
+correct baseline on all four tracks is worth more than a fast one on two.
+
+---
+
 # KICKOFF CARD — Friday Oct 30, 15:00 UTC = **20:30 IST**
 
 Everything is prepared. This page is the whole procedure: do section 0 in a

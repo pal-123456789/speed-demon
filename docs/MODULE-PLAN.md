@@ -1,5 +1,10 @@
 # MODULE PLAN — the adopted D1 architecture (with corrections)
 
+> **Schedule:** defers to the canonical H-table at the top of
+> [KICKOFF-CARD.md](KICKOFF-CARD.md). This file says *what* to build and in what
+> order; that table says *when*, and it wins on timing.
+
+
 > Source: the high-level model's decomposition (prompt 01), reviewed against the
 > official specs, the harness source and our measured profiles. **Adopted as the
 > build skeleton**, with the corrections in §1 — the model did not have the
