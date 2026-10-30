@@ -42,13 +42,32 @@ corpus's ~94,000 distinct names are stored twelve times over. That is the single
 worst number in the submission and it has one cause.
 
 **3. Our per-line work is higher than the leader's on Track A.** Same line count,
-3.9× the time. Our parser performs **three hash operations per line** — one to
-intern the 13-byte hour, one to intern the endpoint bytes, and one to look the
-group up by its (hour id, endpoint id) pair. The hour does not need hashing at
-all: `YYYY-MM-DDTHH` is 13 fixed-width bytes, so the hour index is arithmetic on
-digits. Collapsing the group key to a packed `u32` would reduce three byte-string
-hashes to one integer hash per line, which is the shape most consistent with a
-4× per-thread difference.
+3.9× the time. An earlier version of this section claimed three hash operations
+per line; **reading the code shows that is wrong and the correction matters**,
+because it points at a different fix. Track A already uses a multiply-xor
+(FxHash-shaped) hasher and a SINGLE map:
+
+```rust
+type Map = HashMap<Box<[u8]>, Group, BuildHasherDefault<Fx>>;
+```
+
+So there is one hash per line, not three. What that line still does is hash a
+**composite byte key of roughly 13 + 30 bytes** (the hour concatenated with the
+endpoint) and it must materialise those bytes before it can look anything up.
+
+The two candidate causes, which a profiler should separate before either is
+pursued:
+
+* **Key width.** Hashing ~43 bytes per line where an 8-byte packed
+  `(hour slot, endpoint id)` would do. The hour needs no hashing at all —
+  `YYYY-MM-DDTHH` is 13 fixed-width bytes, so its index is arithmetic on digits.
+* **Per-line byte scanning.** Finding the three field boundaries by walking
+  bytes, roughly 60 comparisons for a 66-byte line.
+
+The arithmetic that says something is wrong: the leader does 238 MB in 0.032 s
+across 12 threads, about **5 cycles per byte**, and we do about **19**. Both
+figures are estimates from wall time, but a 4× per-byte difference on the same
+line count is not tuning — it is a different amount of work per line.
 
 **4. Track B is the largest single gap: 11.9× on time.** Our build is 4.5–7.3 s
 of a ~5 s run, bisected to tokenise 0.51 s, +hash lookup 2.67 s, +dedupe/push
