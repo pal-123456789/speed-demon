@@ -51,7 +51,7 @@ the reference (final scoring 10x).
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 14.44 s | (pin from the Oct 28 spec) | 0 |
-| 1 | Real Join: spec 2.1 parser taken literally, hash join into 240 country accumulators, exact integer cents | `run-a54205eace15` | 1.9827 s | 242.5 MB | 19.68 |
+| 1 | Real Join: spec 2.1 parser taken literally, twelve threads split at proven quote-parity record boundaries, exact integer cents | `run-e2f7ca94f947` | 0.9079 s | 367.6 MB | 25.02 |
 
 ---
 

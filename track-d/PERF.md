@@ -51,7 +51,7 @@ the reference (final scoring 10x).
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 72.69 s | (pin from the Oct 28 spec) | 0 |
-| 1 | Real Traverse: CSR in two counting passes, u64 distance labels, 2,000 queries across twelve threads | `run-cf09da466949` | 1.9933 s | 225.3 MB | 40.20 |
+| 1 | Real Traverse: CSR built in parallel across twelve windows, u64 distance labels, 2,000 Dijkstra queries across twelve threads | `run-c7cd32a91b0e` | 1.5791 s | 225.3 MB | 41.82 |
 
 ---
 

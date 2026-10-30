@@ -51,7 +51,7 @@ the reference (final scoring 10x).
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 56.35 s | (pin from the Oct 28 spec) | 0 |
-| 1 | NOT YET IMPLEMENTED — the folder is the scaffold, so the board reports a hash mismatch on every push | `—` | — s | — MB | — |
+| 1 | Real Index: authored inverted index with posting lists, boolean AND/OR/NOT evaluated left to right, and phrases resolved by a second sequential pass over the candidate document ids | `run-545c440faae8` | 3.9907 s | 126.3 MB | 34.20 |
 
 ---
 

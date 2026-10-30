@@ -51,8 +51,8 @@ the reference (final scoring 10x).
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 32.05 s | 228 MB | 0 |
-| — | *measured by the board on the full public dataset, seed 1; commit `3bd26b9`* | | | | |
-| 1 | Real Ingest: 13-byte hour key, interned endpoints, rank selection instead of sorting, one pass over 238 MB | `run-8b16b7de4389` | 0.7627 s | 35.8 MB | 44.73 |
+| — | *measured by the board on the full public dataset, seed 1; commit `3032ab8`, 316 code lines* | | | | |
+| 1 | Real Ingest: 13-byte hour key (no calendar arithmetic), interned endpoints, rank selection instead of sorting, parsed across twelve threads over disjoint record ranges | `run-2e1da425c7aa` | 0.1338 s | 60.2 MB | 59.43 |
 
 ---
 
