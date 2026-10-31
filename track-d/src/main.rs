@@ -317,106 +317,94 @@ impl RadixHeap {
 /// to compare the distance. Relaxation runs 217.5 M times in a 2,000-query run, so that
 /// second line was being paid on the hottest path in the track. The pair costs 4 bytes
 /// of padding per slot and saves the extra line.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Slot {
-    key: u32,
-    dist: u64,
-}
+/// Nodes per distance page. A page is 4 KB (512 u64), and its settled state is
+/// exactly eight 64-bit words, so a reset clears pages rather than nodes.
+const DPAGE: usize = 512;
 
+/// Distances as a paged FLAT array, plus the settled bitmap.
+///
+/// `tab[v / 512]` says which pool page a region is on, with 0 meaning untouched
+/// this query; `at` hands out a page from `pool` on first touch and `get` is two
+/// loads. This replaced an open-addressed hash table whose probe ran on every
+/// relaxation -- the measured ~40 ns per relaxation on the hottest path in the
+/// track, against a leader at about 7 ns. A flat page has no probe, no compare,
+/// and no chain to walk.
+///
+/// The settled bitmap lives here too, because a reset then walks the pages a
+/// query actually touched instead of the whole graph, and each page owns exactly
+/// its eight settled words.
 struct Labels {
-    slots: Vec<Slot>,
-    /// One bit per probe slot written this query, so the reset needs no probe.
-    seen: Vec<u64>,
-    mask: usize,
-    shift: u32,
-    grow_at: usize,
-    max_cap: usize,
-    len: usize,
+    tab: Vec<u16>,
+    used: Vec<u32>,
+    pool: Vec<u64>,
+    done: Vec<u64>,
 }
 
 impl Labels {
-    /// 4 Ki slots to start; a search that needs more grows into it.
-    const MIN_LOG: u32 = 12;
-
     fn new(n: usize) -> Self {
-        let mut l = Labels {
-            slots: Vec::new(),
-            seen: Vec::new(),
-            mask: 0,
-            shift: 0,
-            grow_at: 0,
-            // Two slots per node is the ceiling, so however large a search gets
-            // the table can never be more than half full.
-            max_cap: (2 * n).next_power_of_two().max(1 << (Self::MIN_LOG + 1)),
-            len: 0,
-        };
-        l.resize(1 << Self::MIN_LOG);
-        l
-    }
-
-    /// Fresh empty table of `cap` slots. The old one is dropped whole, so no
-    /// page of it is walked on the way out.
-    fn resize(&mut self, cap: usize) {
-        self.slots = vec![Slot { key: 0, dist: 0 }; cap]; self.seen = vec![0u64; cap.div_ceil(64)]; self.mask = cap - 1; self.shift = 32 - cap.trailing_zeros(); self.grow_at = cap - cap / 4;
-    }
-
-    #[inline(always)]
-    fn slot(&self, node: u32) -> usize {
-        (node.wrapping_mul(0x9E37_79B1) >> self.shift) as usize
-    }
-
-    /// Eight times larger, every live entry re-probed through the `seen` bitmap
-    /// so the walk never reads a slot that was never written.
-    #[cold]
-    fn grow(&mut self) {
-        let cap = (self.slots.len() * 8).min(self.max_cap); let (mask, shift) = (cap - 1, 32 - cap.trailing_zeros()); let mut slots = vec![Slot { key: 0, dist: 0 }; cap]; let mut seen = vec![0u64; cap.div_ceil(64)];
-        for w in 0..self.seen.len() {
-            let mut x = self.seen[w];
-            while x != 0 {
-                let sl = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let e = self.slots[sl]; let k = e.key; let mut i = ((k - 1).wrapping_mul(0x9E37_79B1) >> shift) as usize;
-                while slots[i].key != 0 { i = (i + 1) & mask; }
-                slots[i] = e; seen[i >> 6] |= 1u64 << (i & 63);
-            }
+        Labels {
+            tab: vec![0; n / DPAGE + 1],
+            used: Vec::new(),
+            pool: Vec::new(),
+            // Sized to the pages `tab` can hand out, NOT to the node count: `reset`
+            // clears eight words per used page, and the last page's eight words run
+            // past `n / 64 + 1` when n is not a multiple of DPAGE. Sizing it as
+            // tab.len() * (DPAGE / 64) covers every page that can be indexed.
+            done: vec![0; (n / DPAGE + 1) * (DPAGE / 64)],
         }
-        self.slots = slots; self.seen = seen; self.mask = mask; self.shift = shift; self.grow_at = cap - cap / 4;
     }
 
-    /// Relax into `node`: keep the label if it is better, take it if the node is
-    /// absent, and push the heap entry in both cases. One probe sequence, so the
-    /// lookup and the insert cannot disagree.
+    /// The distance slot for `node`, allocating its page on first touch. Two
+    /// loads on the hot path; the page allocation runs once per region per query.
+    #[inline(always)]
+    fn at(&mut self, node: u32) -> &mut u64 {
+        let i = node as usize / DPAGE;
+        if unsafe { *self.tab.get_unchecked(i) } == 0 {
+            self.used.push(i as u32);
+            self.tab[i] = self.used.len() as u16;
+            let s = (self.used.len() - 1) * DPAGE;
+            if self.pool.len() < s + DPAGE {
+                self.pool.resize(s + DPAGE, INF);
+            }
+            self.pool[s..s + DPAGE].fill(INF);
+        }
+        let k = (self.tab[i] as usize - 1) * DPAGE + node as usize % DPAGE;
+        unsafe { self.pool.get_unchecked_mut(k) }
+    }
+
+    /// Relax into `node`: improve the flat label, and push the heap entry only
+    /// when it did.
     #[inline(always)]
     fn relax(&mut self, node: u32, nd: u64, heap: &mut RadixHeap) {
-        let k = node.wrapping_add(1); let mut i = self.slot(node);
-        loop {
-            let cur = self.slots[i].key;
-            if cur == k {
-                if nd < self.slots[i].dist {
-                    self.slots[i].dist = nd; heap.push(nd, node);
-                }
-                return;
-            }
-            if cur == 0 {
-                self.slots[i] = Slot { key: k, dist: nd }; self.seen[i >> 6] |= 1u64 << (i & 63); self.len += 1; heap.push(nd, node);
-                if self.len >= self.grow_at { self.grow(); }
-                return;
-            }
-            i = (i + 1) & self.mask;
+        let d = self.at(node);
+        if nd < *d {
+            *d = nd;
+            heap.push(nd, node);
         }
     }
 
-    /// Drop the settled bits this query set. `seen` is one bit per written slot
-    /// and each key is its node's id plus one, so one load yields both the slot
-    /// to clear and the node whose bit to drop. The bitmap is left zeroed.
+    #[inline(always)]
+    fn settled(&self, node: u32) -> bool {
+        (self.done[node as usize >> 6] >> (node & 63)) & 1 != 0
+    }
+
+    #[inline(always)]
+    fn mark(&mut self, node: u32) {
+        self.done[node as usize >> 6] |= 1u64 << (node & 63);
+    }
+
+    /// Clear the pages and settled words this query touched. Each used page owns
+    /// exactly eight settled words (512 / 64), so the reset walks pages.
     #[inline]
-    fn reset(&mut self, done: &mut [u64]) {
-        for w in 0..self.seen.len() {
-            let mut x = self.seen[w]; self.seen[w] = 0;
-            while x != 0 {
-                let i = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let v = self.slots[i].key as usize - 1; done[v >> 6] &= !(1u64 << (v & 63)); self.slots[i].key = 0;
+    fn reset(&mut self) {
+        for &i in &self.used {
+            self.tab[i as usize] = 0;
+            let w0 = i as usize * (DPAGE / 64);
+            for w in w0..w0 + DPAGE / 64 {
+                self.done[w] = 0;
             }
         }
-        self.len = 0;
+        self.used.clear();
     }
 }
 fn main() {
@@ -581,21 +569,21 @@ fn main() {
         for _ in 0..nthreads {
             let offset = &offset; let edge = &edge; let qs = &qs; let todo = &todo; let answers = &answers; let nextq = &nextq;
             scope.spawn(move || {
-                let mut labels = Labels::new(n); let mut done = vec![0u64; tbits]; let mut heap = RadixHeap::new();
+                let mut labels = Labels::new(n); let mut heap = RadixHeap::new();
 
                 loop {
                     let k = nextq.fetch_add(1, Ordering::Relaxed);
                     if k >= todo.len() { break; }
-                    let qi = todo[k] as usize; let (s, t) = qs[qi]; labels.reset(&mut done); heap.clear();
+                    let qi = todo[k] as usize; let (s, t) = qs[qi]; labels.reset(); heap.clear();
                     // The source enters through the same path as any other node:
                     // one insert, one heap entry, no special case.
                     labels.relax(s, 0, &mut heap); let mut found = INF;
                     while let Some((d, u)) = heap.pop() {
-                        let ui = u as usize; let bit = 1u64 << (u & 63);
-                        if done[ui >> 6] & bit != 0 {
+                        let ui = u as usize;
+                        if labels.settled(u) {
                             continue; // already settled, this entry is a duplicate
                         }
-                        done[ui >> 6] |= bit;
+                        labels.mark(u);
                         if u == t {
                             found = d;
                             break; // everything still queued is at least this far
