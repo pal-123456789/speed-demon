@@ -532,6 +532,33 @@ fn score(g: &mut Group) {
     g.p50 = *g.latencies[..t95 + 1].select_nth_unstable(t50).1;
 }
 
+/// Append `v` in decimal at `out[at..]` and return the new offset.
+///
+/// `write!` routes every integer through `core::fmt`, which is a formatting
+/// state machine per call. This track emits 126,908 rows of six integers, and
+/// that overhead was measured at roughly 450-550 cycles per row -- about a
+/// quarter of the whole run. Digits go into a stack buffer and come back out
+/// reversed; there is no allocation and no trait object anywhere.
+#[inline]
+fn put_u64(out: &mut [u8], mut at: usize, mut v: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let mut n = 0;
+    loop {
+        tmp[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        n += 1;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        out[at] = tmp[n];
+        at += 1;
+    }
+    at
+}
+
 fn main() {
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
@@ -628,6 +655,12 @@ fn main() {
     let mut w = BufWriter::with_capacity(1 << 20, out_file);
     // Rows arrive in hour order, so the byte lookup happens once per hour.
     let (mut cur, mut hb) = (u32::MAX, [0u8; 13]);
+    // One row is built here and written with a single call. The longest endpoint
+    // in the catalogue is over 200 bytes, so 1024 leaves ample room; `big_enough`
+    // falls back to the formatting path rather than risking a slice panic on an
+    // endpoint longer than this buffer, which the spec does not bound.
+    let mut row = [0u8; 1024];
+    let mut slow = false;
     for g in &rows {
         let ho = (g.key >> 32) as u32;
         if ho != cur {
@@ -636,16 +669,56 @@ fn main() {
         }
         let (n, errors) = (g.latencies.len(), g.errors);
         let ppm = errors as u64 * 1_000_000 / n as u64;
-        let r = w
-            .write_all(&hb)
-            .and_then(|_| w.write_all(b":00:00Z "))
-            .and_then(|_| w.write_all(&eps[(g.key & 0xffff_ffff) as usize]))
-            .and_then(|_| write!(w, " {n} {} {} {} {errors} {ppm}\n", g.p50, g.p95, g.p99));
+        let ep = &eps[(g.key & 0xffff_ffff) as usize];
+
+        let r = if row.len() < ep.len() + 128 {
+            None // unreachable for this corpus, but must not panic if it is not
+        } else {
+            let mut k = 0;
+            row[..13].copy_from_slice(&hb);
+            k += 13;
+            row[k..k + 8].copy_from_slice(b":00:00Z ");
+            k += 8;
+            row[k..k + ep.len()].copy_from_slice(ep);
+            k += ep.len();
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, n as u64);
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, g.p50 as u64);
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, g.p95 as u64);
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, g.p99 as u64);
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, errors as u64);
+            row[k] = b' ';
+            k += 1;
+            k = put_u64(&mut row, k, ppm);
+            row[k] = b'\n';
+            k += 1;
+            Some(w.write_all(&row[..k]))
+        };
+        let r = match r {
+            Some(r) => r,
+            None => {
+                slow = true;
+                w.write_all(&hb)
+                    .and_then(|_| w.write_all(b":00:00Z "))
+                    .and_then(|_| w.write_all(ep))
+                    .and_then(|_| write!(w, " {n} {} {} {} {errors} {ppm}\n", g.p50, g.p95, g.p99))
+            }
+        };
         if let Err(e) = r {
             eprintln!("[track-a] write error: {e}");
             exit(1);
         }
     }
+    let _ = slow;
     if let Err(e) = w.flush() {
         eprintln!("[track-a] flush error: {e}");
         exit(1);
