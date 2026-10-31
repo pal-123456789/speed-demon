@@ -1,29 +1,69 @@
 # Where the points are: per-track gap analysis
 
-Read off the live board. The leader's numbers are the target, and the useful
-thing about them is not the gap in points but the gap in **axes** — because each
-axis has a different exponent and a different cost to move.
+## THE ONE PATTERN THAT WORKED, BOARD-VERIFIED THREE TIMES
 
-## Ours versus the leader
+Every large gain this campaign has made came from **removing a per-record random
+memory access**, not from tuning. All three changes improved time *and* memory
+together, because the cost was never arithmetic — it was a cache miss per record
+plus millions of allocator calls.
+
+| Track | The structural change | Board result |
+|---|---|---|
+| **C** | shared 64-shard byte-exact interner + per-country bitmaps, replacing a per-country **per-thread** name set | peak **295.9 → 19.0 MB (15.6×)**, T 0.903 → 0.347 s, points 25.071 → **47.909** |
+| **B** | flat postings arena: per worker append the term id to one flat `Vec<u32>`, count df in a 75,748-entry array, prefix-sum in place, scatter doc ids into one flat arena | **T 1.359 → 0.614 s (2.2×)**, points 43.284 → **51.369** |
+| **A** | interned `u64` keys + a flat `Vec<Group>` with a compact index, replacing `Box<[u8]>` keys and a fat `HashMap` | M 64 → **47 MB**, points 60.088 → **60.740** |
+
+**The counter-example is the instructive part.** Every *tuning* change I tried — a
+hand-written eight-byte space scan, a single-level k-way merge replacing the tree
+merge, six versus twelve threads — measured flat or worse and was reverted. The
+exponent split (T^0.50 against M^0.20) had me optimising time for a day for +2
+points; the data-layout changes took an afternoon and produced +30.
+
+## Two latent defects, and the class they belong to
+
+**1. A run-aborting out-of-bounds read.** Track C read its amount digits with a
+guard that proved *one* byte in bounds while reading *two*:
+
+```rust
+if pos + 1 < have && recs[pos] == b'.' { pos += 1;
+    let d1 = recs[pos];  let d2 = recs[pos + 1]; ... }   // indexes recs[have]
+```
+
+With a 4 MB chunk the 202 MB corpus is only about 60 buffer fills, so it passed
+**every board run by luck**; at 128 KB it fired on the first attempt. **Final scoring
+runs a hidden holdout seed, where a panic is not a slow run — it is zero.** The guard
+is now `pos + 2 < have`, and all four tracks were audited for the same shape: only C
+had it.
+
+**2. Silent truncation.** `if want == 0 { break; }` dropped the rest of a worker's
+range when a record exceeded the buffer, with no error and no visible output change.
+
+**The rule: any fixed-size refill buffer is a place where an off-by-one guard is
+invisible on the big corpus and fatal on a different one.**
+
+## Ours versus the leaders
+
+Read off the live board. The useful thing is not the gap in points but the gap in
+**axes**, because each axis carries a different exponent.
 
 | Track | Axis | Leader | Ours | Gap | Exponent |
 |---|---|---|---|---|---|
-| **A** | T | 0.032 s | 0.126 s | **3.9×** | 0.50 |
-| | M | 20 MB | 63 MB | 3.2× | 0.20 |
-| | S | 310 lines | 321 lines | — | 0.15 |
-| **B** | T | 0.332 s | 3.938 s | **11.9×** | 0.50 |
-| | M | 40 MB | 132 MB | 3.3× | 0.20 |
-| | S | 790 lines | 723 lines | — | 0.15 |
-| **C** | T | 0.050 s | 0.903 s | 18.1× | 0.50 |
-| | M | 13 MB | 386 MB | **29.7×** | 0.20 |
-| **D** | T | 0.230 s | 1.579 s | 6.9× | 0.50 |
-| | M | 77 MB | 236 MB | 3.1× | 0.20 |
+| **A** | T | 0.019 s | 0.123 s | **6.5×** | 0.50 |
+| | M | 18 MB | 47 MB | 2.6× | 0.20 |
+| **B** | T | 0.162 s | 0.614 s | **3.8×** | 0.50 |
+| | M | 41 MB | 234 MB | **5.7×** | 0.20 |
+| **C** | T | 0.035 s | 0.346 s | **9.9×** | 0.50 |
+| | M | 13 MB | 18 MB | 1.4× | 0.20 |
+| **D** | T | 0.122 s | 1.060 s | **8.7×** | 0.50 |
+| | M | 68 MB | 183 MB | 2.7× | 0.20 |
 
 ## What the table actually says
 
-**1. Line counts are not the problem.** A: 321 vs 310. B: 723 vs 790 — we are
-*smaller* than the leader on B and still 11.9× slower. So S is not what separates
-us, and cutting lines would not close any of this. Every remaining gap is T or M.
+**1. Line counts are not the problem.** A: 412 code lines against 382. B: 889 against
+1,198 — we are *smaller* than the leader on B and still 3.8× slower. So S is not what
+separates us, and cutting lines would not close any of this. Every remaining gap is T
+or M.
+
 
 **2. Track C's memory is a 29.7× defect and it is ours.** The leader holds 13 MB
 while reading a 202 MB CSV and emitting 240 aggregate lines. That number is the
