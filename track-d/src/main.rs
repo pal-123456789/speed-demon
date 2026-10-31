@@ -309,9 +309,23 @@ impl RadixHeap {
 /// `u32` entry in a touched list: at 32 KB it is in L1 and costs a quarter of
 /// what the list's 1 MB of high-water capacity does, and the reset walks the
 /// same set of slots either way.
+/// One probe slot: the node key (stored as `node + 1`, so 0 means empty) and its
+/// distance, in ONE 16-byte entry.
+///
+/// These were two parallel arrays, `keys: Vec<u32>` and `dist: Vec<u64>`, which made
+/// every relaxation touch TWO cache lines: `keys[i]` to check the node, then `dist[i]`
+/// to compare the distance. Relaxation runs 217.5 M times in a 2,000-query run, so that
+/// second line was being paid on the hottest path in the track. The pair costs 4 bytes
+/// of padding per slot and saves the extra line.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Slot {
+    key: u32,
+    dist: u64,
+}
+
 struct Labels {
-    keys: Vec<u32>,
-    dist: Vec<u64>,
+    slots: Vec<Slot>,
     /// One bit per probe slot written this query, so the reset needs no probe.
     seen: Vec<u64>,
     mask: usize,
@@ -327,8 +341,7 @@ impl Labels {
 
     fn new(n: usize) -> Self {
         let mut l = Labels {
-            keys: Vec::new(),
-            dist: Vec::new(),
+            slots: Vec::new(),
             seen: Vec::new(),
             mask: 0,
             shift: 0,
@@ -345,7 +358,7 @@ impl Labels {
     /// Fresh empty table of `cap` slots. The old one is dropped whole, so no
     /// page of it is walked on the way out.
     fn resize(&mut self, cap: usize) {
-        self.keys = vec![0u32; cap]; self.dist = vec![0u64; cap]; self.seen = vec![0u64; cap.div_ceil(64)]; self.mask = cap - 1; self.shift = 32 - cap.trailing_zeros(); self.grow_at = cap - cap / 4;
+        self.slots = vec![Slot { key: 0, dist: 0 }; cap]; self.seen = vec![0u64; cap.div_ceil(64)]; self.mask = cap - 1; self.shift = 32 - cap.trailing_zeros(); self.grow_at = cap - cap / 4;
     }
 
     #[inline(always)]
@@ -357,16 +370,16 @@ impl Labels {
     /// so the walk never reads a slot that was never written.
     #[cold]
     fn grow(&mut self) {
-        let cap = (self.keys.len() * 8).min(self.max_cap); let (mask, shift) = (cap - 1, 32 - cap.trailing_zeros()); let (mut keys, mut dist) = (vec![0u32; cap], vec![0u64; cap]); let mut seen = vec![0u64; cap.div_ceil(64)];
+        let cap = (self.slots.len() * 8).min(self.max_cap); let (mask, shift) = (cap - 1, 32 - cap.trailing_zeros()); let mut slots = vec![Slot { key: 0, dist: 0 }; cap]; let mut seen = vec![0u64; cap.div_ceil(64)];
         for w in 0..self.seen.len() {
             let mut x = self.seen[w];
             while x != 0 {
-                let sl = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let k = self.keys[sl]; let mut i = ((k - 1).wrapping_mul(0x9E37_79B1) >> shift) as usize;
-                while keys[i] != 0 { i = (i + 1) & mask; }
-                keys[i] = k; dist[i] = self.dist[sl]; seen[i >> 6] |= 1u64 << (i & 63);
+                let sl = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let e = self.slots[sl]; let k = e.key; let mut i = ((k - 1).wrapping_mul(0x9E37_79B1) >> shift) as usize;
+                while slots[i].key != 0 { i = (i + 1) & mask; }
+                slots[i] = e; seen[i >> 6] |= 1u64 << (i & 63);
             }
         }
-        self.keys = keys; self.dist = dist; self.seen = seen; self.mask = mask; self.shift = shift; self.grow_at = cap - cap / 4;
+        self.slots = slots; self.seen = seen; self.mask = mask; self.shift = shift; self.grow_at = cap - cap / 4;
     }
 
     /// Relax into `node`: keep the label if it is better, take it if the node is
@@ -376,15 +389,15 @@ impl Labels {
     fn relax(&mut self, node: u32, nd: u64, heap: &mut RadixHeap) {
         let k = node.wrapping_add(1); let mut i = self.slot(node);
         loop {
-            let cur = self.keys[i];
+            let cur = self.slots[i].key;
             if cur == k {
-                if nd < self.dist[i] {
-                    self.dist[i] = nd; heap.push(nd, node);
+                if nd < self.slots[i].dist {
+                    self.slots[i].dist = nd; heap.push(nd, node);
                 }
                 return;
             }
             if cur == 0 {
-                self.keys[i] = k; self.dist[i] = nd; self.seen[i >> 6] |= 1u64 << (i & 63); self.len += 1; heap.push(nd, node);
+                self.slots[i] = Slot { key: k, dist: nd }; self.seen[i >> 6] |= 1u64 << (i & 63); self.len += 1; heap.push(nd, node);
                 if self.len >= self.grow_at { self.grow(); }
                 return;
             }
@@ -400,7 +413,7 @@ impl Labels {
         for w in 0..self.seen.len() {
             let mut x = self.seen[w]; self.seen[w] = 0;
             while x != 0 {
-                let i = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let v = self.keys[i] as usize - 1; done[v >> 6] &= !(1u64 << (v & 63)); self.keys[i] = 0;
+                let i = w * 64 + x.trailing_zeros() as usize; x &= x - 1; let v = self.slots[i].key as usize - 1; done[v >> 6] &= !(1u64 << (v & 63)); self.slots[i].key = 0;
             }
         }
         self.len = 0;
