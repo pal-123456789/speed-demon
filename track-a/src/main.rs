@@ -229,11 +229,13 @@ impl Sink {
             _ => return,
         };
 
-        let st = &line[s2 + 1..s2 + 4];
-        let status =
-            (st[0] - b'0') as u32 * 100 + (st[1] - b'0') as u32 * 10 + (st[2] - b'0') as u32;
+        // `status` is always exactly three digits, so 5xx is decided entirely by
+        // its first digit. That replaces a three-digit parse -- two subtractions,
+        // two multiplies, two adds and a range test -- with one byte compare, on
+        // every one of 3.1 M lines. It is exactly equivalent: 500..=599 is
+        // precisely the statuses whose leading digit is '5'.
+        let err = (line[s2 + 1] == b'5') as u32;
         let latency = parse_u32(&line[s2 + 5..]);
-        let err = (500..=599).contains(&status) as u32;
 
         // The hour is part of the key, so it is only re-parsed where a run of
         // identical hours ends -- and that is also where the block it belongs
