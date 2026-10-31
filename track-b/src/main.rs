@@ -4,9 +4,12 @@
 //! --------
 //! * Parse `queries.txt` first and intern every term it mentions: exactly the
 //!   terms the query set needs, nothing else is indexed.
-//! * Stream `docs.txt` once, tokenising each document and appending the
-//!   document id to every mentioned term's posting list.  The text itself is
-//!   never retained.
+//! * Stream `docs.txt` once, tokenising each document and appending the term id
+//!   of every mentioned term to one flat, doc-ordered list.  The text itself is
+//!   never retained.  A per-worker counting sort then turns that list into the
+//!   final ascending-per-term postings: the token loop only ever appends, so it
+//!   never touches one of 75,747 separate `Vec` headers or grows one of 75,747
+//!   separate buffers at random.
 //! * BOOL: evaluate strictly left to right on ascending `u32` id vectors
 //!   (intersection / union / difference).  Galloping search is used whenever
 //!   one side is much smaller than the other.
@@ -326,8 +329,52 @@ fn parse_u32(b: &[u8]) -> u32 {
     v
 }
 
+/// Flat postings: term `t` owns `arena[offs[t]..offs[t+1]]`, ascending doc ids.
+/// One arena and one offset array replace `nterms` separate `Vec`s.
+struct Postings {
+    arena: Vec<u32>,
+    offs: Vec<u32>,
+}
+
+impl Postings {
+    fn empty(nterms: usize) -> Self {
+        Postings {
+            arena: Vec::new(),
+            offs: vec![0; nterms + 1],
+        }
+    }
+
+    #[inline]
+    fn get(&self, t: u32) -> &[u32] {
+        let a = self.offs[t as usize] as usize;
+        &self.arena[a..self.offs[t as usize + 1] as usize]
+    }
+}
+
+/// One worker's slice of the index, before the merge.
+struct Part {
+    arena: Vec<u32>,
+    offs: Vec<u32>,
+}
+
+impl Part {
+    fn empty(nterms: usize) -> Self {
+        Part {
+            arena: Vec::new(),
+            offs: vec![0; nterms + 1],
+        }
+    }
+}
+
 #[inline]
-fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mut [u32], doc: u32) {
+fn index_text(
+    text: &[u8],
+    tt: &TermTable,
+    terms: &mut Vec<u32>,
+    count: &mut [u32],
+    stamp: &mut [u32],
+    doc: u32,
+) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -343,7 +390,8 @@ fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mu
                 let ti = t as usize;
                 if stamp[ti] != doc {
                     stamp[ti] = doc;
-                    postings[ti].push(doc);
+                    terms.push(t);
+                    count[ti] += 1;
                 }
             }
         }
@@ -364,13 +412,24 @@ fn index_text(text: &[u8], tt: &TermTable, postings: &mut [Vec<u32>], stamp: &mu
 /// that straddles a cut therefore belongs to exactly one worker -- the one to its
 /// left -- and the next worker drops it. `start == 0` is the only range that has
 /// nothing to drop.
-fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Vec<Vec<u32>> {
-    let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
+///
+/// The pass is a counting sort over the doc-ordered term-id list. `starts` holds
+/// the entry index at which each document begins, so the scatter pass recovers
+/// the document id of every entry without storing one per entry: 115 MB of term
+/// ids instead of 230 MB of pairs.
+fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Part {
+    // Counts first, then the prefix sum turns them into offsets in place.
+    let mut offs: Vec<u32> = vec![0; nterms + 1];
     let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
+    // The corpus yields roughly one posting per nine bytes, and the reserve is
+    // what keeps the doubling memcpy out of the token loop.
+    let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
+    let mut starts: Vec<u32> = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
 
     let f = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return postings,
+        Err(_) => return Part::empty(nterms),
     };
     let mut r = BufReader::with_capacity(1 << 20, f);
     let mut pos = start;
@@ -382,10 +441,10 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         // then claims lines that belong to the next one.
         let mut junk: Vec<u8> = Vec::with_capacity(512);
         if r.seek(SeekFrom::Start(start)).is_err() {
-            return postings;
+            return Part::empty(nterms);
         }
         match r.read_until(b'\n', &mut junk) {
-            Ok(0) | Err(_) => return postings,
+            Ok(0) | Err(_) => return Part::empty(nterms),
             Ok(k) => pos += k as u64,
         }
     }
@@ -416,11 +475,40 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
             // borrowing an id that belongs to another worker's range.
             None => continue,
         };
+        starts.push(terms.len() as u32);
+        ids.push(id);
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, &mut postings, &mut stamp, id);
+        index_text(text, tt, &mut terms, &mut offs, &mut stamp, id);
     }
-    postings
+    starts.push(terms.len() as u32);
+
+    let mut acc = 0u32;
+    for t in 0..nterms {
+        let c = offs[t];
+        offs[t] = acc;
+        acc += c;
+    }
+    offs[nterms] = acc;
+
+    // Second pass: walk the term list in document order and drop each id into
+    // its term's own run. Each run is filled in ascending document order because
+    // the list is, which is what makes the merge a plain concatenation.
+    let mut cur: Vec<u32> = offs.clone();
+    let mut arena: Vec<u32> = vec![0; acc as usize];
+    let mut i = 0usize;
+    for d in 0..ids.len() {
+        let doc = ids[d];
+        let hi = starts[d + 1] as usize;
+        while i < hi {
+            let t = terms[i] as usize;
+            arena[cur[t] as usize] = doc;
+            cur[t] += 1;
+            i += 1;
+        }
+    }
+    drop(terms);
+    Part { arena, offs }
 }
 
 /// Build the postings across every worker over disjoint byte ranges.
@@ -430,19 +518,17 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
 /// 772 MB/s. That ratio is twelve, and it was twelve because we were using one
 /// core and they were using about twelve.
 ///
-/// Merging is a concatenation per term in worker order. Each worker's list is
+/// Merging is a concatenation per term in worker order. Each worker's run is
 /// already ascending in document id and the ranges increase, so the concatenation
-/// comes out globally ascending with no sort and no dedupe. The only cost is the
-/// duplicated `Vec` headers: `NWORKERS * nterms * 24` bytes, about 14 MB.
-fn build_index(path: &Path, tt: &TermTable, postings: &mut [Vec<u32>]) -> io::Result<()> {
-    let nterms = postings.len();
+/// comes out globally ascending with no sort and no dedupe.
+fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Postings> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
-        return Ok(());
+        return Ok(Postings::empty(nterms));
     }
 
     let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
-    let mut parts: Vec<Vec<Vec<u32>>> = thread::scope(|s| {
+    let parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
         for i in 0..nworkers {
             let (a, b) = (
@@ -457,17 +543,18 @@ fn build_index(path: &Path, tt: &TermTable, postings: &mut [Vec<u32>]) -> io::Re
             .collect()
     });
 
-    for (ti, slot) in postings.iter_mut().enumerate() {
-        let total: usize = parts.iter().map(|p| p[ti].len()).sum();
-        if total == 0 {
-            continue;
-        }
-        slot.reserve(total);
-        for p in parts.iter_mut() {
-            slot.append(&mut p[ti]);
+    let total: usize = parts.iter().map(|p| p.arena.len()).sum();
+    let mut arena: Vec<u32> = Vec::with_capacity(total);
+    let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
+    for ti in 0..nterms {
+        offs.push(arena.len() as u32);
+        for p in &parts {
+            let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
+            arena.extend_from_slice(&p.arena[a..b]);
         }
     }
-    Ok(())
+    offs.push(arena.len() as u32);
+    Ok(Postings { arena, offs })
 }
 
 // â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -739,14 +826,14 @@ fn format_result(out: &mut Vec<u8>, r: &[u32]) {
 fn eval_bool(
     terms: &[u32],
     ops: &[u8],
-    postings: &[Vec<u32>],
+    postings: &Postings,
     cur: &mut Vec<u32>,
     nxt: &mut Vec<u32>,
 ) {
     cur.clear();
-    cur.extend_from_slice(&postings[terms[0] as usize]);
+    cur.extend_from_slice(postings.get(terms[0]));
     for (i, &op) in ops.iter().enumerate() {
-        let s = &postings[terms[i + 1] as usize];
+        let s = postings.get(terms[i + 1]);
         match op {
             OP_AND => {
                 if cur.is_empty() {
@@ -805,11 +892,13 @@ fn main() {
     lap!("parse queries");
 
     let nterms = tt.len();
-    let mut postings: Vec<Vec<u32>> = vec![Vec::new(); nterms];
-    if let Err(e) = build_index(&docs_path, &tt, &mut postings) {
-        eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
-        return;
-    }
+    let postings = match build_index(&docs_path, &tt, nterms) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
+            return;
+        }
+    };
 
     lap!("build index");
 
@@ -826,16 +915,16 @@ fn main() {
             // set is exactly the reference's.
             order.clear();
             order.extend(0..terms.len());
-            order.sort_by_key(|&i| postings[terms[i] as usize].len());
+            order.sort_by_key(|&i| postings.get(terms[i]).len());
             cand.clear();
             if let Some(&first) = order.first() {
-                cand.extend_from_slice(&postings[terms[first] as usize]);
+                cand.extend_from_slice(postings.get(terms[first]));
             }
             for &i in order.iter().skip(1) {
                 if cand.is_empty() {
                     break;
                 }
-                intersect_into(&cand, &postings[terms[i] as usize], &mut nxt);
+                intersect_into(&cand, postings.get(terms[i]), &mut nxt);
                 std::mem::swap(&mut cand, &mut nxt);
             }
             for &d in cand.iter() {

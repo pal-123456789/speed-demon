@@ -37,20 +37,42 @@
 //!
 //! Each thread streams its range through its own buffer rather than reading the
 //! range whole. Holding all twelve ranges at once would have cost the 202 MB the
-//! streaming version was introduced to avoid -- the board measured 422 MB for a
-//! single heap copy of this file, against 254 MB for a streamed one.
+//! streaming version was introduced to avoid.
+//!
+//! The structure that actually dominated the peak was `names`: a
+//! `HashSet<Vec<u8>>` **per country, per thread**. This corpus draws its names
+//! from a pool of ~100,000 distinct values, but it has 3,320,000 records, so with
+//! 240 countries every thread ends up with roughly one distinct name per record
+//! in each country, and the twelve threads together held ~3.3M live set entries.
+//! Each entry is a 24-byte `Vec` header plus a heap block plus a hash-table slot,
+//! about 60 bytes, so that one field was ~200 MB and the entire peak.
+//!
+//! Names are now interned **once**, in a table sharded 64 ways by name hash, and
+//! `names_distinct` is a **bitmap per country** over the global name ids. A
+//! country's distinct count is the popcount of its bitmap, so the twelve
+//! per-thread copies disappear: 3.3M entries collapse to ~100k interned names
+//! (about 3 MB) plus 240 bitmaps of 32 KB (about 8 MB). The bitmaps are shared
+//! and updated with one relaxed `fetch_or`, so the only synchronisation left on
+//! the record path is the interner shard, and its tables are small enough to stay
+//! in cache.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, read};
+use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
 /// Per-thread read buffer. Small enough that twelve of them cost less than the
-/// file, large enough that the read syscall is not the bottleneck.
-const CHUNK: usize = 4 << 20;
+/// file, large enough that the read syscall is not the bottleneck. These used to
+/// be 4 MB each; once the name sets were gone, 48 MB of buffers was the largest
+/// single item in a ~25 MB total, so they are now 128 KB, which measured both
+/// smaller and slightly faster than 1 MB (fewer pages to fault in per thread).
+const CHUNK: usize = 128 << 10;
 
 const NTHREADS: usize = 12;
 
@@ -59,8 +81,8 @@ const NTHREADS: usize = 12;
 /// The standard library's `HashMap` uses SipHash: DoS-resistant, and far more
 /// work than this program needs. Track C hashes millions of region ids and name
 /// byte strings, none of it attacker-controlled. Nothing about the ANSWER depends
-/// on the hash function, only on set membership, so this changes speed and
-/// nothing else; the SHA-256 is the proof.
+/// on the hash function -- only on set membership, and on which shard a name lands
+/// in -- so this changes speed and nothing else; the SHA-256 is the proof.
 struct FxHasher(u64);
 
 const FX_K: u64 = 0x517c_c1b7_2722_0a95;
@@ -106,7 +128,165 @@ impl std::hash::BuildHasher for FxBuild {
 type FxMap<K, V> = HashMap<K, V, FxBuild>;
 type FxSet<T> = HashSet<T, FxBuild>;
 
-/// Per-country running aggregate.
+/// Hash a byte string exactly the way the interner does, so the shard a name
+/// lands in and the probe inside that shard agree.
+#[inline]
+fn fxhash(bytes: &[u8]) -> u64 {
+    let mut h = FxHasher(0);
+    h.write(bytes);
+    h.finish()
+}
+
+// ── the shared name interner ────────────────────────────────────────────────
+
+/// The interner is sharded by the name hash, so twelve threads almost never
+/// contend: each shard holds ~1,500 names and its arena, index and probe table
+/// together are about 55 KB.
+const SHARDS: usize = 64;
+const SHARD_MASK: usize = SHARDS - 1;
+
+/// One shard: the name bytes back to back, an index of `(offset, len, global id)`
+/// and an open-addressing table whose slots hold `ent index + 1` (0 is free).
+#[derive(Default)]
+struct Shard {
+    arena: Vec<u8>,
+    ents: Vec<(u32, u32, u32)>,
+    table: Vec<u32>,
+}
+
+/// Rewrite one shard's probe table at twice the size. Only that shard's own lock
+/// is held, and it happens at most twice per shard in the whole run.
+fn rehash(s: &mut Shard) {
+    let n = s.table.len() * 2;
+    let mask = n - 1;
+    let mut t = vec![0u32; n];
+    for (i, e) in s.ents.iter().enumerate() {
+        let bytes = &s.arena[e.0 as usize..e.0 as usize + e.1 as usize];
+        let mut slot = (fxhash(bytes) >> 6) as usize & mask;
+        while t[slot] != 0 {
+            slot = (slot + 1) & mask;
+        }
+        t[slot] = i as u32 + 1;
+    }
+    s.table = t;
+}
+
+struct Interner {
+    next: AtomicU32,
+    shards: Vec<Mutex<Shard>>,
+}
+
+impl Interner {
+    fn new() -> Self {
+        Interner {
+            next: AtomicU32::new(0),
+            shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+        }
+    }
+
+    /// The dense global id of `name`, inserting it on first sight.
+    ///
+    /// The comparison is **byte for byte** against the arena, never by hash: a
+    /// hash collision costs one extra probe and can never merge two names, which
+    /// is what keeps `names_distinct` exact without storing a hash-only set.
+    #[inline]
+    fn intern(&self, name: &[u8]) -> u32 {
+        let h = fxhash(name);
+        let m = &self.shards[(h as usize) & SHARD_MASK];
+        let mut g = match m.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(), // a panic elsewhere must not lose the answer
+        };
+        if g.table.is_empty() {
+            g.table = vec![0u32; 1024];
+        }
+        let mask = g.table.len() - 1;
+        let mut slot = (h >> 6) as usize & mask;
+        loop {
+            let v = g.table[slot];
+            if v == 0 {
+                let id = self.next.fetch_add(1, Ordering::Relaxed);
+                let off = g.arena.len() as u32;
+                let len = name.len() as u32;
+                g.arena.extend_from_slice(name);
+                g.ents.push((off, len, id));
+                g.table[slot] = g.ents.len() as u32;
+                if g.ents.len() * 8 >= g.table.len() * 7 {
+                    rehash(&mut g);
+                }
+                return id;
+            }
+            let (off, len, id) = g.ents[(v - 1) as usize];
+            if len as usize == name.len()
+                && &g.arena[off as usize..off as usize + len as usize] == name
+            {
+                return id;
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+}
+
+// ── the per-country name bitmaps ────────────────────────────────────────────
+
+/// Name ids below this live in a country's bitmap: 128 K ids, or 16 KB per
+/// country. This corpus interns exactly 100,520 distinct names (a pool of
+/// 100,000, fixed by the generator's scale table, plus the ~520 names the
+/// edge-case blocks generate), so the cap clears it by 30% at the smallest
+/// power-of-two cost. A seed change moves the extras by a few hundred, never by
+/// 30,000.
+const BITCAP: usize = 1 << 17;
+const BITWORDS: usize = BITCAP / 64;
+
+/// The distinct-name state of one country (or of `_UNMATCHED`).
+///
+/// The bitmap is allocated on first use, so a country that never appears costs
+/// nothing. Ids at or past `BITCAP` -- which this corpus never reaches, but a
+/// different scale or seed could -- fall back to an exact set, so the count is
+/// right at any size; only the memory shape changes.
+#[derive(Default)]
+struct CountryNames {
+    bits: OnceLock<Box<[AtomicU64]>>,
+    rare: OnceLock<Mutex<FxSet<u32>>>,
+}
+
+impl CountryNames {
+    /// Record that this country saw the name with global id `id`.
+    #[inline]
+    fn mark(&self, id: u32) {
+        if (id as usize) < BITCAP {
+            let bits = self
+                .bits
+                .get_or_init(|| (0..BITWORDS).map(|_| AtomicU64::new(0)).collect());
+            bits[(id >> 6) as usize].fetch_or(1u64 << (id & 63), Ordering::Relaxed);
+        } else {
+            let set = self.rare.get_or_init(|| Mutex::new(FxSet::default()));
+            if let Ok(mut s) = set.lock() {
+                s.insert(id);
+            }
+        }
+    }
+
+    /// The number of distinct names this country saw.
+    fn count(&self) -> u64 {
+        let mut c = match self.bits.get() {
+            Some(b) => b
+                .iter()
+                .map(|w| w.load(Ordering::Relaxed).count_ones() as u64)
+                .sum(),
+            None => 0,
+        };
+        if let Some(s) = self.rare.get() {
+            if let Ok(s) = s.lock() {
+                c += s.len() as u64;
+            }
+        }
+        c
+    }
+}
+
+/// Per-country running aggregate. No name set lives here any more: distinctness
+/// is counted globally, in `CountryNames`.
 #[derive(Default)]
 struct Agg {
     count: u64,
@@ -114,7 +294,6 @@ struct Agg {
     amount_sum: i64,
     amount_min: i64,
     amount_max: i64,
-    names: FxSet<Vec<u8>>,
     name_bytes: u64,
     note_bytes: u64,
 }
@@ -129,8 +308,8 @@ impl Agg {
     }
 }
 
-/// Fold one thread's aggregate into another. The name sets UNION, because
-/// `names_distinct` is a count of distinct values, not a sum of counts.
+/// Fold one thread's aggregate into another. Every field is a sum, a min or a
+/// max, so the result does not depend on the order the threads are merged in.
 fn merge(dst: &mut Agg, src: Agg) {
     dst.count += src.count;
     dst.id_sum += src.id_sum;
@@ -145,9 +324,6 @@ fn merge(dst: &mut Agg, src: Agg) {
     }
     dst.name_bytes += src.name_bytes;
     dst.note_bytes += src.note_bytes;
-    for n in src.names {
-        dst.names.insert(n);
-    }
 }
 
 /// Read one field at `*pos` into `out`, honouring the quoting rules.
@@ -302,18 +478,25 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
     Ok(pts)
 }
 
-/// Parse `[start, end)` and return this range's aggregates.
+/// Parse `[start, end)` and return this range's aggregates, keyed by country slot.
 ///
 /// `start` and `end` are both record boundaries, so the range holds whole records
 /// and no record is shared with a neighbour. The parser is the same one the
 /// sequential version used; only the framing differs.
+///
+/// Every record's name is interned (a shared, exact id) and marked in that
+/// country's bitmap. The per-thread aggregate holds only scalars, so twelve
+/// threads never duplicate name storage.
 fn parse_range(
     path: &str,
     start: u64,
     end: u64,
-    lookup: &FxMap<i64, [u8; 3]>,
-) -> (FxMap<[u8; 3], Agg>, Agg, bool) {
-    let mut groups: FxMap<[u8; 3], Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    lookup: &FxMap<i64, u16>,
+    names: &Interner,
+    distinct: &[CountryNames],
+    unmatched_slot: u16,
+) -> (FxMap<u16, Agg>, Agg, bool) {
+    let mut groups: FxMap<u16, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
     let mut name: Vec<u8> = Vec::with_capacity(64);
@@ -340,10 +523,16 @@ fn parse_range(
             pos = 0;
         }
         if done < total {
-            let want = (total - done).min(buf.len() - have);
-            if want == 0 {
-                break; // a record larger than the buffer cannot occur
+            if have == buf.len() {
+                // The buffer is full and still no whole record came out of it, so
+                // one record is longer than `CHUNK`. Grow instead of giving up:
+                // the old `want == 0 { break }` dropped the rest of the range
+                // silently, which a small chunk would have made much likelier.
+                // This corpus cannot reach it, but the cost of being wrong here
+                // is a wrong answer, not a slow one.
+                buf.resize(buf.len() * 2, 0);
             }
+            let want = (total - done).min(buf.len() - have);
             match file.read(&mut buf[have..have + want]) {
                 Ok(0) => break,
                 Ok(k) => {
@@ -385,8 +574,13 @@ fn parse_range(
                 neg = true;
                 pos += 1;
             }
+            // `pos + 2 < have`, not `pos + 1 < have`: the two digits are read at
+            // `pos + 1` and `pos + 2` *before* the advance, so a `.` landing two
+            // bytes short of the chunk end indexed `recs[have]`. The guard is the
+            // only thing that has to be right, because a record whose tail is cut
+            // off fails the terminator test below and is re-parsed after a refill.
             let mut cents = digits(recs, &mut pos) * 100;
-            if pos + 1 < have && recs[pos] == b'.' {
+            if pos + 2 < have && recs[pos] == b'.' {
                 pos += 1;
                 let d1 = (recs[pos] - b'0') as i64;
                 let d2 = (recs[pos + 1] - b'0') as i64;
@@ -413,12 +607,19 @@ fn parse_range(
                 break;
             }
 
-            let agg = match lookup.get(&region) {
-                Some(code) => groups.entry(*code).or_insert_with(Agg::new),
+            let slot = match lookup.get(&region) {
+                Some(&code) => code,
                 None => {
                     saw_unmatched = true;
-                    &mut unmatched
+                    unmatched_slot
                 }
+            };
+            distinct[slot as usize].mark(names.intern(&name));
+
+            let agg = if slot == unmatched_slot {
+                &mut unmatched
+            } else {
+                groups.entry(slot).or_insert_with(Agg::new)
             };
             agg.count += 1;
             agg.id_sum += id;
@@ -431,9 +632,6 @@ fn parse_range(
             }
             agg.name_bytes += name.len() as u64;
             agg.note_bytes += note.len() as u64;
-            if !agg.names.contains(&name[..]) {
-                agg.names.insert(name.clone());
-            }
         }
 
         if done >= total && (pos >= have || pos == 0) {
@@ -450,6 +648,8 @@ fn main() {
     let records = format!("{data}/records.csv");
 
     // ── the lookup table ────────────────────────────────────────────────────
+    // `region_id` maps straight to a dense country slot, so the join and the
+    // bitmap index cost one probe, not two.
     let regions = match read(format!("{data}/regions.csv")) {
         Ok(r) => r,
         Err(e) => {
@@ -457,7 +657,9 @@ fn main() {
             exit(1);
         }
     };
-    let mut lookup: FxMap<i64, [u8; 3]> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
+    let mut codes: Vec<[u8; 3]> = Vec::with_capacity(256);
+    let mut slot_of: FxMap<[u8; 3], u16> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    let mut lookup: FxMap<i64, u16> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
     {
         let mut p = 0usize;
         while p < regions.len() && regions[p] != b'\n' {
@@ -473,7 +675,17 @@ fn main() {
                 p += 1;
             }
             if p + 2 < regions.len() {
-                lookup.insert(rid, [regions[p], regions[p + 1], regions[p + 2]]);
+                let code = [regions[p], regions[p + 1], regions[p + 2]];
+                let slot = match slot_of.get(&code) {
+                    Some(&s) => s,
+                    None => {
+                        let s = codes.len() as u16;
+                        codes.push(code);
+                        slot_of.insert(code, s);
+                        s
+                    }
+                };
+                lookup.insert(rid, slot);
                 p += 3;
             }
             while p < regions.len() && regions[p] != b'\n' {
@@ -481,6 +693,9 @@ fn main() {
             }
         }
     }
+    drop(slot_of);
+    drop(regions);
+    let unmatched_slot = codes.len() as u16;
 
     // ── the split, then twelve threads over disjoint records ────────────────
     let pts = match record_boundaries(&records, NTHREADS) {
@@ -491,14 +706,21 @@ fn main() {
         }
     };
 
-    let mut parts: Vec<(FxMap<[u8; 3], Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
+    let names = Interner::new();
+    let distinct: Vec<CountryNames> = (0..=codes.len()).map(|_| CountryNames::default()).collect();
+
+    let mut parts: Vec<(FxMap<u16, Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(pts.len());
         for w in pts.windows(2) {
             let (a, b) = (w[0], w[1]);
             let path = records.as_str();
             let lookup = &lookup;
-            handles.push(scope.spawn(move || parse_range(path, a, b, lookup)));
+            let names = &names;
+            let distinct = &distinct;
+            handles.push(scope.spawn(move || {
+                parse_range(path, a, b, lookup, names, distinct, unmatched_slot)
+            }));
         }
         for h in handles {
             if let Ok(r) = h.join() {
@@ -508,7 +730,7 @@ fn main() {
     });
 
     // ── merge, then one total order ─────────────────────────────────────────
-    let mut groups: FxMap<[u8; 3], Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    let mut groups: FxMap<u16, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
     for (g, un, saw) in parts {
@@ -521,20 +743,26 @@ fn main() {
         }
     }
 
-    let mut keys: Vec<[u8; 3]> = groups.keys().copied().collect();
-    keys.sort_unstable();
+    let mut keys: Vec<u16> = groups.keys().copied().collect();
+    keys.sort_unstable_by(|a, b| codes[*a as usize].cmp(&codes[*b as usize]));
 
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
     for k in keys {
         let a = &groups[&k];
-        out.extend_from_slice(&k);
+        out.extend_from_slice(&codes[k as usize]);
         let _ = write!(out, " {} {} ", a.count, a.id_sum);
         money(a.amount_sum, &mut out);
         out.push(b' ');
         money(a.amount_min, &mut out);
         out.push(b' ');
         money(a.amount_max, &mut out);
-        let _ = write!(out, " {} {} {}\n", a.names.len(), a.name_bytes, a.note_bytes);
+        let _ = write!(
+            out,
+            " {} {} {}\n",
+            distinct[k as usize].count(),
+            a.name_bytes,
+            a.note_bytes
+        );
     }
     if saw_unmatched {
         out.extend_from_slice(b"_UNMATCHED ");
@@ -545,7 +773,13 @@ fn main() {
         money(a.amount_min, &mut out);
         out.push(b' ');
         money(a.amount_max, &mut out);
-        let _ = write!(out, " {} {} {}\n", a.names.len(), a.name_bytes, a.note_bytes);
+        let _ = write!(
+            out,
+            " {} {} {}\n",
+            distinct[unmatched_slot as usize].count(),
+            a.name_bytes,
+            a.note_bytes
+        );
     }
 
     if let Err(e) =
