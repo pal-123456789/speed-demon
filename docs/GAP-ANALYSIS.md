@@ -141,19 +141,33 @@ factor `b` and radius `r`, while a bidirectional search settles about `2 * b^(r/
 For short paths in a road network that is a multiple, not a factor of two. **My
 +1.4% was wrong because the 2x was wrong.**
 
-**And the memory objection I raised against it also dissolves.** I rejected the
-search because a second frontier needs a second distance array per worker, at +111 MB.
-That is only true if the distance array stays a *dense array over the whole graph*.
-For a search that settles a few hundred nodes, a hash map or a small sorted
-structure costs kilobytes. The reverse CSR is still ~40 MB of new memory, but the
-111 MB objection disappears with the representation that should have been there in
-the first place.
+**And then it was implemented and measured, and it is WORSE.** Forward plus reverse CSR,
+the mu/meeting rule, hash-verified against `a23dbdf0…` on the whole corpus — correct,
+and rejected on the stopwatch:
 
-**Priority, in order:** replace the per-worker dense distance array with a structure
-sized to the search (this pays on its own, in memory, with no algorithmic change),
-then add the bidirectional search on top of it. The first is worth roughly 20% on
-D's K from memory alone; the second is worth several times that on time. Neither is
-implemented, and neither is a projection I am willing to call a result.
+```
+relaxations        67.5 M  ->  41.6 M       only 1.6x fewer, because on this graph
+                                            ball(2r)/ball(r) ~ 3.2, so the square-root
+                                            argument buys 1.6x and not an order
+solve              2242 ms ->  3406 ms      1.52x SLOWER
+label footprint     111 MB ->   222 MB      the second frontier needs a second array
+```
+
+The per-relaxation `mu` probe into the second label array costs more than the
+relaxations it removes. **So the bidirectional branch is closed by measurement, not
+by argument** — and note the direction of my two errors: I first dismissed it at
++1.4% on a guessed 2×, then talked myself into "several times that" on a `b^r`
+versus `b^(r/2)` argument that assumed a branching factor this graph does not have.
+Both were arithmetic on an unmeasured constant. The measurement is 1.52× slower.
+
+**What the same instrumentation did find, and it is cheap.** Two of the 2,000 queries
+(indices 781 and 1914) are `-1` answers with **in-degree(t) = 0**, and between them
+they account for essentially the whole chunk imbalance: 5 M relaxations each. A
+precomputed in-degree column makes those two an O(1) answer, and they are ~15% of all
+relaxations in the run. Separately, a static chunk split gives every worker the same
+*number* of queries but not the same *cost*, and these two prove it — dynamic
+scheduling, or simply answering the zero-in-degree case before entering the search,
+addresses the same imbalance from two sides.
 
 ## Ours versus the leaders
 
