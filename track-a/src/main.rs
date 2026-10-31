@@ -655,12 +655,11 @@ fn main() {
     let mut w = BufWriter::with_capacity(1 << 20, out_file);
     // Rows arrive in hour order, so the byte lookup happens once per hour.
     let (mut cur, mut hb) = (u32::MAX, [0u8; 13]);
-    // One row is built here and written with a single call. The longest endpoint
-    // in the catalogue is over 200 bytes, so 1024 leaves ample room; `big_enough`
-    // falls back to the formatting path rather than risking a slice panic on an
-    // endpoint longer than this buffer, which the spec does not bound.
+    // One row is assembled here and written with a single call. 1024 bytes covers
+    // the longest endpoint in the catalogue (over 200) with room to spare; the
+    // guard below falls back to core::fmt rather than risk a slice panic on an
+    // endpoint the spec does not bound.
     let mut row = [0u8; 1024];
-    let mut slow = false;
     for g in &rows {
         let ho = (g.key >> 32) as u32;
         if ho != cur {
@@ -670,55 +669,32 @@ fn main() {
         let (n, errors) = (g.latencies.len(), g.errors);
         let ppm = errors as u64 * 1_000_000 / n as u64;
         let ep = &eps[(g.key & 0xffff_ffff) as usize];
-
         let r = if row.len() < ep.len() + 128 {
-            None // unreachable for this corpus, but must not panic if it is not
+            w.write_all(&hb)
+                .and_then(|_| w.write_all(b":00:00Z "))
+                .and_then(|_| w.write_all(ep))
+                .and_then(|_| write!(w, " {n} {} {} {} {errors} {ppm}\n", g.p50, g.p95, g.p99))
         } else {
-            let mut k = 0;
+            let (mut k, put) = (0usize, |k: usize, v: u64, row: &mut [u8; 1024]| put_u64(row, k, v));
             row[..13].copy_from_slice(&hb);
             k += 13;
             row[k..k + 8].copy_from_slice(b":00:00Z ");
             k += 8;
             row[k..k + ep.len()].copy_from_slice(ep);
             k += ep.len();
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, n as u64);
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, g.p50 as u64);
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, g.p95 as u64);
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, g.p99 as u64);
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, errors as u64);
-            row[k] = b' ';
-            k += 1;
-            k = put_u64(&mut row, k, ppm);
+            for v in [n as u64, g.p50 as u64, g.p95 as u64, g.p99 as u64, errors as u64, ppm] {
+                row[k] = b' ';
+                k = put(k + 1, v, &mut row);
+            }
             row[k] = b'\n';
             k += 1;
-            Some(w.write_all(&row[..k]))
-        };
-        let r = match r {
-            Some(r) => r,
-            None => {
-                slow = true;
-                w.write_all(&hb)
-                    .and_then(|_| w.write_all(b":00:00Z "))
-                    .and_then(|_| w.write_all(ep))
-                    .and_then(|_| write!(w, " {n} {} {} {} {errors} {ppm}\n", g.p50, g.p95, g.p99))
-            }
+            w.write_all(&row[..k])
         };
         if let Err(e) = r {
             eprintln!("[track-a] write error: {e}");
             exit(1);
         }
     }
-    let _ = slow;
     if let Err(e) = w.flush() {
         eprintln!("[track-a] flush error: {e}");
         exit(1);
