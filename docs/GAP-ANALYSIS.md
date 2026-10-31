@@ -169,6 +169,75 @@ relaxations in the run. Separately, a static chunk split gives every worker the 
 scheduling, or simply answering the zero-in-degree case before entering the search,
 addresses the same imbalance from two sides.
 
+## Memory on B and D, decomposed against #1
+
+The overall is the geometric mean of the best **three** tracks, so the leverage sits
+on the **weakest counting track**, not on the best one. As of the current board that
+is **B at 51.454**; C is at 54.977 and D at 48.494 is dropped.
+
+**Track B — K 10.693 against #1's 29.934, a gap of 2.80×**
+
+| axis | ours | #1 | ratio | K contribution | share of the gap |
+|---|---|---|---|---|---|
+| T | 0.612 s | 0.160 s | 3.83× | 1.956 | **64.5%** |
+| **M** | **232 MB** | **42 MB** | **5.52×** | **1.408** | **32.9%** |
+| S | 889 | 745 | 1.19× | 1.027 | 2.6% |
+
+**Track D — K 9.330 against #1's 28.833, a gap of 3.09×**
+
+| axis | ours | #1 | ratio | K contribution | share of the gap |
+|---|---|---|---|---|---|
+| T | 0.846 s | 0.122 s | 6.93× | 2.633 | **66.5%** |
+| **M** | **178 MB** | **68 MB** | **2.62×** | **1.212** | **21.1%** |
+| S | 354 | 441 | **0.80×** | 0.968 | **-3.6%, we win** |
+
+**Three things fall out.**
+
+**1. Track D's line count already beats the leader's** — 354 against 441. It is the
+only axis anywhere in the submission where we are ahead of #1, and it is worth
+noting because it means D's remaining gap is *purely* time and memory, with nothing
+to claw back on S.
+
+**2. Track B's memory is the larger relative defect — 5.52× against D's 2.62× — and
+it is worth 33% of B's gap.** Where B's 232 MB goes, from the workstream's own
+measurements:
+
+```
+build phase:  89 MB  term-id list (22.24 M deduped pairs as u32)
+           +  85 MB  raw postings arena            = 174 MB   <- this is the peak
+merge phase:  85 MB  worker parts
+           +  85 MB  final arena                   = 170 MB
+```
+
+**The peak is the build phase, and that is what rules out the obvious fix.** Delta
+plus varint compression can only be applied *after* the counting-sort scatter,
+because the byte offsets are not known during it — so it cannot touch the 174 MB
+build peak at all, while adding a decode cost to every access and breaking the O(1)
+indexing `gallop` depends on. That is why it was refused.
+
+**3. The fix that would work on B is chunking the build, not compressing it.** Build
+the postings for a slice of the document range at a time — term list and arena both
+shrink by the slice fraction — and merge each slice into an accumulating postings
+structure. At four slices the build peak becomes `22 + 21 = 43 MB` against an
+accumulator that grows to 85 MB, i.e. **128 MB instead of 174 MB, about -26%**, and
+the merge is a concatenation that is already cheap. That is worth roughly
+`(232/172)^0.20 = 1.06` on B — about +1 point — and it is the only route to B's
+memory that does not pay in time.
+
+**And on D, the distance arrays are the whole story and the objection to shrinking
+them is now gone.** Eight workers each hold a 13.9 MB dense array over all 1,740,512
+nodes in order to touch about **12,500** of them: **111 MB** of D's 178 MB. The
+workstream costed a hash-table label store and dropped it *for the right reason* —
+13,000 random labels occupy ~13,000 cache lines whether they sit in a dense array or
+a hash table, so it buys no time. **But it was being judged as a time change, and on
+that axis it is neutral.** On the memory axis, which is 21% of D's gap, it turns
+111 MB into a few hundred kilobytes per worker, taking D's 178 MB toward the
+leader's 68 MB and worth `(178/68)^0.20 = 1.21`, about **+4 points on D**.
+
+D is still the dropped track, so that only reaches the overall if it passes B's
+51.454 — which at 52.7 it would, by a small margin. Worth doing, but the larger and
+more certain lever remains B, because B is the track that is actually counting.
+
 ## Ours versus the leaders
 
 Read off the live board. The useful thing is not the gap in points but the gap in
