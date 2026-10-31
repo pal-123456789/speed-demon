@@ -597,6 +597,38 @@ impl Sink {
     }
 }
 
+/// Two-pointer merge of two key-sorted row lists. A group split across workers
+/// appears in both lists with the same key, so equal keys concatenate their
+/// latencies into one group.
+fn merge(a: Vec<Group>, b: Vec<Group>) -> Vec<Group> {
+    let mut out: Vec<Group> = Vec::with_capacity(a.len() + b.len());
+    let (mut ai, mut bi) = (a.into_iter().peekable(), b.into_iter().peekable());
+    loop {
+        let take_a = match (ai.peek(), bi.peek()) {
+            (Some(x), Some(y)) => x.key <= y.key,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let mut row = if take_a {
+            ai.next().unwrap()
+        } else {
+            bi.next().unwrap()
+        };
+        let fold = |front: &mut Peekable<IntoIter<Group>>, row: &mut Group| {
+            while matches!(front.peek(), Some(x) if x.key == row.key) {
+                let g = front.next().unwrap();
+                row.latencies.extend_from_slice(&g.latencies);
+                row.errors += g.errors;
+            }
+        };
+        fold(&mut ai, &mut row);
+        fold(&mut bi, &mut row);
+        out.push(row);
+    }
+    out
+}
+
 /// Fill p50/p95/p99 by nearest rank: `ceil(p*n/100) == (p*n + 99)/100`. Each
 /// selection runs inside the prefix that still contains the wanted rank (after
 /// selecting rank r the first r+1 slots hold the r+1 smallest values), so the
@@ -704,47 +736,20 @@ fn main() {
         }
     }
 
-    // ── one single-level k-way merge over the twelve sorted lists ───────────
-    //
-    // The tree merge this replaces held TWO LEVELS of groups at once: it built a
-    // whole `next` vector while `parts` was still alive, so the transient was
-    // every group twice over. A single level keeps the twelve lists and one
-    // output vector, and each list is freed as it drains.
-    //
-    // With twelve lists the min-scan is twelve peeks per output row -- about 1.5 M
-    // comparisons over 126,908 rows, which is cheaper than the tree's n*log2(12)
-    // and, more to the point, holds far fewer groups at the peak.
-    let mut iters: Vec<Peekable<IntoIter<Group>>> = parts
-        .into_iter()
-        .map(|p| p.groups.into_iter().peekable())
-        .collect();
-    let mut rows: Vec<Group> = Vec::new();
-    loop {
-        // The key is COPIED out of each peek, which ends the borrow immediately --
-        // `peek` takes `&mut self` and returns a reference tied to it, so holding
-        // two of them at once does not borrow-check.
-        let mut best: Option<usize> = None;
-        let mut best_key = u64::MAX;
-        for i in 0..iters.len() {
-            if let Some(k) = iters[i].peek().map(|x| x.key) {
-                if best.is_none() || k < best_key {
-                    best = Some(i);
-                    best_key = k;
-                }
+    // ── merge the sorted lists pairwise: n·log2(12) compares, not a sort ────
+    let mut parts: Vec<Vec<Group>> = parts.into_iter().map(|p| p.groups).collect();
+    while parts.len() > 1 {
+        let mut next = Vec::with_capacity(parts.len() / 2 + 1);
+        let mut it = parts.into_iter();
+        while let Some(a) = it.next() {
+            match it.next() {
+                Some(b) => next.push(merge(a, b)),
+                None => next.push(a),
             }
         }
-        let Some(i) = best else { break };
-        let mut row = iters[i].next().unwrap();
-        // Equal keys across any of the lists are one group.
-        for it in iters.iter_mut() {
-            while matches!(it.peek(), Some(x) if x.key == row.key) {
-                let g = it.next().unwrap();
-                row.latencies.extend_from_slice(&g.latencies);
-                row.errors += g.errors;
-            }
-        }
-        rows.push(row);
+        parts = next;
     }
+    let mut rows = parts.pop().unwrap_or_default();
 
     // ── percentiles, again over twelve threads ──────────────────────────────
     let per = rows.len().div_ceil(NTHREADS).max(1);
