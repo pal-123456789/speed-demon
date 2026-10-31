@@ -87,9 +87,36 @@ explanation was that we had simply never used more than one core.
 
 ## Track C — the peak is per-thread parse state, and it is released
 
+> **RESOLVED, and the diagnosis below turned out to be WRONG in an instructive way.**
+> This section is kept as written because the reasoning is the point.
+>
+> Implemented and shipped. The board now reports **M 16.4 MB** against the leader's
+> 12 MB, down from **386 MB** — a factor of 23.5 — with T 0.903 -> 0.1816 s, and
+> the track went **25.071 -> 54.977 points**, moving from dropped to counting.
+>
+> **But not for the reason given here.** The paragraph below says "the corpus's
+> ~105,000 distinct names stored twelve times", and that is the number I briefed a
+> workstream with. It measured the claim instead of accepting it:
+>
+> ```
+> 3,260,049 per-thread (country, name) entries
+> vs 2,980,424 distinct (country, name) pairs globally
+> = 1.09x duplication
+> ```
+>
+> **There was nothing to union away.** The sets were not twelve copies of one
+> another — each `(country, thread)` set held about 1,130 *almost-unique* names,
+> because 3,320,000 records spread flat over 240 countries and 12 threads gives
+> every set its own names. The whole win came from the global name pool being
+> 100,520 and from de-duplicating against it, not from removing cross-thread
+> duplication. **A shared interner plus per-country bitmaps, not a merge.**
+>
+> The lesson is in the numbers: I had "12x duplication" and "105,000 names" both
+> written down, and neither was the operative fact.
+
 ```
 11.6 -> 62 -> 107 -> 253 -> 267.9 (mid-run peak) -> 96 -> 12.2 MB
-peak 295.8 MB locally      (the board charges 386 MB)
+peak 295.8 MB locally      (the board charged 386 MB at the time)
 ```
 
 Memory **rises through the parallel parse and falls the moment the workers join**.
@@ -101,6 +128,11 @@ That is the diagnosis confirmed by measurement rather than inferred, and it is
 why the leader's 13 MB is reachable in principle.
 
 ### What the fix has to be, and why it does not pay yet
+
+> The reasoning below about *why* it would not pay was also overtaken. It was
+> correct that de-duplicating across threads was capped at ~9%, and wrong that this
+> made the memory unreachable — the reachable win was the shared pool, not the
+> duplication, and it paid 23.5x.
 
 The duplication is structural to splitting the file by byte range: each worker
 must dedupe within its own range, and the union happens at merge. Removing it
