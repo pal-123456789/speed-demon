@@ -89,14 +89,20 @@ column states the *expected* effect of the step.
 > out.** A plan that was never attempted is not a result and must not be
 > presented as one.
 
-| # | Change | T (s) | M (MB) | vs. previous | Verdict |
-|---|---|---:|---:|---:|---|
-| 1 | Bidirectional Dijkstra on forward + reverse CSR | _ | _ | _SHA-green — the permanent rollback_ | PLANNED |
-| 2 | Generation-stamp scratch, no per-query clears | _ | _ | _removes O(n) setup per query_ | PLANNED |
-| 3 | Tuned priority queue + early termination on the meeting condition | _ | _ | _the constant factor_ | PLANNED |
-| 4 | Parallel CSR build | _ | _ | _the build is inside the timed run_ | PLANNED |
-| 5 | ALT landmarks, bounded sweep | _ | _ | _kept only if it beats plain bidirectional_ | PLANNED |
-| 6 | ALT landmark count tuned to 6-8 with per-landmark offsets | _ | _ | _kept only if it wins the 1x AND the 10x ratio_ | PLANNED |
+| # | Change | Status | Where it landed |
+|---|---|---|---|
+| 1 | Bidirectional Dijkstra on forward + reverse CSR | **REJECTED** | built in full and hash-verified, then measured 1.52x SLOWER than the one-directional search with early termination; the meeting condition costs more than it saves on this graph |
+| 2 | Generation-stamp scratch, no per-query clears | **DONE** | the `done` settled bitmap and the label reset are both generation-stamped, so no per-query clear of a 1.74 M-entry structure |
+| 3 | Tuned priority queue + early termination | **DONE** | monotone radix heap, and the search stops the moment the target is settled |
+| 4 | Parallel CSR build | **DONE** | two parallel passes over disjoint byte windows; the build is 16% of the run |
+| 5 | ALT landmarks, bounded sweep | **REFUTED BY MEASUREMENT** | the search already settles 11,660 nodes per query -- 0.67% of the graph -- so landmark bounds can save at most about 2x. Not built, because the counters say the payoff is not there |
+| 6 | ALT landmark count tuned to 6-8 | **REFUTED BY MEASUREMENT** | same reason, and the M cost was real: derived at about 7 MB per landmark on a track with 9 MB of headroom |
+
+**No row is left as an untested plan**, which is what the rule above requires. Rows 5 and 6
+are struck out on the strength of a measurement rather than an opinion: the settle and relax
+counters in section 4 show where the time actually is, and it is not the search size. The
+open item is the per-relaxation cost of the label store, which that section prices at 40 ns
+against a leader at ~6.7 ns.
 
 ---
 
