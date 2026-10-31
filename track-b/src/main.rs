@@ -1049,40 +1049,7 @@ fn eval_bool(
 
 // â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── allocator tuning, and it is about the M axis ─────────────────────────────
-//
-// cgroup `memory.peak` is a high-WATER MARK, so two OS behaviours inflate it and neither
-// shows up in this file:
-//
-//   mallopt(M_MMAP_THRESHOLD)  glibc raises its own mmap threshold as large blocks are
-//       freed, up to 32 MB. Past that point a freed buffer stays on the heap and is
-//       still charged, so a structure we drop before allocating the next one costs peak
-//       anyway. Pinning the threshold low makes every large allocation its own mapping,
-//       and dropping it returns the pages immediately.
-//
-//   prctl(PR_SET_THP_DISABLE) would also help -- the box backs part-written regions with
-//       whole 2 MB transparent huge pages -- but it measured as a TIME regression when
-//       it was tried alongside the threshold change, so it is recorded here and not
-//       applied. The threshold alone is kept because it is where the memory win came
-//       from.
-//
-// Linux-only; the other target gets an empty function so the local build is unaffected.
-#[cfg(target_os = "linux")]
-extern "C" {
-    fn mallopt(param: i32, value: i32) -> i32;
-}
-
-#[inline]
-fn tune_allocator() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        const M_MMAP_THRESHOLD: i32 = -3;
-        mallopt(M_MMAP_THRESHOLD, 1 << 20);
-    }
-}
-
 fn main() {
-    tune_allocator();
     let docs_path = input_path();
     let queries_path = data_dir().join(QUERIES_FILE);
     let out_path = output_path();
