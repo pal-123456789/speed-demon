@@ -132,17 +132,35 @@ interesting part and judges are told to reward them."*
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| SIMD timestamp parse | _ | _ | branchy setup cost per line outweighed the vector win |
-| Lock-free shared intern table | _ | _ | contention beat the sharded version |
-| `mmap` instead of a buffered read | _ | _ | inflated `memory.peak` — M axis got worse |
-| t-digest / KLL sketches | _ | _ | approximate percentiles cannot hash-match |
+| SIMD timestamp parse | _ | measured FLAT | branchy setup cost per line outweighed the vector win |
+| Lock-free shared intern table | _ | measured SLOWER | contention beat the sharded version |
+| Hand-written SWAR space scan | _ | measured 3% SLOWER | `iter().position()` already compiles to SIMD |
+| Hand-written AVX2 two-space probe | _ | measured FLAT, +32 lines | the compiler already vectorises the same scan |
+| Branchless record fold | _ | measured FLAT | the branch predicts perfectly on this corpus |
+| t-digest / KLL sketches | _ | impossible, not just slow | approximate percentiles cannot hash-match |
 
 ---
 
 ## 4. Where the time actually goes
 
-_(fill after a profile — the flame graph, the `perf stat` counters, and the
-one measurement that surprised you)_
+Measured with a TSC-based phase split inside the binary, on the least preempted of
+eight runs, as a share of the whole timed run:
+
+```
+scan (parse 238.8 MB)        67%      the field walk and the hour fold
+merge (values to groups)     13%      single-level k-way merge, output reserved
+write (output file)          16%      formatting and the write itself
+percentiles (p50/p95/p99)     3%      nearest-rank selection over the latencies
+```
+
+**The measurement that surprised me:** the scan is 67%, so I spent a session trying to
+make the scan faster -- SWAR, then hand-written AVX2, then a fused two-space probe in one
+64-byte window. All three measured FLAT, and the reason is in the profile rather than in
+the instruction set: `iter().position()` was already being auto-vectorised, so each
+attempt replaced working SIMD with different working SIMD. What actually moved the number
+was the INPUT PATH -- mapping instead of copying 238 MB through a buffer -- and that is not
+in the scan at all. The profile said where the time was; it did not say where the win was,
+and those turned out to be different places.
 
 ---
 
@@ -167,9 +185,12 @@ latency in a growing list (that is where its 2,940 MB goes); this
 implementation holds a fixed-size histogram per group, so peak memory is a
 function of the number of distinct groups rather than the number of records.
 
-Input is read with a buffered streaming reader rather than `mmap`: pages of a
-memory-mapped file are charged to cgroup `memory.peak`, which would inflate
-the M axis with data we never need resident.
+Input is **mapped**, not copied. This file first claimed the opposite -- that mapped
+pages are charged to cgroup `memory.peak` -- and the board refuted it: read-only
+`MAP_PRIVATE` file pages stay in the kernel page cache and are NOT charged to the
+container. Mapping took T from 0.0985 s to 0.0931 s with M unchanged, and it is in the
+run cited at the top of this file. The hypothesis it replaced is left recorded rather
+than deleted, because the measurement is the interesting part.
 
 ---
 
