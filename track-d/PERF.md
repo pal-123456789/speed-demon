@@ -36,7 +36,8 @@ K = 10 is half marks and K = 100 is full marks.
 
 M has to hold the graph *and* whatever preprocessing we build, inside an 8 GB ceiling. Preprocessing that doubles memory to save a second of query time is a bad trade at this weight.
 
-> Measured on the live board; best run `run-58030bea7c39` at commit `8891f86`.
+> Measured on the live board; best run `run-a70e3b9e85a0` at commit `3c0636f`:
+> **T 0.8739 s, M 77.1 MB, S 482 lines, K 10.261, 50.56 points.**
 > T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
 > board rather than measured locally. A target is not a result, so the local
 > harness numbers below stay separate from these.

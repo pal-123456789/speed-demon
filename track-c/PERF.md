@@ -36,7 +36,8 @@ K = 10 is half marks and K = 100 is full marks.
 
 M is easy to win here by streaming: the reference materialises rows the aggregate does not need.
 
-> Measured on the live board; best run `run-05967b57e6e5` at commit `9d1796a`.
+> Measured on the live board; best run `run-166bebffcc78` at commit `900691d`:
+> **T 0.1595 s, M 14.0 MB, S 707 lines, K 13.665, 56.78 points.**
 > T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
 > board rather than measured locally. A target is not a result, so the local
 > harness numbers below stay separate from these.

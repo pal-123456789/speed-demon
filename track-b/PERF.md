@@ -36,7 +36,8 @@ K = 10 is half marks and K = 100 is full marks.
 
 M is the weakest axis on this track: positional postings dominate the footprint, and the compression that saves memory costs query time.
 
-> Measured on the live board; best run `run-293a7e2fc696` at commit `0c99d88`.
+> Measured on the live board; best run `run-d520073f2341` at commit `900691d`:
+> **T 0.5468 s, M 209.7 MB, S 973 lines, K 11.278, 52.61 points.**
 > T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
 > board rather than measured locally. A target is not a result, so the local
 > harness numbers below stay separate from these.
