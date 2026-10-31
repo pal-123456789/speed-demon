@@ -659,43 +659,17 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             .collect()
     });
 
-    // The output order is term-major -- all of term t's postings are contiguous -- but
-    // the WRITE order does not have to be. This merges part-major instead: each worker's
-    // postings are scattered to their final place and that worker's arena is dropped
-    // before the next one is touched.
-    //
-    // The old form was term-major, so every worker's arena stayed alive while the merged
-    // arena was built: 89 MB of parts plus 89 MB of output, at the same moment. Part-major
-    // keeps one part resident, which is the difference between 178 MB and about 96 MB of
-    // posting storage -- on a track whose whole gap is memory.
-    //
-    // The per-term offsets have to be known before writing rather than discovered while
-    // writing, so they are accumulated first. That is one pass of nterms x nparts adds,
-    // about 909 K of them, against 22.2 M postings moved.
     let total: usize = parts.iter().map(|p| p.arena.len()).sum();
+    let mut arena: Vec<u32> = Vec::with_capacity(total);
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
-    let mut acc: u32 = 0;
-    offs.push(0);
     for ti in 0..nterms {
+        offs.push(arena.len() as u32);
         for p in &parts {
-            acc += p.offs[ti + 1] - p.offs[ti];
-        }
-        offs.push(acc);
-    }
-    let mut cursor: Vec<u32> = offs[..nterms].to_vec();
-    let mut arena: Vec<u32> = vec![0u32; total];
-    for p in parts {
-        for ti in 0..nterms {
             let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
-            if a == b {
-                continue;
-            }
-            let at = cursor[ti] as usize;
-            arena[at..at + (b - a)].copy_from_slice(&p.arena[a..b]);
-            cursor[ti] += (b - a) as u32;
+            arena.extend_from_slice(&p.arena[a..b]);
         }
-        // `p` is dropped here: its arena is released before the next part is read.
     }
+    offs.push(arena.len() as u32);
     Ok(Postings { arena, offs })
 }
 
