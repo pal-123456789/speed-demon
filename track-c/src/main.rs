@@ -491,12 +491,17 @@ fn parse_range(
     path: &str,
     start: u64,
     end: u64,
-    lookup: &FxMap<i64, u16>,
+    // The country slot is `u32`, not `u16`. At most 240 distinct country codes
+    // exist here, so `u16` would fit -- until a corpus had more than 65,535 of
+    // them, at which point `u16` would wrap and silently merge two countries.
+    // Four bytes a slot costs nothing at this row count and removes that class
+    // of wrong answer entirely.
+    lookup: &FxMap<i64, u32>,
     names: &Interner,
     distinct: &[CountryNames],
-    unmatched_slot: u16,
-) -> (FxMap<u16, Agg>, Agg, bool) {
-    let mut groups: FxMap<u16, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    unmatched_slot: u32,
+) -> (FxMap<u32, Agg>, Agg, bool) {
+    let mut groups: FxMap<u32, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
     let mut name: Vec<u8> = Vec::with_capacity(64);
@@ -658,8 +663,8 @@ fn main() {
         }
     };
     let mut codes: Vec<[u8; 3]> = Vec::with_capacity(256);
-    let mut slot_of: FxMap<[u8; 3], u16> = FxMap::with_capacity_and_hasher(256, FxBuild);
-    let mut lookup: FxMap<i64, u16> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
+    let mut slot_of: FxMap<[u8; 3], u32> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    let mut lookup: FxMap<i64, u32> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
     {
         let mut p = 0usize;
         while p < regions.len() && regions[p] != b'\n' {
@@ -679,7 +684,7 @@ fn main() {
                 let slot = match slot_of.get(&code) {
                     Some(&s) => s,
                     None => {
-                        let s = codes.len() as u16;
+                        let s = codes.len() as u32;
                         codes.push(code);
                         slot_of.insert(code, s);
                         s
@@ -695,7 +700,7 @@ fn main() {
     }
     drop(slot_of);
     drop(regions);
-    let unmatched_slot = codes.len() as u16;
+    let unmatched_slot = codes.len() as u32;
 
     // ── the split, then twelve threads over disjoint records ────────────────
     let pts = match record_boundaries(&records, NTHREADS) {
@@ -709,7 +714,7 @@ fn main() {
     let names = Interner::new();
     let distinct: Vec<CountryNames> = (0..=codes.len()).map(|_| CountryNames::default()).collect();
 
-    let mut parts: Vec<(FxMap<u16, Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
+    let mut parts: Vec<(FxMap<u32, Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(pts.len());
         for w in pts.windows(2) {
@@ -730,7 +735,7 @@ fn main() {
     });
 
     // ── merge, then one total order ─────────────────────────────────────────
-    let mut groups: FxMap<u16, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
+    let mut groups: FxMap<u32, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
     let mut unmatched = Agg::new();
     let mut saw_unmatched = false;
     for (g, un, saw) in parts {
@@ -743,7 +748,7 @@ fn main() {
         }
     }
 
-    let mut keys: Vec<u16> = groups.keys().copied().collect();
+    let mut keys: Vec<u32> = groups.keys().copied().collect();
     keys.sort_unstable_by(|a, b| codes[*a as usize].cmp(&codes[*b as usize]));
 
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
