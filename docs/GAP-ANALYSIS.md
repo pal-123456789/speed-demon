@@ -41,6 +41,61 @@ range when a record exceeded the buffer, with no error and no visible output cha
 **The rule: any fixed-size refill buffer is a place where an off-by-one guard is
 invisible on the big corpus and fatal on a different one.**
 
+## Track A at ground level: five to six memory touches per line
+
+Read out of `take()`, which runs once per line for 3.1 M lines:
+
+```
+next_space(line, 28)              SIMD, cheap
+next_space(line, s1 + 1)          SIMD, cheap
+status / latency parse            arithmetic
+self.hour[..] != line[..13]       13-byte compare, already guarded by a
+                                  run-of-identical-hours check
+self.inter.get(ep)                hash + probe the endpoint interner   touch 1-2
+self.index.get(&key)              hash + probe the group index         touch 3-4
+groups[gi].latencies.push(..)     Vec header, then the push target     touch 5-6
+```
+
+**The arithmetic that says this is the whole gap.** The leader runs 238 MB in
+**0.019 s**, i.e. 3.1 M lines at about **18 cycles each**. Eighteen cycles is
+approximately *one* memory touch, plus the parse. We spend five or six.
+
+And this is the same shape that produced every large gain this campaign: Track B
+removed a random write per token and got 2.2×; Track C removed a per-country
+per-thread set and got 15.6× on memory; Track A's own interning change removed a
+`Box<[u8]>` key allocation per row and took M from 64 to 47 MB.
+
+### The change that would remove touches 3 to 6
+
+**Keep the interner, drop the group index, and append instead of looking up.**
+Per line, after the single interner probe, append a fixed-width record to a flat
+buffer — a *sequential* write:
+
+```
+record:  u32 packed_key   (hour ordinal << 11 | endpoint id, endpoint ids having
+                           been renumbered into sorted-byte order, so integer
+                           order IS the required (hour, endpoint) byte order)
+       + u32 latency
+       = 8 bytes per line
+```
+
+3,100,000 lines × 8 bytes = **24.8 MB total across twelve workers, about 2 MB
+each** — L2/L3 resident, and comparable to the ~20 MB the current group tables and
+latency vectors occupy. Then each worker sorts its own records by `packed_key`
+(258 k records, ~18 comparisons each) and runs the existing order-statistic
+selection per run. Sorting 258 k keys per worker is a few milliseconds of work
+that is already spread over twelve cores, and sort comparisons on `u32` are far
+cheaper than ProbeHash plus a scattered `Vec` access.
+
+The endpoint interner stays because it is what makes the key small, and it is one
+probe into a table of ~1,842 entries — cache-resident — rather than the hundreds of
+thousands the group index grows to within a worker.
+
+**Not implemented.** It is an ~80-line restructuring of `take`, `scan`, `merge` and
+the per-worker sort, and it needs a measured before/after rather than a projection.
+The numbers above are what the change is worth if the touch count is the cause,
+which is the hypothesis and not yet a result.
+
 ## Ours versus the leaders
 
 Read off the live board. The useful thing is not the gap in points but the gap in
