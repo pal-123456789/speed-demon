@@ -77,6 +77,44 @@ const fn build_is_tok() -> [bool; 256] {
 }
 static IS_TOK: [bool; 256] = build_is_tok();
 
+const HB: u64 = 0x8080_8080_8080_8080;
+
+/// High bit set in each byte of `w` that is NOT a `[0-9a-z]` byte.
+///
+/// `y` forces every byte into `0x80..=0xff`, so each `y - n` is a per-byte
+/// comparison that can never borrow across a byte boundary: the top bit of a
+/// byte is set exactly when that byte is `>= n`.  `!w` then drops every byte
+/// `>= 0x80`, which would otherwise land inside the digit or letter range once
+/// masked to seven bits.  Eight bytes per iteration; the tail is left to the
+/// byte loop.
+#[inline(always)]
+fn sep_bytes(w: u64) -> u64 {
+    let y = (w & !HB) | HB;
+    let d = y.wrapping_sub(0x3030_3030_3030_3030) & !y.wrapping_sub(0x3a3a_3a3a_3a3a_3a3a);
+    let a = y.wrapping_sub(0x6161_6161_6161_6161) & !y.wrapping_sub(0x7b7b_7b7b_7b7b_7b7b);
+    !((d | a) & !w) & HB
+}
+
+/// First index `>= i` that holds a separator.  The byte loop only runs for the
+/// last seven bytes of the buffer, and for the one separator the SWAR step
+/// stops on it costs nothing.
+#[inline(always)]
+fn scan_token(text: &[u8], mut i: usize) -> usize {
+    let n = text.len();
+    while i + 8 <= n {
+        let w = u64::from_le_bytes(text[i..i + 8].try_into().unwrap());
+        let s = sep_bytes(w);
+        if s != 0 {
+            return i + (s.trailing_zeros() >> 3) as usize;
+        }
+        i += 8;
+    }
+    while i < n && IS_TOK[text[i] as usize] {
+        i += 1;
+    }
+    i
+}
+
 /// ASCII-lowercase bytes `0x41..=0x5A` in place.  No other byte changes.
 #[inline]
 fn ascii_lower_in_place(b: &mut [u8]) {
@@ -96,9 +134,7 @@ fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
             i += 1;
         }
         let s = i;
-        while i < n && IS_TOK[text[i] as usize] {
-            i += 1;
-        }
+        i = scan_token(text, i);
         if i > s {
             spans.push((s as u32, (i - s) as u32));
         }
@@ -137,7 +173,21 @@ struct TermTable {
     lens: Vec<u32>,
     slots: Vec<u64>,
     mask: usize,
+    /// Set once `pack` has rewritten `slots` into the build layout.
+    packed: bool,
 }
+
+/// Build-layout slot: `tag << 47 | len << 41 | (arena offset + 1) << 20 | id`.
+///
+/// The interning layout needs `offs` and `lens` out of two more 300 KB arrays
+/// on every candidate, which is two more random reads per token.  Folding them
+/// into the word the probe already has to fetch removes both, so a hit costs
+/// one table word plus the key bytes it has to compare anyway.  `+ 1` keeps a
+/// used slot non-zero even when the tag is zero, which is what marks empty.
+const SLOT_ID: u64 = (1 << 20) - 1;
+const SLOT_OFF: u64 = ((1 << 21) - 1) << 20;
+const SLOT_LEN: u64 = 0x3f << 41;
+const SLOT_TAG: u64 = !SLOT_LEN & !SLOT_OFF & !SLOT_ID;
 
 impl TermTable {
     fn new() -> Self {
@@ -147,6 +197,7 @@ impl TermTable {
             lens: Vec::new(),
             slots: vec![0u64; 1 << 12],
             mask: (1 << 12) - 1,
+            packed: false,
         };
         t.slots.shrink_to_fit();
         t
@@ -194,6 +245,55 @@ impl TermTable {
             None
         } else {
             Some(e as u32 - 1)
+        }
+    }
+
+    /// Rewrite every slot into the build layout.  Returns false when the table
+    /// does not fit one word (a key over 63 bytes, or an arena past 2 MB); the
+    /// caller then keeps the interning probe, which is right for any table.
+    /// Nothing is written before every check has passed.
+    fn pack(&mut self) -> bool {
+        if self.offs.len() > SLOT_ID as usize || self.arena.len() >= (1 << 21) {
+            return false;
+        }
+        if self.lens.iter().any(|&l| l > 63) {
+            return false;
+        }
+        for e in self.slots.iter_mut() {
+            if *e == 0 {
+                continue;
+            }
+            let t = (*e as u32 - 1) as usize;
+            let o = self.offs[t] as usize;
+            let l = self.lens[t] as usize;
+            let h = hash_bytes(&self.arena[o..o + l]);
+            *e = (h & SLOT_TAG) | ((l as u64) << 41) | (((o as u64) + 1) << 20) | (t as u64);
+        }
+        self.packed = true;
+        true
+    }
+
+    /// One random word, then the key bytes -- no `offs`/`lens` touch.
+    #[inline]
+    fn probe(&self, key: &[u8]) -> Option<u32> {
+        let h = hash_bytes(key);
+        let tag = h & SLOT_TAG;
+        let mut i = (h as usize) & self.mask;
+        loop {
+            let e = self.slots[i];
+            if e == 0 {
+                return None;
+            }
+            if (e & SLOT_TAG) == tag {
+                let l = ((e & SLOT_LEN) >> 41) as usize;
+                if l == key.len() {
+                    let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
+                    if self.arena[o..o + l] == *key {
+                        return Some((e & SLOT_ID) as u32);
+                    }
+                }
+            }
+            i = (i + 1) & self.mask;
         }
     }
 
@@ -366,8 +466,14 @@ impl Part {
     }
 }
 
+/// The stamp and the df share one 32-bit word: the high twelve bits are the
+/// document within this worker's range and the low twenty the running count.
+/// The stamp test and the count update are therefore one random read-modify-
+/// write into a 300 KB array rather than two 600 KB ones.
+const ST_DF: u32 = (1 << 20) - 1;
+
 #[inline]
-fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u64], doc: u32) {
+fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -375,18 +481,18 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u6
             i += 1;
         }
         let s = i;
-        while i < n && IS_TOK[text[i] as usize] {
-            i += 1;
-        }
+        i = scan_token(text, i);
         if i > s {
-            if let Some(t) = tt.get(&text[s..i]) {
-                // High half: this worker's per-document stamp.  Low half: the
-                // term's running count.  Fusing them makes the dedupe test and
-                // the count update one random access instead of two, and two
-                // separate arrays made this the most expensive line in the build.
+            let key = &text[s..i];
+            let found = if tt.packed {
+                tt.probe(key)
+            } else {
+                tt.get(key)
+            };
+            if let Some(t) = found {
                 let e = &mut nslot[t as usize];
-                if (*e >> 32) as u32 != doc {
-                    *e = ((doc as u64) << 32) | (*e as u32).wrapping_add(1) as u64;
+                if *e >> 20 != gen {
+                    *e = (gen << 20) | ((*e & ST_DF) + 1);
                     terms.push(t);
                 }
             }
@@ -414,7 +520,8 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u6
 /// the document id of every entry without storing one per entry: 89 MB of term
 /// ids instead of 178 MB of pairs.
 fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Part {
-    let mut nslot: Vec<u64> = vec![0xffff_ffff_0000_0000u64; nterms];
+    let mut nslot: Vec<u32> = vec![0u32; nterms];
+    let mut gen: u32 = 0;
     // The corpus yields roughly one posting per nine bytes, and the reserve is
     // what keeps the doubling memcpy out of the token loop.
     let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
@@ -471,15 +578,26 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         };
         starts.push(terms.len() as u32);
         ids.push(id);
+        // A fresh generation per document is what makes the stamp test work
+        // without ever storing a document id.  Twelve bits is 4095 documents,
+        // so a longer range clears the stamp field -- keeping the counts --
+        // and starts again.  No worker on this corpus comes close.
+        gen += 1;
+        if gen >= (1 << 12) {
+            for e in nslot.iter_mut() {
+                *e &= ST_DF;
+            }
+            gen = 1;
+        }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, &mut terms, &mut nslot, id);
+        index_text(text, tt, &mut terms, &mut nslot, gen);
     }
     starts.push(terms.len() as u32);
 
-    // The low half of each slot is the term's df; the prefix sum turns the
-    // counts into offsets in place.
-    let mut offs: Vec<u32> = nslot.iter().map(|e| *e as u32).collect();
+    // The low twenty bits of each slot are the term's df; the prefix sum turns
+    // the counts into offsets in place.
+    let mut offs: Vec<u32> = nslot.iter().map(|e| e & ST_DF).collect();
     offs.push(0);
     let mut acc = 0u32;
     for t in 0..nterms {
@@ -957,6 +1075,7 @@ fn main() {
     lap!("parse queries");
 
     let nterms = tt.len();
+    tt.pack();
     let postings = match build_index(&docs_path, &tt, nterms) {
         Ok(p) => p,
         Err(e) => {
