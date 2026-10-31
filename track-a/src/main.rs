@@ -699,4 +699,16 @@ fn main() {
         eprintln!("[track-a] flush error: {e}");
         exit(1);
     }
+    // Skip teardown. Everything left alive at this point -- 145,601 `Group`s and
+    // the 3.1 M latencies behind them, plus the twelve per-worker interners --
+    // is freed by Rust's drop glue on the way out of `main`, and every one of
+    // those frees happens AFTER the output is written. The process is about to
+    // exit and the kernel reclaims the whole address space at once, so running
+    // the destructors buys nothing and costs the allocator walk.
+    //
+    // This is only safe because `w.flush()` above has already succeeded: the
+    // output file is complete and closed before the exit. `exit` does not run
+    // destructors, so anything still buffered here would be lost -- which is why
+    // the flush is not skipped along with it.
+    exit(0);
 }
