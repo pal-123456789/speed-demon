@@ -238,6 +238,75 @@ D is still the dropped track, so that only reaches the overall if it passes B's
 51.454 — which at 52.7 it would, by a small margin. Worth doing, but the larger and
 more certain lever remains B, because B is the track that is actually counting.
 
+## The three axes nobody is working on: A's memory, C's memory, D's time
+
+**Track A's memory — the peak is the MERGE, and the fix was rejected on the wrong axis**
+
+Board M is 44.5 MB against the leader's 18 MB. The known live figures are:
+
+```
+rows        145,601 groups
+lat          3,100,000 latency values          = 12.4 MB
+latcap       4,671,552 slots                   = 18.7 MB   (50% over-allocated)
+Group        48 bytes: key u64 + latencies Vec + errors + p50/p95/p99
+```
+
+The peak is **not** the scan — a previous phase profile shows A rising to its maximum
+at the very end of the run, unlike C, whose peak is mid-parse. So the peak is the
+**two-pointer tree merge**, and the arithmetic fits:
+
+```
+groups   2 x 145,601 x 48 B            ~ 14 MB   (parts + next coexist per level)
+latency  a split group's Vec is EXTENDED with the other worker's, so both copies
+         exist during the merge       ~ 25 MB
+                                        -------
+                                        ~ 39 MB   + interner, hours, BufWriter
+```
+
+**A single-level k-way merge was tried and measured FLAT on time (0.4955 s against
+0.4975 s) and then thrown away.** That is the mistake worth recording: it was judged
+on time alone, and its real benefit is that it removes the intermediate levels, so
+`parts` no longer coexists with a full `next`. **The same change, judged on M, is a
+different proposition** — and the latency duplication needs a second piece: a
+preallocated arena of exactly `sum(latencies)` = 12.4 MB that merged groups extend
+into, freeing each source `Vec` as it is consumed, instead of growing one Vec and
+copying the other into it.
+
+Worth roughly `(44.5/30)^0.20 = 1.08` on A, about +1.7 points. Modest, and cheap
+compared with the hot-path rewrite, because the merge is already written.
+
+**Track C's memory — already solved, and there is little left**
+
+16.4 MB against the leader's 12 MB is a factor of **1.4**, which is `1.4^0.20 = 1.07`
+— **7% of C's gap.** The defect this file spent a whole section on is gone: it was
+386 MB and it is now 16.4. There is no large win left here and it should not attract
+effort that C's *time* (5.4x off) or C's *lines* (648 against 294) would use better.
+
+**Track D's time — and the point that changes the D brief**
+
+The solve is 78-85% of the run and is **memory-latency bound, not arithmetic bound**:
+1/2/4/8 workers gives **7.10 / 3.77 / 2.78 / 2.05 s**, only 3.5x on eight threads
+over six physical cores, at roughly **105 ns per relaxation of mostly DRAM latency**
+across ~78k random accesses per query.
+
+The workstream currently working on D's memory was briefed to build a compact label
+store, and declined one earlier with this reasoning: *"13k random labels touch about
+13k cache lines whether they live in a dense array or a hash table, so it buys memory
+but not the time."* **That is true of a hash table and it is FALSE of a compact
+arena.**
+
+```
+dense array over the graph    1,740,512 x 8 B = 13.9 MB   -> every access misses
+arena over the TOUCHED nodes     12,500 x 8 B =  100 KB   -> fits in L2
+```
+
+A per-query arena indexed by a slot number, with a small node-to-slot table, does not
+merely save the 111 MB across eight workers — it turns the dominant cost of the
+algorithm from a DRAM miss into an L2 hit. **The same change serves both axes, and on
+D the time factor is `sqrt` against memory's fifth root, so the time effect is the
+larger one.** If a hash map is used instead of the arena, the memory saving survives
+and the locality win does not.
+
 ## Ours versus the leaders
 
 Read off the live board. The useful thing is not the gap in points but the gap in
