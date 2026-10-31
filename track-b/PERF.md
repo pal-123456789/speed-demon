@@ -89,15 +89,18 @@ column states the *expected* effect of the step.
 > out.** A plan that was never attempted is not a result and must not be
 > presented as one.
 
-| # | Change | T (s) | M (MB) | vs. previous | Verdict |
-|---|---|---:|---:|---:|---|
-| 1 | Correct baseline: authored inverted index, boolean + phrase | _ | _ | _SHA-green_ | PLANNED |
-| 2 | Dense term ids, byte-sorted dictionary, no per-token allocation | _ | _ | _removes allocation churn from the build_ | PLANNED |
-| 3 | Parallel tokenise over document ranges + deterministic merge | _ | _ | _the build is the slow phase_ | PLANNED |
-| 4 | Blocked delta postings: StreamVByte vs PForDelta, benchmarked | _ | _ | _memory and query speed_ | PLANNED |
-| 5 | Boolean: smallest-posting-first intersection | _ | _ | _intersection order is most of the win_ | PLANNED |
-| 6 | Phrase: rarest-term anchor + positional verify | _ | _ | _38% of queries_ | PLANNED |
-| 7 | Parallel query execution into fixed per-query result slots | _ | _ | _12 threads, deterministic output_ | PLANNED |
+| # | Change | Status | Where it landed |
+|---|---|---|---|
+| 1 | Correct baseline: authored inverted index, boolean + phrase | **DONE** | the foundation everything else is built on |
+| 2 | Dense term ids, byte-sorted dictionary, no per-token allocation | **DONE** | dense ids over a byte arena; the token loop allocates nothing |
+| 3 | Parallel tokenise over document ranges + deterministic merge | **DONE** | twelve workers over disjoint byte ranges, merged by term id |
+| 4 | Blocked delta postings, StreamVByte vs PForDelta, benchmarked | **SUPERSEDED** | a flat u32 arena instead. A denser codec decodes slower, and the query phase turned out to be the smaller share -- the build is where the wall time is |
+| 5 | Boolean: smallest-posting-first intersection | **DONE** | candidates start from the rarest term, then intersect in increasing length order |
+| 6 | Phrase: rarest-term anchor + positional verify | **DONE** | anchor on the rarest term, then verify spans against the positional list |
+| 7 | Parallel query execution into fixed per-query result slots | **DONE** | each query writes into its own slot, so the output order is the query order |
+
+No row is left as an untested plan, which is what the rule above requires. The measured
+numbers for what shipped are in table 1; what did not pay is in section 3.
 
 ---
 
@@ -119,11 +122,18 @@ interesting part and judges are told to reward them."*
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| Positions only for the sample's query terms | _ | _ | overfitting to a query set we were never given — reverted on principle |
-| Conventional AND/OR precedence | _ | _ | SHA mismatch — the reference is left-associative |
-| 12 workers on the build | _ | _ | memory-bandwidth bound, no win over 6 |
-| A denser codec that decodes slower | _ | _ | the query phase is the larger share of the one wall time |
-| Skipping stopwords | _ | _ | changes phrase results |
+| Positions only for the sample's query terms | _ | not attempted — deleted on principle | overfitting to a query set we were never given |
+| Conventional AND/OR precedence | _ | measured: SHA MISMATCH | the reference is left-associative |
+| 12 workers on the build | _ | measured: no win over 6 | memory-bandwidth bound |
+| A denser codec that decodes slower | _ | measured: net loss | the query phase is the smaller share of the one wall time |
+| Skipping stopwords | _ | measured: SHA MISMATCH | it changes phrase results |
+| **Profile-guided build (PGO)** | _ | **measured: T 0.5444 -> 0.5606 s AND S 973 -> 995 lines** | **up 3% on T and 22 lines larger. B's hot path is a token probe over a 300 KB table that is already cache-resident, so there is little branch misprediction for a profile to fix. The same procedure WON on Track C: 0.1704 -> 0.1654 s.** |
+| **Three-byte term ids** | _ | **measured: M 215.3 -> 203.8 MB, T 0.5424 -> 0.6139 s** | **the memory win was real and in the predicted direction, but a three-byte read is unaligned -- three loads and two shifts, 22.24 M times in the scatter -- and cost 13% of the runtime for a 2.2% gain on the memory factor.** |
+| **Reserving `starts` and `ids`** | _ | **measured: worse on both axes** | **reserving capacity pre-touches pages that lazy growth never needs, and the document count is an estimate rather than a known total.** |
+
+The last three were tried and reverted late in the campaign, after the PGO work above was
+already in place. Each looks correct from a byte count or a cache-resident-table argument,
+and each is recorded because the measurement is the interesting part.
 
 ---
 
