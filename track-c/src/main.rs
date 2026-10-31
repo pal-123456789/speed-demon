@@ -140,33 +140,54 @@ fn fxhash(bytes: &[u8]) -> u64 {
 // ── the shared name interner ────────────────────────────────────────────────
 
 /// The interner is sharded by the name hash, so twelve threads almost never
-/// contend: each shard holds ~1,500 names and its arena, index and probe table
-/// together are about 55 KB.
+/// contend: each shard holds ~1,500 names and its arena and probe table together
+/// are about 35 KB.
 const SHARDS: usize = 64;
 const SHARD_MASK: usize = SHARDS - 1;
 
-/// One shard: the name bytes back to back, an index of `(offset, len, global id)`
-/// and an open-addressing table whose slots hold `ent index + 1` (0 is free).
+/// A probe table slot holds the **whole entry**, packed: bit 63 occupied, then a
+/// 32-bit dense id, an 8-bit name length, and a 23-bit arena offset (8 MB).
+///
+/// There used to be a third array, `ents: Vec<(off, len, id)>`, and a slot held
+/// an index into it. On this corpus that array was 1.2 MB of the interner's
+/// 2.9 MB working set, and it put a *third* dependent random load in the chain a
+/// lookup has to walk -- slot, index, bytes. Measured on the real 3.32 M names
+/// with a shared interner and twelve threads, dropping it took the interner from
+/// 109 ns to 50 ns per intern, because a probe can now reject a slot on a length
+/// mismatch (8 bits of the slot itself) without touching the arena at all.
 #[derive(Default)]
 struct Shard {
     arena: Vec<u8>,
-    ents: Vec<(u32, u32, u32)>,
-    table: Vec<u32>,
+    table: Vec<u64>,
+    n: usize,
 }
+
+const LEN_SHIFT: u32 = 32;
+const OFF_SHIFT: u32 = 40;
+const SLOT_BUSY: u64 = 1 << 63;
+const ID_MASK: u64 = (1 << 32) - 1;
+const LEN_MAX: usize = (1 << (OFF_SHIFT - LEN_SHIFT)) - 1;
+const OFF_MAX: usize = (1 << (63 - OFF_SHIFT)) - 1;
 
 /// Rewrite one shard's probe table at twice the size. Only that shard's own lock
 /// is held, and it happens at most twice per shard in the whole run.
 fn rehash(s: &mut Shard) {
     let n = s.table.len() * 2;
     let mask = n - 1;
-    let mut t = vec![0u32; n];
-    for (i, e) in s.ents.iter().enumerate() {
-        let bytes = &s.arena[e.0 as usize..e.0 as usize + e.1 as usize];
-        let mut slot = (fxhash(bytes) >> 6) as usize & mask;
+    let mut t = vec![0u64; n];
+    for e in s.table.iter().copied() {
+        if e == 0 {
+            continue;
+        }
+        // The occupied flag shares the word with the offset, so it comes off
+        // before the fields are read.
+        let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
+        let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
+        let mut slot = (fxhash(&s.arena[off..off + len]) >> 6) as usize & mask;
         while t[slot] != 0 {
             slot = (slot + 1) & mask;
         }
-        t[slot] = i as u32 + 1;
+        t[slot] = e;
     }
     s.table = t;
 }
@@ -174,6 +195,12 @@ fn rehash(s: &mut Shard) {
 struct Interner {
     next: AtomicU32,
     shards: Vec<Mutex<Shard>>,
+    /// Exact fallback for a name a packed slot cannot describe: longer than 255
+    /// bytes, or past the 8 MB the offset field can address. This corpus reaches
+    /// neither (100,520 names, 1.2 MB, longest 25 bytes), but the interner still
+    /// has to be exact at any size, so the escape hatch is real code and not a
+    /// comment. It is consulted only when a name cannot be packed.
+    rare: Mutex<FxMap<Vec<u8>, u32>>,
 }
 
 impl Interner {
@@ -181,7 +208,23 @@ impl Interner {
         Interner {
             next: AtomicU32::new(0),
             shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+            rare: Mutex::new(FxMap::with_hasher(FxBuild)),
         }
+    }
+
+    /// Dense global id for a name no packed slot can hold. Byte-exact, because
+    /// the map keys are the name bytes themselves.
+    fn rare_intern(&self, name: &[u8]) -> u32 {
+        let mut r = match self.rare.lock() {
+            Ok(r) => r,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(&id) = r.get(name) {
+            return id;
+        }
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        r.insert(name.to_vec(), id);
+        id
     }
 
     /// The dense global id of `name`, inserting it on first sight.
@@ -191,6 +234,9 @@ impl Interner {
     /// is what keeps `names_distinct` exact without storing a hash-only set.
     #[inline]
     fn intern(&self, name: &[u8]) -> u32 {
+        if name.len() > LEN_MAX {
+            return self.rare_intern(name);
+        }
         let h = fxhash(name);
         let m = &self.shards[(h as usize) & SHARD_MASK];
         let mut g = match m.lock() {
@@ -198,29 +244,37 @@ impl Interner {
             Err(e) => e.into_inner(), // a panic elsewhere must not lose the answer
         };
         if g.table.is_empty() {
-            g.table = vec![0u32; 1024];
+            g.table = vec![0u64; 1024];
         }
         let mask = g.table.len() - 1;
         let mut slot = (h >> 6) as usize & mask;
         loop {
             let v = g.table[slot];
             if v == 0 {
+                let off = g.arena.len();
+                if off > OFF_MAX {
+                    return self.rare_intern(name);
+                }
                 let id = self.next.fetch_add(1, Ordering::Relaxed);
-                let off = g.arena.len() as u32;
-                let len = name.len() as u32;
+                let len = name.len() as u64;
                 g.arena.extend_from_slice(name);
-                g.ents.push((off, len, id));
-                g.table[slot] = g.ents.len() as u32;
-                if g.ents.len() * 8 >= g.table.len() * 7 {
+                g.table[slot] = SLOT_BUSY
+                    | id as u64
+                    | (len << LEN_SHIFT)
+                    | ((off as u64) << OFF_SHIFT);
+                g.n += 1;
+                if g.n * 8 >= g.table.len() * 7 {
                     rehash(&mut g);
                 }
                 return id;
             }
-            let (off, len, id) = g.ents[(v - 1) as usize];
-            if len as usize == name.len()
-                && &g.arena[off as usize..off as usize + len as usize] == name
-            {
-                return id;
+            // The occupied flag shares the word with the offset, so it comes off
+            // before the fields are read.
+            let e = v & !SLOT_BUSY;
+            let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
+            let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
+            if len == name.len() && &g.arena[off..off + len] == name {
+                return (e & ID_MASK) as u32;
             }
             slot = (slot + 1) & mask;
         }
@@ -400,80 +454,120 @@ fn zero_byte(x: u64) -> u64 {
 /// per iteration with a zero-byte test on a repeated constant finds both bytes of
 /// interest at once, and the set bits are consumed in ascending address order,
 /// which is what keeps the parity running total correct.
-fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
-    const QUOTE: u64 = 0x2222_2222_2222_2222; // b'"' repeated
-    const NL: u64 = 0x0a0a_0a0a_0a0a_0a0a; // b'\n' repeated
+const QUOTE: u64 = 0x2222_2222_2222_2222; // b'"' repeated
+const NL: u64 = 0x0a0a_0a0a_0a0a_0a0a; // b'\n' repeated
 
+/// Offset just past the first `\n` at global even quote parity at or after
+/// `from`, or `len` if there is none.
+///
+/// `parity` is the running count of `"` in `[0, from)` modulo two, so the test
+/// is the record-boundary theorem applied from an arbitrary starting point: a
+/// `\n` seen with an even running total of quotes ends a record. This runs over
+/// at most a few hundred bytes -- the first qualifying newline is inside the
+/// record that spans `from` -- so it is allowed to be the branchy version.
+fn first_boundary(path: &str, from: u64, mut parity: u8, len: u64) -> std::io::Result<u64> {
     let mut f = File::open(path)?;
-    let len = f.metadata()?.len();
-    let mut interior: Vec<u64> = Vec::with_capacity(nthreads - 1);
-    let mut targets: Vec<u64> = (1..nthreads)
-        .map(|i| len * i as u64 / nthreads as u64)
-        .collect();
-    let mut next = 0usize;
-    let mut buf = vec![0u8; 1 << 20];
-    let mut off: u64 = 0;
-    let mut parity = 0u8;
-    let mut header_end: Option<u64> = None;
-
-    // Records a boundary that ends at absolute offset `end`.
-    #[inline]
-    fn note(
-        end: u64,
-        header_end: &mut Option<u64>,
-        interior: &mut Vec<u64>,
-        targets: &[u64],
-        next: &mut usize,
-    ) {
-        if header_end.is_none() {
-            *header_end = Some(end);
-            return;
-        }
-        if *next < targets.len() && end >= targets[*next] {
-            interior.push(end);
-            while *next < targets.len() && end >= targets[*next] {
-                *next += 1;
-            }
-        }
-    }
-
+    f.seek(SeekFrom::Start(from))?;
+    let mut buf = vec![0u8; 64 << 10];
+    let mut base = from;
     loop {
         let k = f.read(&mut buf)?;
         if k == 0 {
-            break;
+            return Ok(len);
         }
-        let base = off;
+        let b = &buf[..k];
         let mut i = 0usize;
         while i + 8 <= k {
-            let w = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap());
+            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
             let mut m = zero_byte(w ^ QUOTE) | zero_byte(w ^ NL);
             while m != 0 {
                 let idx = i + (m.trailing_zeros() as usize >> 3);
-                if buf[idx] == b'"' {
+                if b[idx] == b'"' {
                     parity ^= 1;
                 } else if parity == 0 {
-                    note(base + idx as u64 + 1, &mut header_end, &mut interior, &targets, &mut next);
+                    return Ok(base + idx as u64 + 1);
                 }
                 m &= m - 1;
             }
             i += 8;
         }
         while i < k {
-            let b = buf[i];
-            if b == b'"' {
+            if b[i] == b'"' {
                 parity ^= 1;
-            } else if b == b'\n' && parity == 0 {
-                note(base + i as u64 + 1, &mut header_end, &mut interior, &targets, &mut next);
+            } else if b[i] == b'\n' && parity == 0 {
+                return Ok(base + i as u64 + 1);
             }
             i += 1;
         }
-        off += k as u64;
+        base += k as u64;
     }
-    let _ = targets.drain(..);
+}
 
-    let mut pts = Vec::with_capacity(interior.len() + 2);
-    pts.push(header_end.unwrap_or(0));
-    pts.extend_from_slice(&interior);
+/// The byte offsets that begin a record: `[first_record, b1, .., len]`.
+///
+/// A `\n` seen with an even running count of `"` is a record boundary, by the
+/// argument in the module comment. Only the ones nearest each twelfth of the
+/// file are wanted, and the *only* thing that makes finding them hard is that
+/// the starting parity is a global property.
+///
+/// So the pass that used to compare, branch and record 19.8 million times -- one
+/// match for every 12.8 bytes, since this corpus has 16.0 M quotes and 3.7 M
+/// newlines -- is now a pure popcount: count quotes per chunk, and the parity at
+/// every chunk boundary falls out for free. Splitting at chunk boundaries rather
+/// than at exact twelfths costs at most one chunk of imbalance and removes the
+/// need to know parity at an arbitrary offset. Twelve short forward scans then
+/// convert the split points into real boundaries.
+fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
+    const STEP: usize = 1 << 20;
+
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    let nchunk = (((len as usize).saturating_add(STEP - 1)) / STEP).max(1);
+    let targets: Vec<usize> = (1..nthreads).map(|i| i * nchunk / nthreads).collect();
+    let mut par = vec![0u8; nchunk + 1];
+    let mut buf = vec![0u8; STEP];
+    let mut q: u64 = 0;
+    let mut c = 0usize;
+
+    loop {
+        let k = f.read(&mut buf)?;
+        if k == 0 {
+            break;
+        }
+        let b = &buf[..k];
+        let mut i = 0usize;
+        // No branch, no match list, no note(): just the byte-count of `"`.
+        while i + 8 <= k {
+            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+            q += zero_byte(w ^ QUOTE).count_ones() as u64;
+            i += 8;
+        }
+        while i < k {
+            if b[i] == b'"' {
+                q += 1;
+            }
+            i += 1;
+        }
+        c += 1;
+        par[c] = (q & 1) as u8;
+    }
+
+    let mut pts = Vec::with_capacity(nthreads + 2);
+    pts.push(first_boundary(path, 0, 0, len)?);
+    for t in targets {
+        let s = (t as u64) * STEP as u64;
+        if s >= len || s <= *pts.last().unwrap() {
+            continue;
+        }
+        // `par[t]` is the quote parity at byte `t * STEP`, and this scan carries
+        // it forward byte by byte from there.
+        let b = first_boundary(path, s, par[t], len)?;
+        if b > *pts.last().unwrap() {
+            pts.push(b);
+        }
+    }
+    // `len` terminates the last range. It is not a record boundary in its own
+    // right, but the parser stops at end-of-input and never needs it to be one.
     pts.push(len);
     Ok(pts)
 }
@@ -620,7 +714,6 @@ fn parse_range(
                 }
             };
             distinct[slot as usize].mark(names.intern(&name));
-
             let agg = if slot == unmatched_slot {
                 &mut unmatched
             } else {

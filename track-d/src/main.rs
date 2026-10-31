@@ -35,7 +35,29 @@
 //!
 //! * **Reset by touched list, never by memset.** Clearing 1.74M distances per
 //!   query would dominate the run; only the nodes actually relaxed are restored
-//!   to infinity afterwards.
+//!   to infinity afterwards, and each node is listed once -- the push happens on
+//!   the infinity-to-finite transition, not on every improvement.
+//!
+//! * **A settled bitmap, not a distance re-read.** The classic `if d > dist[u]`
+//!   stale test costs a random probe into the 14 MB label array on every pop.
+//!   A 217 KB bitmap of settled nodes answers the same question out of L2, and
+//!   it also skips equal-key duplicates that the distance test lets through. The
+//!   query phase is memory-latency bound, not arithmetic bound -- measured at
+//!   1 worker 7.1 s against 8 workers 2.05 s on the full corpus -- so removing
+//!   one random main-memory probe per pop is the whole point.
+//!
+//! * **Queries are claimed from one counter, not split into equal chunks.** The
+//!   cost of a query varies by four orders of magnitude (the dearest costs
+//!   5,000,000 relaxations, the median about 34,000), so a fixed chunk that
+//!   happens to contain a dear one decides the wall time. A single `AtomicUsize`
+//!   hand-out leaves the slowest worker doing the mean instead of the worst.
+//!
+//! * **A target with no incoming edge is answered before any search.** Nothing
+//!   can reach it, so `d(s, t) = -1` for every `s != t`. Two of the 2,000 queries
+//!   are exactly that (indices 781 and 1914), and each one used to cost a worker
+//!   a full 5,000,000-edge sweep. The incoming-edge test is one parallel scan of
+//!   the CSR against a bitmap of the 2,000 distinct targets, and it is exact: it
+//!   can only ever answer a query that genuinely has no path.
 //!
 //! * **Early exit at t.** The reference searches forward from `s` only and
 //!   settles everything closer than `t`, so stopping the moment `t` is popped is
@@ -43,12 +65,20 @@
 //!
 //! * A path may have zero edges, so `d(s, s) = 0` for every node, including a
 //!   node with no edges at all -- that case is answered before any search.
+//!
+//! * **Bidirectional search was implemented, verified, and rejected.** A forward
+//!   plus reverse CSR with the `mu` meeting rule reproduces this output hash
+//!   exactly, but it settles only 1.6x fewer nodes (on this graph the ball at
+//!   radius `2r` is about 3.2x the ball at `r`, so a two-sided search wins a
+//!   square root of very little) while paying a second random probe per
+//!   relaxation and a doubled label footprint: solve 2,242 ms -> 3,406 ms,
+//!   i.e. 1.52x *slower*. It is not here.
 
 use std::env;
 use std::fs::{File, read};
 use std::io::Write;
 use std::process::exit;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const INF: u64 = u64::MAX;
 
@@ -126,6 +156,12 @@ fn for_each_edge<F: FnMut(usize, u32, u32)>(graph: &[u8], lo: usize, hi: usize, 
     }
 }
 
+/// Split `0..n` into `NWORKERS` node ranges, one per worker.
+fn node_ranges(n: usize) -> [(usize, usize); NWORKERS] {
+    let per = n.div_ceil(NWORKERS);
+    std::array::from_fn(|w| ((w * per).min(n), ((w + 1) * per).min(n)))
+}
+
 /// A monotone radix heap for Dijkstra.
 ///
 /// Dijkstra extracts keys in non-decreasing order, and that is exactly the
@@ -134,9 +170,9 @@ fn for_each_edge<F: FnMut(usize, u32, u32)>(graph: &[u8], lo: usize, hi: usize, 
 /// from the last one extracted. Push and pop become O(1) amortised instead of a
 /// `sift_up` on every relaxation.
 ///
-/// It exists because the solve phase is roughly two thirds of this track's board
-/// time and the binary heap is the only comparison-heavy structure inside it --
-/// one sift per relaxation over a 5,000,000-edge graph, 2,000 times.
+/// It exists because the solve phase is roughly four fifths of this track's
+/// board time and the binary heap is the only comparison-heavy structure inside
+/// it -- one sift per relaxation over a 5,000,000-edge graph, 2,000 times.
 ///
 /// The invariant is that no key smaller than `last` is ever pushed. Dijkstra
 /// guarantees it: a new key is `d + w` with `w >= 0`, and `d` is the key just
@@ -251,6 +287,41 @@ fn main() {
     }
     let starts = chunk_bounds(&graph, body);
 
+    // ── queries ─────────────────────────────────────────────────────────────
+    // Read before the CSR is built, because pass 3 needs the set of target nodes
+    // and the file is 29 KB. One bitmap bit per node marks the targets; at 217 KB
+    // it stays in cache, and only ~2,000 bits are ever set.
+    let queries = match read(format!("{data}/queries.txt")) {
+        Ok(q) => q,
+        Err(e) => {
+            eprintln!("[track-d] cannot read queries.txt: {e}");
+            exit(1);
+        }
+    };
+    let mut qs: Vec<(u32, u32)> = Vec::with_capacity(2200);
+    {
+        let qlen = queries.len();
+        let mut qp = 0usize;
+        while qp < qlen {
+            while qp < qlen && !queries[qp].is_ascii_digit() {
+                qp += 1;
+            }
+            if qp >= qlen {
+                break;
+            }
+            let s = next_int(&queries, &mut qp, qlen) as u32;
+            let t = next_int(&queries, &mut qp, qlen) as u32;
+            qs.push((s, t));
+        }
+    }
+    drop(queries);
+
+    let tbits = n.div_ceil(64);
+    let mut is_tgt = vec![0u64; tbits];
+    for &(_, t) in &qs {
+        is_tgt[t as usize >> 6] |= 1u64 << (t & 63);
+    }
+
     // ── pass 1, parallel: out-degree per node ───────────────────────────────
     // One counter per node, incremented by whichever worker parses the line.
     // The counters are reused as the CSR write cursors in pass 2, so the build
@@ -313,120 +384,147 @@ fn main() {
         }
     });
 
+    // ── pass 3, parallel: which targets can be reached at all ───────────────
+    // One sweep of the finished CSR marking every node that is the head of some
+    // edge. A query target that is never marked has in-degree zero, and then no
+    // path can end at it, whatever the source. This runs over the packed edge
+    // array rather than over the ASCII, and the bitmap test is a cache hit for
+    // all but the ~2,000 nodes that are targets, so the atomic fires almost never.
+    let has_in: Vec<AtomicU64> = (0..tbits).map(|_| AtomicU64::new(0)).collect();
+    std::thread::scope(|scope| {
+        for (lo, hi) in node_ranges(n) {
+            let offset = &offset;
+            let edge = &edge;
+            let is_tgt = &is_tgt;
+            let has_in = &has_in;
+            scope.spawn(move || {
+                for u in lo..hi {
+                    for e in offset[u] as usize..offset[u + 1] as usize {
+                        let v = edge[e].load(Ordering::Relaxed) as u32;
+                        let bit = 1u64 << (v & 63);
+                        if is_tgt[v as usize >> 6] & bit != 0 {
+                            has_in[v as usize >> 6].fetch_or(bit, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+    });
+
     // The graph bytes are no longer needed; dropping them keeps peak memory at
     // the CSR plus the per-worker distance arrays rather than adding 92 MB on
     // top of them. (The Vec is a large mmap allocation, so it really is
     // returned to the OS here.)
     drop(graph);
 
-    // ── queries ─────────────────────────────────────────────────────────────
-    let queries = match read(format!("{data}/queries.txt")) {
-        Ok(q) => q,
-        Err(e) => {
-            eprintln!("[track-d] cannot read queries.txt: {e}");
-            exit(1);
+    // ── answer what the topology already decides, and list the rest ─────────
+    // `pre` is the answer whenever one is known without searching: 0 for `s == t`
+    // (the legal zero-edge path, even on a node with no edges) and INF for a
+    // target with no incoming edge. Everything else goes on the work list.
+    let mut pre: Vec<u64> = vec![0; qs.len()];
+    let mut todo: Vec<u32> = Vec::with_capacity(qs.len());
+    for (i, &(s, t)) in qs.iter().enumerate() {
+        if s == t {
+            continue;
         }
-    };
-
-    // ── parse the queries up front (2,000 of them: trivial to hold) ─────────
-    let mut qs: Vec<(u32, u32)> = Vec::with_capacity(2200);
-    {
-        let qlen = queries.len();
-        let mut qp = 0usize;
-        while qp < qlen {
-            while qp < qlen && !queries[qp].is_ascii_digit() {
-                qp += 1;
-            }
-            if qp >= qlen {
-                break;
-            }
-            let s = next_int(&queries, &mut qp, qlen) as u32;
-            let t = next_int(&queries, &mut qp, qlen) as u32;
-            qs.push((s, t));
+        if has_in[t as usize >> 6].load(Ordering::Relaxed) >> (t & 63) & 1 == 0 {
+            pre[i] = INF;
+        } else {
+            todo.push(i as u32);
         }
     }
-    drop(queries);
 
-    // ── answer them in parallel ─────────────────────────────────────────────
-    // The queries are mutually independent and the graph is read-only, so this
-    // is the one place in the submission where threads cost almost nothing: no
-    // locks, no shared writes, and the output order is preserved by collecting
-    // each chunk's bytes in order. The container is pinned to twelve hardware
-    // threads on six P-cores, which is exactly the split below.
+    // ── answer the rest in parallel, one query at a time ────────────────────
+    // The queries are mutually independent and the graph is read-only, so this is
+    // the one place in the submission where threads cost almost nothing: no
+    // locks, no shared writes to the CSR, and the output order is fixed by
+    // writing each answer into its own slot.
+    //
+    // Work is claimed with one atomic per query rather than split into
+    // `NWORKERS` equal chunks: equal chunks are a bet that every chunk costs the
+    // same, and here the dearest query is worth 150 median queries. Draining a
+    // shared counter instead puts the dear ones on whichever worker is free.
     //
     // Each thread owns its own distance array, because 1.74M u64 labels cannot
-    // be shared without synchronisation. That is the only cost: 12 x 14 MB of
-    // working state, against a search phase that was 97% of the reference's time.
-    let nthreads = NWORKERS.min(qs.len().max(1));
-    let chunk = qs.len().div_ceil(nthreads).max(1);
+    // be shared without synchronisation. That is the only cost: 8 x 14 MB of
+    // working state, against a search phase that dominates the run.
+    let answers: Vec<AtomicU64> = pre.iter().map(|&a| AtomicU64::new(a)).collect();
+    let nextq = AtomicUsize::new(0);
+    let nthreads = NWORKERS.min(todo.len().max(1));
     let out_cap = qs.len() * 6 + 16;
 
-    let mut parts: Vec<Vec<u8>> = Vec::with_capacity(nthreads);
     std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(nthreads);
-        for part in qs.chunks(chunk) {
+        for _ in 0..nthreads {
             let offset = &offset;
             let edge = &edge;
-            handles.push(scope.spawn(move || {
+            let qs = &qs;
+            let todo = &todo;
+            let answers = &answers;
+            let nextq = &nextq;
+            scope.spawn(move || {
                 let mut dist = vec![INF; n];
+                let mut done = vec![0u64; tbits];
                 let mut touched: Vec<u32> = Vec::with_capacity(4096);
                 let mut heap = RadixHeap::new();
-                let mut out: Vec<u8> = Vec::with_capacity(part.len() * 6);
 
-                for &(s, t) in part {
-                    let answer: u64 = if s == t {
-                        0 // zero-edge path, even on a node with no edges
-                    } else {
-                        dist[s as usize] = 0;
-                        touched.push(s);
-                        heap.clear();
-                        heap.push(0u64, s);
-                        let mut found = INF;
-                        while let Some((d, u)) = heap.pop() {
-                            if d > dist[u as usize] {
-                                continue; // stale entry
-                            }
-                            if u == t {
-                                found = d;
-                                break; // everything still queued is at least this far
-                            }
-                            let lo = offset[u as usize] as usize;
-                            let hi = offset[u as usize + 1] as usize;
-                            for e in lo..hi {
-                                let ev = edge[e].load(Ordering::Relaxed);
-                                let v = ev as u32;
-                                let nd = d + (ev >> 32) as u32 as u64;
-                                if nd < dist[v as usize] {
-                                    dist[v as usize] = nd;
-                                    touched.push(v);
-                                    heap.push(nd, v);
-                                }
-                            }
-                        }
-                        for &x in &touched {
-                            dist[x as usize] = INF;
-                        }
-                        touched.clear();
-                        found
-                    };
-
-                    if answer == INF {
-                        out.extend_from_slice(b"-1\n");
-                    } else {
-                        let _ = write!(out, "{answer}\n");
+                loop {
+                    let k = nextq.fetch_add(1, Ordering::Relaxed);
+                    if k >= todo.len() {
+                        break;
                     }
+                    let qi = todo[k] as usize;
+                    let (s, t) = qs[qi];
+                    dist[s as usize] = 0;
+                    touched.push(s);
+                    heap.clear();
+                    heap.push(0u64, s);
+                    let mut found = INF;
+                    while let Some((d, u)) = heap.pop() {
+                        let ui = u as usize;
+                        let bit = 1u64 << (u & 63);
+                        if done[ui >> 6] & bit != 0 {
+                            continue; // already settled, this entry is a duplicate
+                        }
+                        done[ui >> 6] |= bit;
+                        if u == t {
+                            found = d;
+                            break; // everything still queued is at least this far
+                        }
+                        for e in offset[ui] as usize..offset[ui + 1] as usize {
+                            let ev = edge[e].load(Ordering::Relaxed);
+                            let v = ev as u32;
+                            let nd = d + (ev >> 32) as u32 as u64;
+                            let vi = v as usize;
+                            let dv = dist[vi];
+                            if nd < dv {
+                                if dv == INF {
+                                    touched.push(v); // list each node once
+                                }
+                                dist[vi] = nd;
+                                heap.push(nd, v);
+                            }
+                        }
+                    }
+                    for &x in &touched {
+                        let xi = x as usize;
+                        dist[xi] = INF;
+                        done[xi >> 6] &= !(1u64 << (x & 63));
+                    }
+                    touched.clear();
+                    answers[qi].store(found, Ordering::Relaxed);
                 }
-                out
-            }));
-        }
-        for h in handles {
-            parts.push(h.join().unwrap_or_default());
+            });
         }
     });
 
     let mut out: Vec<u8> = Vec::with_capacity(out_cap);
-    for p in parts {
-        out.extend_from_slice(&p);
+    for i in 0..qs.len() {
+        let a = answers[i].load(Ordering::Relaxed);
+        if a == INF {
+            out.extend_from_slice(b"-1\n");
+        } else {
+            let _ = write!(out, "{a}\n");
+        }
     }
 
     if let Err(e) =
