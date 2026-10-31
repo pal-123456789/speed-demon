@@ -659,17 +659,48 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             .collect()
     });
 
+    // Merge part-major with an output arena that is allocated WITHOUT being touched, so
+    // the output's pages are charged only as the scatter writes them and each worker's
+    // part is freed before the next is read.
+    //
+    // The term-major merge this replaces held the full output arena (89 MB, touched by
+    // extend_from_slice) while all twelve part arenas (89 MB) were alive: 178 MB of
+    // posting storage. The first part-major attempt fixed the freeing but touched the
+    // output UP FRONT with `vec![0u32; total]`, which zeroes 89 MB, so it still peaked
+    // at 178 MB and paid an extra 89 MB of writes for the privilege.
+    //
+    // with_capacity + set_len touches nothing. The scatter writes every byte exactly once
+    // (each posting is placed once and `total` is the exact posting count), so no byte of
+    // the arena is ever read before it is written.
     let total: usize = parts.iter().map(|p| p.arena.len()).sum();
-    let mut arena: Vec<u32> = Vec::with_capacity(total);
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
+    let mut acc: u32 = 0;
+    offs.push(0);
     for ti in 0..nterms {
-        offs.push(arena.len() as u32);
         for p in &parts {
-            let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
-            arena.extend_from_slice(&p.arena[a..b]);
+            acc += p.offs[ti + 1] - p.offs[ti];
         }
+        offs.push(acc);
     }
-    offs.push(arena.len() as u32);
+    let mut arena: Vec<u32> = Vec::with_capacity(total);
+    unsafe {
+        arena.set_len(total);
+    }
+    // Each term's write cursor starts at its global base and advances as parts are read.
+    let mut cursor: Vec<u32> = offs[..nterms].to_vec();
+    for p in parts {
+        for ti in 0..nterms {
+            let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
+            if a == b {
+                continue;
+            }
+            let at = cursor[ti] as usize;
+            arena[at..at + (b - a)].copy_from_slice(&p.arena[a..b]);
+            cursor[ti] += (b - a) as u32;
+        }
+        // `p` is dropped here: its arena is unmapped before the next part is read, and
+        // the output pages it fed are already charged.
+    }
     Ok(Postings { arena, offs })
 }
 
