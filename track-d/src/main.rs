@@ -93,8 +93,9 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 const INF: u64 = u64::MAX;
 
 /// Hardware threads the scoring container is pinned to (six P-cores, SMT on).
-/// The query phase already used this split; the parse now uses the same pool.
-const NWORKERS: usize = 8;
+/// The comment above always said twelve; the constant said eight, which left four
+/// hardware threads idle through the whole parse AND the whole query phase.
+const NWORKERS: usize = 12;
 
 /// Bytes of `graph.txt` each worker holds while parsing. The build is two linear
 /// passes over the ASCII, so the only thing this sizes is how much of the file
