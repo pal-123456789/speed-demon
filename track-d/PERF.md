@@ -124,10 +124,11 @@ interesting part and judges are told to reward them."*
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| A Contraction-Hierarchy build | _ | _ | LEGAL, but this query mix rarely repays it: the searches are local, so preprocessing inside the timed run costs more than the queries it saves. The organizers say the same thing — CH is legal, it just rarely repays on this mix — and our own amortisation arithmetic agrees. Not a moral objection to CH; an arithmetic one |
-| Too many ALT landmarks | _ | _ | memory grows as k*n*4 with per-landmark offsets; past 8 the M axis gets worse faster than the queries get faster |
-| 32-bit distances | _ | _ | no proven bound on the maximum path weight — a wrong answer is worse than a slow one |
-| Preprocessing justified by sequential query timing | _ | _ | the queries are parallel; the budget is 12x smaller than it looks |
+| **Bidirectional Dijkstra, forward + reverse CSR** | _ | **built in full and hash-verified, then measured 1.52x SLOWER** | **the meeting condition and the second label table cost more than the smaller search saves, on a graph this sparse** |
+| A Contraction-Hierarchy build | _ | not attempted, on arithmetic | LEGAL, but preprocessing happens inside the timed run and the searches are already small: 11,660 settled nodes per query, 0.67% of the graph. The organizers say the same thing — CH is legal, it just rarely repays on this mix — and the same settle counter now confirms it independently |
+| Too many ALT landmarks | _ | REFUTED BY MEASUREMENT | the premise was that landmark bounds would shrink the search, and the search is already 0.67% of the graph, so they can save at most about 2x. Memory grows as k*n*4 with per-landmark offsets, and the M axis has about 9 MB of headroom against the leader |
+| 32-bit distances | _ | not attempted, deliberately | there is no proven bound on the maximum path weight, and a wrong answer is worse than a slow one. The labels stay 64-bit |
+| Preprocessing justified by sequential query timing | _ | resolved by measurement | the queries run 12-way parallel and the budget is 12x smaller than a sequential reading suggests. This is also why the build/query split matters: the build is 16% and the queries 84%, so any preprocessing has to pay for itself 2,000 times inside a single timed run |
 
 ---
 
