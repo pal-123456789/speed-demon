@@ -110,6 +110,51 @@ first-seen order) so it fits in 21 bits; the ranking already exists for hours in
 the per-worker sort, and it needs a measured before/after rather than a projection.
 What is measured is the touch count; what is proposed is a hypothesis.
 
+## Track D: the distance array is sized for the graph, not for the search
+
+Measured, not inferred. A workstream instrumented the solve directly:
+
+```
+1 worker   = 7.1 s
+8 workers  = 2.05 s        -> only 3.5x scaling
+~12,500 nodes settled per query
+answers are 5-9 hops
+```
+
+**Two conclusions follow, and both invalidate something I had written down.**
+
+**1. The solve is DRAM-latency-bound and does not scale.** 3.5× from eight workers
+means the bottleneck is memory latency, not arithmetic — which is the same finding
+as every other track, arriving from a different direction.
+
+**2. Each worker allocates a 13.9 MB distance array over all 1,740,512 nodes in order
+to touch about 12,500 of them.** Eight workers is **111 MB** — the dominant term in
+D's 183 MB peak — for a working set of roughly 200 KB per thread. The array is sized
+for the graph rather than for the search, and the search is two orders of magnitude
+smaller.
+
+**This also corrects my own arithmetic on the bidirectional search.** I costed it at
++1.4% and dismissed it, on the assumption that it halves the solve. It does not
+halve it: going from ~12,500 settled nodes to ~200 is a different order of
+magnitude, because unidirectional search settles about `b^r` nodes for branching
+factor `b` and radius `r`, while a bidirectional search settles about `2 * b^(r/2)`.
+For short paths in a road network that is a multiple, not a factor of two. **My
++1.4% was wrong because the 2x was wrong.**
+
+**And the memory objection I raised against it also dissolves.** I rejected the
+search because a second frontier needs a second distance array per worker, at +111 MB.
+That is only true if the distance array stays a *dense array over the whole graph*.
+For a search that settles a few hundred nodes, a hash map or a small sorted
+structure costs kilobytes. The reverse CSR is still ~40 MB of new memory, but the
+111 MB objection disappears with the representation that should have been there in
+the first place.
+
+**Priority, in order:** replace the per-worker dense distance array with a structure
+sized to the search (this pays on its own, in memory, with no algorithmic change),
+then add the bidirectional search on top of it. The first is worth roughly 20% on
+D's K from memory alone; the second is worth several times that on time. Neither is
+implemented, and neither is a projection I am willing to call a result.
+
 ## Ours versus the leaders
 
 Read off the live board. The useful thing is not the gap in points but the gap in
