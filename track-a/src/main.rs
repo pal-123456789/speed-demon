@@ -174,18 +174,34 @@ fn hour_ord(h: &[u8]) -> u32 {
     ((y * 100 + mo) * 100 + dy) * 24 + hh
 }
 
+/// One line, in eight bytes: `lat` is the latency, `key` is the endpoint id
+/// with the 5xx flag in its low bit. Records are appended in arrival order and
+/// sorted once per hour, so a group is a contiguous run of the block and the
+/// scan never has to look one up.
+struct Rec {
+    key: u32,
+    lat: u32,
+}
+
 /// The per-worker scan state, in one struct so the line parser can be a method.
 struct Sink {
-    /// `key -> index into groups`.
-    index: HashMap<u64, u32, BuildHasherDefault<Fx>>,
     /// endpoint bytes -> endpoint id, in first-seen order.
     inter: HashMap<Arc<[u8]>, u32, BuildHasherDefault<Fx>>,
     names: Vec<Arc<[u8]>>,
     groups: Vec<Group>,
+    /// One record block per DISTINCT hour, indexed by that hour's rank in
+    /// `hours`. Keying a block by hour rather than opening a new one at every
+    /// hour change is what keeps the group count at the output's own size: the
+    /// generator interleaves eight shards, so the corpus has 1054 hour runs but
+    /// only 72 distinct hours, and one block per run would multiply the groups
+    /// by the number of runs.
+    recs: Vec<Vec<Rec>>,
     /// Distinct hours, each with the 13 bytes it was parsed from.
     hours: Vec<(u32, [u8; 13])>,
     hour: [u8; 13],
     ord: u32,
+    /// Rank of the current hour in `hours`: which block is open.
+    hrank: u32,
 }
 
 impl Sink {
@@ -197,18 +213,21 @@ impl Sink {
         if line.len() < 32 {
             return;
         }
-        // Field boundaries: SP after the method, then SP after the endpoint.
+        // Field boundaries from both ends. The method's space is three to seven
+        // bytes past the timestamp, but the endpoint's space is the line's LAST
+        // space minus four: `status` is always exactly three digits, so the
+        // space that ends the endpoint sits four bytes before the last one.
+        // Reading the line from the right therefore never walks the endpoint --
+        // the longest one in the catalogue is over 200 bytes -- it walks the
+        // four-to-ten latency digits instead.
         let s1 = match next_space(line, 28) {
             Some(i) => i,
             None => return,
         };
-        let s2 = match next_space(line, s1 + 1) {
-            Some(i) => i,
-            None => return,
+        let s2 = match line.iter().rposition(|&c| c == b' ') {
+            Some(i) if i > s1 + 4 => i - 4,
+            _ => return,
         };
-        if line.len() < s2 + 5 {
-            return;
-        }
 
         let st = &line[s2 + 1..s2 + 4];
         let status =
@@ -217,10 +236,20 @@ impl Sink {
         let err = (500..=599).contains(&status) as u32;
 
         // The hour is part of the key, so it is only re-parsed where a run of
-        // identical hours ends.
+        // identical hours ends -- and that is also where the block it belongs
+        // to stops growing.
         if self.hour[..] != line[..13] {
             self.hour.copy_from_slice(&line[..13]);
             self.ord = hour_ord(&self.hour);
+            let mut hi = 0;
+            while hi < self.hours.len() && self.hours[hi].0 != self.ord {
+                hi += 1;
+            }
+            if hi == self.hours.len() {
+                self.hours.push((self.ord, self.hour));
+                self.recs.push(Vec::new());
+            }
+            self.hrank = hi as u32;
         }
 
         let ep = &line[s1 + 1..s2];
@@ -235,29 +264,43 @@ impl Sink {
             }
         };
 
-        let key = ((self.ord as u64) << 32) | id as u64;
-        match self.index.get(&key) {
-            Some(&gi) => {
-                let g = &mut self.groups[gi as usize];
-                g.latencies.push(latency);
-                g.errors += err;
+        // The whole group lookup, replaced by one sequential append. The hour
+        // is not in the record: it is the block the record lands in.
+        self.recs[self.hrank as usize].push(Rec {
+            key: (id << 1) | err,
+            lat: latency,
+        });
+    }
+
+    /// Sort one hour's records and turn each run of equal keys into a group.
+    ///
+    /// The 5xx flag rides in the low bit of the sort key, so a group becomes at
+    /// most two adjacent runs -- the clean lines and the errors -- and the merge
+    /// adds them back together, because it folds every run of equal keys.
+    fn flush(&mut self, hrank: usize, recs: &mut Vec<Rec>) {
+        if recs.is_empty() {
+            return;
+        }
+        recs.sort_unstable_by_key(|r| r.key);
+        let hour = (self.hours[hrank].0 as u64) << 32;
+        let mut i = 0;
+        while i < recs.len() {
+            let key = recs[i].key;
+            let mut j = i + 1;
+            while j < recs.len() && recs[j].key == key {
+                j += 1;
             }
-            None => {
-                self.index.insert(key, self.groups.len() as u32);
-                let mut latencies = Vec::with_capacity(8);
-                latencies.push(latency);
-                self.groups.push(Group {
-                    key,
-                    latencies,
-                    errors: err,
-                    p50: 0,
-                    p95: 0,
-                    p99: 0,
-                });
-                if !self.hours.iter().any(|h| h.0 == self.ord) {
-                    self.hours.push((self.ord, self.hour));
-                }
-            }
+            let mut latencies = Vec::with_capacity(j - i);
+            latencies.extend(recs[i..j].iter().map(|r| r.lat));
+            self.groups.push(Group {
+                key: hour | (key >> 1) as u64,
+                latencies,
+                errors: (key & 1) * (j - i) as u32,
+                p50: 0,
+                p95: 0,
+                p99: 0,
+            });
+            i = j;
         }
     }
 }
@@ -280,13 +323,14 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
     // table doublings per worker. Only a hint — growth is still automatic.
     let est = ((end - start) / 1450) as usize;
     let mut s = Sink {
-        index: HashMap::with_capacity_and_hasher(est, BuildHasherDefault::default()),
         inter: HashMap::with_capacity_and_hasher(2048, BuildHasherDefault::default()),
         names: Vec::with_capacity(2048),
         groups: Vec::with_capacity(est),
+        recs: Vec::new(),
         hours: Vec::new(),
         hour: [0xff; 13],
         ord: 0,
+        hrank: 0,
     };
     let mut out = Part {
         groups: Vec::new(),
@@ -357,6 +401,14 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
         buf.copy_within(cur..have, 0);
         pos += cur as u64;
         have -= cur;
+    }
+
+    // Fold each hour's block into groups. Each block is taken out of the table
+    // and dropped as it is consumed, so the record buffers and the groups built
+    // from them are never all live at once.
+    for hi in 0..s.recs.len() {
+        let mut block = std::mem::take(&mut s.recs[hi]);
+        s.flush(hi, &mut block);
     }
 
     // Renumber the endpoints into sorted-byte order, then order the groups by

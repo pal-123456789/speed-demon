@@ -258,6 +258,156 @@ impl RadixHeap {
     }
 }
 
+/// Per-query label table: node -> tentative distance, sized to the search it
+/// serves rather than to the graph it is indexed by.
+///
+/// The labels used to live in `vec![INF; n]` -- 13.9 MB per worker, 111 MB
+/// across the eight -- to hold the ~12,500 entries a search actually reaches
+/// (24.65M touched entries over all 2,000 queries, dearest 135,312). Node ids
+/// are effectively random, so at that density a 12,500-entry search still
+/// touches nearly all 3,400 pages of that array: a ~200 KB payload paying for a
+/// 13.9 MB index. The waste is index space, and it buys nothing.
+///
+/// This is open addressing over a capacity fitted to the query. Entering the
+/// table costs one load: a slot is `16` bytes holding `node + 1` and the
+/// distance, so a probe never needs a second, dependent fetch. Two arrays
+/// indexed by the same probe position look equivalent but are not -- the
+/// distance load sits behind the key comparison in the dependency graph unless
+/// the compiler hoists it, and a separate arena indexed through the probe result
+/// serialises by construction.
+///
+/// The capacity matters as much as the structure. A 32 Ki-slot table is 512 KB,
+/// which stays resident, where the same 12,500 entries scattered over node-id
+/// space are 787 KB of touched lines competing with the CSR for the same L2.
+/// `reset` re-fits the table to the query that just finished, so one 2^18 query
+/// does not leave the 250 small ones after it running against a table they
+/// cannot keep resident.
+///
+/// A key of `node + 1` is what makes zero mean empty, which is what lets the
+/// backing array be `vec![0u64; 2 * cap]`: that form lowers to `alloc_zeroed`,
+/// so the kernel hands over zero-filled pages and only the pages a probe writes
+/// are ever committed. Growth is 8x and walks the `touched` list, never a page
+/// it has not already written. `touched` lists probe positions, so the reset is
+/// one store per entry with no probe, and the node id needed to clear the
+/// settled bit comes back out of the key.
+struct Labels {
+    /// Slot `i` is `slots[2i] = node + 1` (0 when empty) and `slots[2i + 1]`.
+    slots: Vec<u64>,
+    mask: usize,
+    shift: u32,
+    grow_at: usize,
+    max_cap: usize,
+    len: usize,
+    touched: Vec<u32>,
+}
+
+impl Labels {
+    /// 4 Ki slots to start; a search that needs more grows into it.
+    const MIN_LOG: u32 = 12;
+
+    fn new(n: usize) -> Self {
+        let mut l = Labels {
+            slots: Vec::new(),
+            mask: 0,
+            shift: 0,
+            grow_at: 0,
+            // Two slots per node is the ceiling, so however large a search gets
+            // the table can never be more than half full.
+            max_cap: (2 * n).next_power_of_two().max(1 << (Self::MIN_LOG + 1)),
+            len: 0,
+            touched: Vec::with_capacity(1024),
+        };
+        l.resize(1 << Self::MIN_LOG);
+        l
+    }
+
+    /// Fresh empty table of `cap` slots. The old one is dropped whole, so no
+    /// page of it is walked on the way out.
+    fn resize(&mut self, cap: usize) {
+        self.slots = vec![0u64; 2 * cap];
+        self.mask = cap - 1;
+        self.shift = 32 - cap.trailing_zeros();
+        self.grow_at = cap - cap / 4;
+    }
+
+    #[inline(always)]
+    fn slot(&self, node: u32) -> usize {
+        (node.wrapping_mul(0x9E37_79B1) >> self.shift) as usize
+    }
+
+    /// Eight times larger, every live entry re-probed through the `touched` list
+    /// so the walk never reads a slot that was never written.
+    #[cold]
+    fn grow(&mut self) {
+        let cap = (self.slots.len() / 2 * 8).min(self.max_cap);
+        let (mask, shift) = (cap - 1, 32 - cap.trailing_zeros());
+        let mut slots = vec![0u64; 2 * cap];
+        let mut touched: Vec<u32> = Vec::with_capacity(self.len);
+        for &p in &self.touched {
+            let j = p as usize * 2;
+            let k = self.slots[j];
+            let mut i = ((k as u32).wrapping_sub(1).wrapping_mul(0x9E37_79B1) >> shift) as usize;
+            while slots[i * 2] != 0 {
+                i = (i + 1) & mask;
+            }
+            slots[i * 2] = k;
+            slots[i * 2 + 1] = self.slots[j + 1];
+            touched.push(i as u32);
+        }
+        self.slots = slots;
+        self.mask = mask;
+        self.shift = shift;
+        self.grow_at = cap - cap / 4;
+        self.touched = touched;
+    }
+
+    /// Relax into `node`: keep the label if it is better, take it if the node is
+    /// absent, and push the heap entry in both cases. One probe sequence, so the
+    /// lookup and the insert cannot disagree.
+    #[inline(always)]
+    fn relax(&mut self, node: u32, nd: u64, heap: &mut RadixHeap) {
+        let k = node.wrapping_add(1) as u64;
+        let mut i = self.slot(node);
+        loop {
+            let j = i * 2;
+            let key = self.slots[j];
+            if key == k {
+                if nd < self.slots[j + 1] {
+                    self.slots[j + 1] = nd;
+                    heap.push(nd, node);
+                }
+                return;
+            }
+            if key == 0 {
+                self.slots[j] = k;
+                self.slots[j + 1] = nd;
+                self.touched.push(i as u32);
+                self.len += 1;
+                heap.push(nd, node);
+                if self.len >= self.grow_at {
+                    self.grow();
+                }
+                return;
+            }
+            i = (i + 1) & self.mask;
+        }
+    }
+
+    /// Drop the settled bits this query set and re-fit the table to its size.
+    /// `touched` holds probe positions and each key is its node's id plus one, so
+    /// one load yields both the slot to clear and the node whose bit to drop.
+    #[inline]
+    fn reset(&mut self, done: &mut [u64]) {
+        for &p in &self.touched {
+            let j = p as usize * 2;
+            let v = self.slots[j] as usize - 1;
+            done[v >> 6] &= !(1u64 << (v & 63));
+            self.slots[j] = 0;
+        }
+        self.touched.clear();
+        self.len = 0;
+    }
+}
 fn main() {
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
@@ -462,9 +612,8 @@ fn main() {
             let answers = &answers;
             let nextq = &nextq;
             scope.spawn(move || {
-                let mut dist = vec![INF; n];
+                let mut labels = Labels::new(n);
                 let mut done = vec![0u64; tbits];
-                let mut touched: Vec<u32> = Vec::with_capacity(4096);
                 let mut heap = RadixHeap::new();
 
                 loop {
@@ -474,10 +623,11 @@ fn main() {
                     }
                     let qi = todo[k] as usize;
                     let (s, t) = qs[qi];
-                    dist[s as usize] = 0;
-                    touched.push(s);
+                    labels.reset(&mut done);
                     heap.clear();
-                    heap.push(0u64, s);
+                    // The source enters through the same path as any other node:
+                    // one insert, one heap entry, no special case.
+                    labels.relax(s, 0, &mut heap);
                     let mut found = INF;
                     while let Some((d, u)) = heap.pop() {
                         let ui = u as usize;
@@ -492,25 +642,10 @@ fn main() {
                         }
                         for e in offset[ui] as usize..offset[ui + 1] as usize {
                             let ev = edge[e].load(Ordering::Relaxed);
-                            let v = ev as u32;
                             let nd = d + (ev >> 32) as u32 as u64;
-                            let vi = v as usize;
-                            let dv = dist[vi];
-                            if nd < dv {
-                                if dv == INF {
-                                    touched.push(v); // list each node once
-                                }
-                                dist[vi] = nd;
-                                heap.push(nd, v);
-                            }
+                            labels.relax(ev as u32, nd, &mut heap);
                         }
                     }
-                    for &x in &touched {
-                        let xi = x as usize;
-                        dist[xi] = INF;
-                        done[xi >> 6] &= !(1u64 << (x & 63));
-                    }
-                    touched.clear();
                     answers[qi].store(found, Ordering::Relaxed);
                 }
             });
