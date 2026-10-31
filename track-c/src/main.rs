@@ -209,38 +209,10 @@ const SHARD_MASK: usize = SHARDS - 1;
 /// with a shared interner and twelve threads, dropping it took the interner from
 /// 109 ns to 50 ns per intern, because a probe can now reject a slot on a length
 /// mismatch (8 bits of the slot itself) without touching the arena at all.
-/// Name bytes stored INLINE in each slot. The corpus averages about 12 bytes per
-/// name and its longest is 25, so 16 covers the great majority of comparisons
-/// without reaching the arena at all.
-const HEAD_N: usize = 16;
-
-/// One probe slot: the packed entry AND the first `HEAD_N` name bytes.
-///
-/// A slot used to be a bare `u64`, so a length match still cost a **second
-/// dependent load** into the arena to compare the bytes -- two cache lines per
-/// intern, the second waiting on the first. Carrying the head inline makes the
-/// common comparison a single cache line, and it is nearly memory-neutral: the
-/// inline bytes replace the arena for names of 16 bytes or fewer, so the arena
-/// only grows for longer ones.
-#[derive(Clone, Copy)]
-struct Slot {
-    info: u64,
-    head: [u8; HEAD_N],
-}
-
-impl Default for Slot {
-    fn default() -> Self {
-        Slot {
-            info: 0,
-            head: [0u8; HEAD_N],
-        }
-    }
-}
-
 #[derive(Default)]
 struct Shard {
     arena: Vec<u8>,
-    slots: Vec<Slot>,
+    table: Vec<u64>,
     n: usize,
 }
 
@@ -254,25 +226,24 @@ const OFF_MAX: usize = (1 << (63 - OFF_SHIFT)) - 1;
 /// Rewrite one shard's probe table at twice the size. Only that shard's own lock
 /// is held, and it happens at most twice per shard in the whole run.
 fn rehash(s: &mut Shard) {
-    let n = s.slots.len() * 2;
+    let n = s.table.len() * 2;
     let mask = n - 1;
-    let mut t = vec![Slot::default(); n];
-    for e in s.slots.iter() {
-        if e.info == 0 {
+    let mut t = vec![0u64; n];
+    for e in s.table.iter().copied() {
+        if e == 0 {
             continue;
         }
         // The occupied flag shares the word with the offset, so it comes off
         // before the fields are read.
-        let info = e.info;
-        let off = ((info >> OFF_SHIFT) as usize) & OFF_MAX;
-        let len = ((info >> LEN_SHIFT) as usize) & LEN_MAX;
+        let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
+        let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
         let mut slot = (fxhash(&s.arena[off..off + len]) >> 6) as usize & mask;
-        while t[slot].info != 0 {
+        while t[slot] != 0 {
             slot = (slot + 1) & mask;
         }
-        t[slot] = *e;
+        t[slot] = e;
     }
-    s.slots = t;
+    s.table = t;
 }
 
 struct Interner {
@@ -326,14 +297,13 @@ impl Interner {
             Ok(g) => g,
             Err(e) => e.into_inner(), // a panic elsewhere must not lose the answer
         };
-        if g.slots.is_empty() {
-            g.slots = vec![Slot::default(); 1024];
+        if g.table.is_empty() {
+            g.table = vec![0u64; 1024];
         }
-        let mask = g.slots.len() - 1;
+        let mask = g.table.len() - 1;
         let mut slot = (h >> 6) as usize & mask;
-        let nh = name.len().min(HEAD_N);
         loop {
-            let v = g.slots[slot].info;
+            let v = g.table[slot];
             if v == 0 {
                 let off = g.arena.len();
                 if off > OFF_MAX {
@@ -341,24 +311,13 @@ impl Interner {
                 }
                 let id = self.next.fetch_add(1, Ordering::Relaxed);
                 let len = name.len() as u64;
-                // The whole name still goes to the arena: `rehash` re-derives each
-                // slot's position from the name bytes, and a tail-only arena could
-                // not be rehashed without reassembling every key from its slot.
-                // The inline head is a REJECTION FILTER, not a replacement -- it
-                // answers almost every mismatch in one cache line, and the arena
-                // load now happens only once the head has already agreed.
-                let mut head = [0u8; HEAD_N];
-                head[..nh].copy_from_slice(&name[..nh]);
                 g.arena.extend_from_slice(name);
-                g.slots[slot] = Slot {
-                    info: SLOT_BUSY
-                        | id as u64
-                        | (len << LEN_SHIFT)
-                        | ((off as u64) << OFF_SHIFT),
-                    head,
-                };
+                g.table[slot] = SLOT_BUSY
+                    | id as u64
+                    | (len << LEN_SHIFT)
+                    | ((off as u64) << OFF_SHIFT);
                 g.n += 1;
-                if g.n * 8 >= g.slots.len() * 7 {
+                if g.n * 8 >= g.table.len() * 7 {
                     rehash(&mut g);
                 }
                 return id;
@@ -368,9 +327,7 @@ impl Interner {
             let e = v & !SLOT_BUSY;
             let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
             let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
-            let s = &g.slots[slot];
-            if len == name.len() && s.head[..nh] == name[..nh] && &g.arena[off..off + len] == name
-            {
+            if len == name.len() && &g.arena[off..off + len] == name {
                 return (e & ID_MASK) as u32;
             }
             slot = (slot + 1) & mask;
