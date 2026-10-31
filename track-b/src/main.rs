@@ -561,6 +561,16 @@ impl TermList {
         }
     }
 
+    /// The whole block that logical index `i` falls in.
+    #[inline]
+    fn block(&self, k: usize) -> &[u32] {
+        if k == self.done.len() {
+            &self.cur
+        } else {
+            &self.done[k]
+        }
+    }
+
     /// Give back every block whose last entry is below `upto`. `upto` never
     /// exceeds `len()`, so this can only reach blocks that are already full.
     #[inline]
@@ -692,17 +702,33 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     // `terms` is read once, front to back, and never again, so every block the
     // walk has finished with is released here. That is what keeps the peak at
     // the arena instead of the arena plus the whole list.
+    //
+    // A document's entries cross a block boundary about once in three thousand
+    // documents, so the ordinary case takes one sub-slice of one block and pays
+    // no block dispatch at all; only the crossing case walks block by block.
     let mut cur: Vec<u32> = offs.clone();
     let mut arena: Vec<u32> = vec![0; acc as usize];
-    let mut i = 0usize;
     for d in 0..ids.len() {
         let doc = ids[d];
+        let lo = starts[d] as usize;
         let hi = starts[d + 1] as usize;
-        while i < hi {
-            let t = terms.get(i) as usize;
-            arena[cur[t] as usize] = doc;
-            cur[t] += 1;
-            i += 1;
+        if lo == hi {
+            continue;
+        }
+        let k = lo >> TBLK_LOG;
+        if k == (hi - 1) >> TBLK_LOG {
+            let base = k << TBLK_LOG;
+            for &t in &terms.block(k)[(lo - base)..(hi - base)] {
+                let t = t as usize;
+                arena[cur[t] as usize] = doc;
+                cur[t] += 1;
+            }
+        } else {
+            for i in lo..hi {
+                let t = terms.get(i) as usize;
+                arena[cur[t] as usize] = doc;
+                cur[t] += 1;
+            }
         }
         terms.release(hi);
     }

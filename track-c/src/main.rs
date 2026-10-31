@@ -59,7 +59,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, read};
-use std::hash::Hasher;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -90,14 +89,8 @@ const FX_K: u64 = 0x517c_c1b7_2722_0a95;
 impl std::hash::Hasher for FxHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut b = bytes;
-        while b.len() >= 8 {
-            let v = u64::from_le_bytes(b[..8].try_into().unwrap());
-            self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(FX_K);
-            b = &b[8..];
-        }
-        for &x in b {
-            self.0 = (self.0.rotate_left(5) ^ x as u64).wrapping_mul(FX_K);
+        for &x in bytes {
+            self.write_u64(x as u64);
         }
     }
     #[inline]
@@ -128,13 +121,74 @@ impl std::hash::BuildHasher for FxBuild {
 type FxMap<K, V> = HashMap<K, V, FxBuild>;
 type FxSet<T> = HashSet<T, FxBuild>;
 
-/// Hash a byte string exactly the way the interner does, so the shard a name
-/// lands in and the probe inside that shard agree.
+/// Hash a name into the shard index and the probe start. Nothing about the
+/// ANSWER depends on which function this is: a shard is chosen by this value
+/// and a probe starts from it, but every comparison is byte-for-byte against
+/// the arena, so a poor hash costs probes and can never merge two names. Ids
+/// are handed out in whatever order the threads reach a name, and an id only
+/// ever indexes a bitmap, whose popcount is order-free.
+///
+/// `FxHasher` was the wrong shape for these keys. It folds a byte string in
+/// 8-byte steps and then walks the 1-7 byte tail one byte at a time, each byte
+/// a dependent rotate-xor-multiply: a 12-byte name is four serialised 64-bit
+/// multiplies before the probe even starts, on every one of 3.32 M records.
+/// Reading the first and last eight bytes -- they overlap for 8-15 byte keys,
+/// which is 62% of this corpus -- plus a middle word for longer ones collapses
+/// The little-endian 8- and 4-byte words at `i`. Callers guarantee the range.
 #[inline]
-fn fxhash(bytes: &[u8]) -> u64 {
-    let mut h = FxHasher(0);
-    h.write(bytes);
-    h.finish()
+fn w8(b: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
+}
+
+#[inline]
+fn w4(b: &[u8], i: usize) -> u64 {
+    u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64
+}
+
+/// Hash a name into the shard index and the probe start. Nothing about the
+/// ANSWER depends on which function this is: a shard is chosen by this value
+/// and a probe starts from it, but every comparison is byte-for-byte against
+/// the arena, so a poor hash costs probes and can never merge two names. Ids
+/// are handed out in whatever order the threads reach a name, and an id only
+/// ever indexes a bitmap, whose popcount is order-free.
+///
+/// `FxHasher` was the wrong shape for these keys. It folds a byte string in
+/// 8-byte steps and then walks the 1-7 byte tail one byte at a time, each byte
+/// a dependent rotate-xor-multiply: a 12-byte name is four serialised 64-bit
+/// multiplies before the probe even starts, on every one of 3.32 M records.
+/// Reading the first and last eight bytes -- they overlap for 8-15 byte keys,
+/// which is 62% of this corpus -- plus a middle word for longer ones collapses
+/// that to three independent multiplies.
+#[inline]
+fn fxhash(b: &[u8]) -> u64 {
+    const M: u64 = 0x9E37_79B9_7F4A_7C15;
+    const M2: u64 = 0x2545_F491_4F6C_DD1D;
+    let n = b.len();
+    let mut h = if n >= 4 {
+        // Both ends of the key, so a shared prefix is not a collision.
+        let (a, c) = if n >= 8 {
+            (w8(b, 0), w8(b, n - 8))
+        } else {
+            (w4(b, 0), w4(b, n - 4))
+        };
+        let mut h = (a ^ M).wrapping_mul(M);
+        h ^= (c ^ n as u64).wrapping_mul(M2);
+        if n >= 16 {
+            // The uncovered middle, for the 9% of names this long.
+            h ^= w8(b, n / 2 - 4).wrapping_mul(M);
+        }
+        h ^ (h >> 31)
+    } else {
+        // 0-3 bytes, including the empty name. Packed into one word; the 0x100
+        // marker keeps the empty name and a single NUL byte apart.
+        let mut x = n as u64 | 0x100;
+        for &y in b {
+            x = (x << 8) | y as u64;
+        }
+        x.wrapping_mul(M)
+    };
+    h = h.wrapping_mul(M2);
+    h ^ (h >> 31) ^ (h >> 29)
 }
 
 // ── the shared name interner ────────────────────────────────────────────────
@@ -312,7 +366,19 @@ impl CountryNames {
             let bits = self
                 .bits
                 .get_or_init(|| (0..BITWORDS).map(|_| AtomicU64::new(0)).collect());
-            bits[(id >> 6) as usize].fetch_or(1u64 << (id & 63), Ordering::Relaxed);
+            // Almost every mark on a real corpus is a repeat: this one has
+            // 3.32 M records over 100,520 names, and within a single country
+            // only about one record in fifteen is a name that country has not
+            // seen. A bit that is already set needs no read-modify-write, and a
+            // concurrent thread setting the same bit is idempotent, so a plain
+            // load that sees it can skip the atomic. That matters because
+            // `fetch_or` demands exclusive ownership of a random line out of
+            // the 3.8 MB of bitmaps; the load can read a shared copy.
+            let w = &bits[(id >> 6) as usize];
+            let b = 1u64 << (id & 63);
+            if w.load(Ordering::Relaxed) & b == 0 {
+                w.fetch_or(b, Ordering::Relaxed);
+            }
         } else {
             let set = self.rare.get_or_init(|| Mutex::new(FxSet::default()));
             if let Ok(mut s) = set.lock() {
@@ -369,15 +435,19 @@ fn merge(dst: &mut Agg, src: Agg) {
     dst.id_sum += src.id_sum;
     dst.amount_sum += src.amount_sum;
     if src.count > 0 {
-        if src.amount_min < dst.amount_min {
-            dst.amount_min = src.amount_min;
-        }
-        if src.amount_max > dst.amount_max {
-            dst.amount_max = src.amount_max;
-        }
+        dst.amount_min = dst.amount_min.min(src.amount_min);
+        dst.amount_max = dst.amount_max.max(src.amount_max);
     }
     dst.name_bytes += src.name_bytes;
     dst.note_bytes += src.note_bytes;
+}
+
+/// Step over the separator that ends a field, if the field ended on one.
+#[inline]
+fn comma(buf: &[u8], pos: &mut usize) {
+    if buf.get(*pos) == Some(&b',') {
+        *pos += 1;
+    }
 }
 
 /// Read one field at `*pos` into `out`, honouring the quoting rules.
@@ -387,17 +457,16 @@ fn field(buf: &[u8], pos: &mut usize, out: &mut Vec<u8>) {
         *pos += 1;
         while *pos < buf.len() {
             let b = buf[*pos];
-            if b == b'"' {
-                if *pos + 1 < buf.len() && buf[*pos + 1] == b'"' {
-                    out.push(b'"'); // `""` is one literal quote
-                    *pos += 2;
-                    continue;
-                }
+            if b != b'"' {
+                out.push(b);
+                *pos += 1;
+            } else if *pos + 1 < buf.len() && buf[*pos + 1] == b'"' {
+                out.push(b'"'); // `""` is one literal quote
+                *pos += 2;
+            } else {
                 *pos += 1; // closing quote
                 break;
             }
-            out.push(b);
-            *pos += 1;
         }
     } else {
         while *pos < buf.len() {
@@ -420,6 +489,19 @@ fn digits(buf: &[u8], pos: &mut usize) -> i64 {
         *pos += 1;
     }
     v
+}
+
+/// One output line: `<country> <count> <id_sum> <amount_sum> <amount_min>
+/// <amount_max> <names_distinct> <name_bytes> <note_bytes>`.
+fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg, names: u64) {
+    out.extend_from_slice(key);
+    let _ = write!(out, " {} {} ", a.count, a.id_sum);
+    money(a.amount_sum, out);
+    out.push(b' ');
+    money(a.amount_min, out);
+    out.push(b' ');
+    money(a.amount_max, out);
+    let _ = write!(out, " {} {} {}\n", names, a.name_bytes, a.note_bytes);
 }
 
 /// Exact cents as `-?int.dd`, never `-0.00`.
@@ -581,16 +663,18 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
 /// Every record's name is interned (a shared, exact id) and marked in that
 /// country's bitmap. The per-thread aggregate holds only scalars, so twelve
 /// threads never duplicate name storage.
+///
+/// The region join is `rarr[region]` for the ids the flat array covers and the
+/// exact hash map for the rest. `rarr` is 2 MB of `u16` and holds slot+1, with
+/// 0 meaning "this id is not in regions.csv"; the map is still the authority
+/// for ids at or past `regcap`, and for a corpus whose regions.csv names more
+/// countries than a `u16` can hold.
 fn parse_range(
     path: &str,
     start: u64,
     end: u64,
-    // The country slot is `u32`, not `u16`. At most 240 distinct country codes
-    // exist here, so `u16` would fit -- until a corpus had more than 65,535 of
-    // them, at which point `u16` would wrap and silently merge two countries.
-    // Four bytes a slot costs nothing at this row count and removes that class
-    // of wrong answer entirely.
-    lookup: &FxMap<i64, u32>,
+    rarr: &[u16],
+    big: &FxMap<i64, u32>,
     names: &Interner,
     distinct: &[CountryNames],
     unmatched_slot: u32,
@@ -657,17 +741,11 @@ fn parse_range(
                 pos += 1;
             }
             field(recs, &mut pos, &mut name);
-            if pos < have && recs[pos] == b',' {
-                pos += 1;
-            }
+            comma(recs, &mut pos);
             field(recs, &mut pos, &mut note);
-            if pos < have && recs[pos] == b',' {
-                pos += 1;
-            }
+            comma(recs, &mut pos);
             let region = digits(recs, &mut pos);
-            if pos < have && recs[pos] == b',' {
-                pos += 1;
-            }
+            comma(recs, &mut pos);
             let mut neg = false;
             if pos < have && recs[pos] == b'-' {
                 neg = true;
@@ -706,11 +784,25 @@ fn parse_range(
                 break;
             }
 
-            let slot = match lookup.get(&region) {
-                Some(&code) => code,
-                None => {
-                    saw_unmatched = true;
-                    unmatched_slot
+            // One random load instead of a hash plus a probe through a 3 MB
+            // table, for the 99.7% of ids the flat array reaches. `region` is
+            // never negative: `digits` stops at the first byte that is not a
+            // digit, so the cast is only widening.
+            let slot = if (region as u64) < rarr.len() as u64 {
+                match rarr[region as usize] {
+                    0 => {
+                        saw_unmatched = true;
+                        unmatched_slot
+                    }
+                    v => (v - 1) as u32,
+                }
+            } else {
+                match big.get(&region) {
+                    Some(&code) => code,
+                    None => {
+                        saw_unmatched = true;
+                        unmatched_slot
+                    }
                 }
             };
             distinct[slot as usize].mark(names.intern(&name));
@@ -774,15 +866,10 @@ fn main() {
             }
             if p + 2 < regions.len() {
                 let code = [regions[p], regions[p + 1], regions[p + 2]];
-                let slot = match slot_of.get(&code) {
-                    Some(&s) => s,
-                    None => {
-                        let s = codes.len() as u32;
-                        codes.push(code);
-                        slot_of.insert(code, s);
-                        s
-                    }
-                };
+                let slot = *slot_of.entry(code).or_insert_with(|| {
+                    codes.push(code);
+                    (codes.len() - 1) as u32
+                });
                 lookup.insert(rid, slot);
                 p += 3;
             }
@@ -794,6 +881,27 @@ fn main() {
     drop(slot_of);
     drop(regions);
     let unmatched_slot = codes.len() as u32;
+
+    // ── the region join as one flat array ───────────────────────────────────
+    // `region_id` is a sparse id, not an index, so this only pays while the ids
+    // stay inside a window: 1..=999,993 here, which is 2 MB of `u16` against
+    // the 3.3 MB hash map it replaces, and one load instead of a hash and a
+    // probe. Above the window, and whenever the map cannot be expressed as
+    // `u16` slots, the map is still consulted, so the join is exact at any id
+    // or country count -- only the memory shape and the speed change.
+    let maxr = lookup.keys().copied().max().unwrap_or(0).max(0) as u64;
+    let want = (maxr + 1).checked_next_power_of_two().unwrap_or(u64::MAX);
+    let regcap = if codes.len() <= 65534 && want <= 1 << 21 { want as usize } else { 0 };
+    let mut rarr: Vec<u16> = vec![0; regcap];
+    let mut big: FxMap<i64, u32> = FxMap::with_hasher(FxBuild);
+    for (rid, slot) in lookup.drain() {
+        if (rid as u64) < regcap as u64 {
+            rarr[rid as usize] = (slot + 1) as u16;
+        } else {
+            big.insert(rid, slot);
+        }
+    }
+    drop(lookup);
 
     // ── the split, then twelve threads over disjoint records ────────────────
     let pts = match record_boundaries(&records, NTHREADS) {
@@ -813,11 +921,12 @@ fn main() {
         for w in pts.windows(2) {
             let (a, b) = (w[0], w[1]);
             let path = records.as_str();
-            let lookup = &lookup;
+            let rarr = &rarr;
+            let big = &big;
             let names = &names;
             let distinct = &distinct;
             handles.push(scope.spawn(move || {
-                parse_range(path, a, b, lookup, names, distinct, unmatched_slot)
+                parse_range(path, a, b, rarr, big, names, distinct, unmatched_slot)
             }));
         }
         for h in handles {
@@ -847,37 +956,11 @@ fn main() {
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
     for k in keys {
         let a = &groups[&k];
-        out.extend_from_slice(&codes[k as usize]);
-        let _ = write!(out, " {} {} ", a.count, a.id_sum);
-        money(a.amount_sum, &mut out);
-        out.push(b' ');
-        money(a.amount_min, &mut out);
-        out.push(b' ');
-        money(a.amount_max, &mut out);
-        let _ = write!(
-            out,
-            " {} {} {}\n",
-            distinct[k as usize].count(),
-            a.name_bytes,
-            a.note_bytes
-        );
+        line(&mut out, &codes[k as usize], a, distinct[k as usize].count());
     }
     if saw_unmatched {
-        out.extend_from_slice(b"_UNMATCHED ");
         let a = &unmatched;
-        let _ = write!(out, "{} {} ", a.count, a.id_sum);
-        money(a.amount_sum, &mut out);
-        out.push(b' ');
-        money(a.amount_min, &mut out);
-        out.push(b' ');
-        money(a.amount_max, &mut out);
-        let _ = write!(
-            out,
-            " {} {} {}\n",
-            distinct[unmatched_slot as usize].count(),
-            a.name_bytes,
-            a.note_bytes
-        );
+        line(&mut out, b"_UNMATCHED", a, distinct[unmatched_slot as usize].count());
     }
 
     if let Err(e) =
