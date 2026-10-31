@@ -228,7 +228,7 @@ impl TermTable {
                 let t = (e as u32 - 1) as usize;
                 let o = self.offs[t] as usize;
                 let l = self.lens[t] as usize;
-                if l == key.len() && eq_words(&self.arena[o..o + l], key) {
+                if l == key.len() && self.arena[o..o + l] == *key {
                     return i;
                 }
             }
@@ -288,7 +288,7 @@ impl TermTable {
                 let l = ((e & SLOT_LEN) >> 41) as usize;
                 if l == key.len() {
                     let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
-                    if eq_words(&self.arena[o..o + l], key) {
+                    if self.arena[o..o + l] == *key {
                         return Some((e & SLOT_ID) as u32);
                     }
                 }
@@ -471,33 +471,6 @@ impl Part {
 /// The stamp test and the count update are therefore one random read-modify-
 /// write into a 300 KB array rather than two 600 KB ones.
 const ST_DF: u32 = (1 << 20) - 1;
-
-/// Byte equality over word loads, for a length both sides already agree on.
-///
-/// `arena[o..o + l] == key` compiles to a `memcmp` CALL because `l` is dynamic, and this runs
-/// once per dictionary hit -- about 42 M times during the build. Eight bytes at a time with a
-/// tail is the portable form of what a fixed-width key struct gets for free: no call, no
-/// length re-check, and the first word usually decides it.
-#[inline(always)]
-fn eq_words(a: &[u8], b: &[u8]) -> bool {
-    let n = a.len();
-    let mut i = 0;
-    while i + 8 <= n {
-        let x = u64::from_le_bytes([a[i], a[i + 1], a[i + 2], a[i + 3], a[i + 4], a[i + 5], a[i + 6], a[i + 7]]);
-        let y = u64::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]]);
-        if x != y {
-            return false;
-        }
-        i += 8;
-    }
-    while i < n {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
 
 #[inline]
 fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
