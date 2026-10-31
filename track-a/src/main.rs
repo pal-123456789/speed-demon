@@ -146,6 +146,49 @@ fn next_space(buf: &[u8], from: usize) -> Option<usize> {
     buf[from..].iter().position(|&c| c == b' ').map(|p| p + from)
 }
 
+/// The first and last space in `buf[from..from + 64]`, from one AVX2 probe.
+///
+/// `take` needs two spaces -- the method's and the one after the status -- and it
+/// used to find them with a forward scan and then a separate backward scan of the
+/// whole line. Two 32-byte loads and two `movemask`s give both positions from a
+/// single window: the first set bit and the last.
+///
+/// The caller only takes this path when the line fits inside the window, so the
+/// last space in the window is the line's last space by construction. Longer
+/// lines fall back to the scalar scans, which is what makes this exact rather
+/// than an assumption about line length.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn probe_spaces(buf: &[u8], from: usize) -> Option<(usize, usize)> {
+    if from + 64 > buf.len() {
+        return None;
+    }
+    // SAFETY: `from + 64 <= buf.len()` was just checked, so both 32-byte loads are
+    // inside the slice. `target-cpu=x86-64-v3` guarantees AVX2 at compile time, so
+    // there is no unsupported path to guard against at run time.
+    unsafe {
+        use core::arch::x86_64::*;
+        let p = buf.as_ptr().add(from) as *const __m256i;
+        let sp = _mm256_set1_epi8(b' ' as i8);
+        let a = _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p), sp)) as u32;
+        let b = _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p.add(1)), sp)) as u32;
+        let lo = a as u64 | ((b as u64) << 32);
+        if lo == 0 {
+            return None;
+        }
+        Some((
+            from + lo.trailing_zeros() as usize,
+            from + (63 - lo.leading_zeros()) as usize,
+        ))
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn probe_spaces(_buf: &[u8], _from: usize) -> Option<(usize, usize)> {
+    None
+}
+
 /// Checked decimal parse. The spec guarantees the grammar, so a malformed field
 /// cannot occur; returning 0 rather than panicking keeps a surprise from
 /// becoming a non-zero exit.
@@ -240,13 +283,23 @@ impl Sink {
         // Reading the line from the right therefore never walks the endpoint --
         // the longest one in the catalogue is over 200 bytes -- it walks the
         // four-to-ten latency digits instead.
-        let s1 = match next_space(line, 28) {
-            Some(i) => i,
-            None => return,
-        };
-        let s2 = match line.iter().rposition(|&c| c == b' ') {
-            Some(i) if i > s1 + 4 => i - 4,
-            _ => return,
+        // One AVX2 probe when the whole line fits the window: the first and last
+        // spaces come out of the same 64-byte load. The average line is 77 bytes
+        // and the window starts at 28, so this covers the great majority of them.
+        // Anything longer uses the two scalar scans, and BOTH paths are exercised
+        // by the corpora, so the fallback is not dead code.
+        let (s1, s2) = match probe_spaces(line, 28) {
+            Some((f, l)) if line.len() <= 92 && l > f + 4 => (f, l - 4),
+            _ => {
+                let s1 = match next_space(line, 28) {
+                    Some(i) => i,
+                    None => return,
+                };
+                match line.iter().rposition(|&c| c == b' ') {
+                    Some(i) if i > s1 + 4 => (s1, i - 4),
+                    _ => return,
+                }
+            }
         };
 
         // `status` is always exactly three digits, so 5xx is decided entirely by
