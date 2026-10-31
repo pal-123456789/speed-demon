@@ -26,7 +26,7 @@
 
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 
@@ -473,7 +473,7 @@ impl Part {
 const ST_DF: u32 = (1 << 20) - 1;
 
 #[inline]
-fn index_text(text: &[u8], tt: &TermTable, terms: &mut TermList, nslot: &mut [u32], gen: u32) {
+fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -500,89 +500,6 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut TermList, nslot: &mut [u3
     }
 }
 
-/// The doc-ordered term-id list, kept in blocks.
-///
-/// The scatter pass walks this list strictly front to back, one entry per
-/// posting, while its output arena is written at exactly the same rate: after
-/// `k` entries have been consumed, `k` words of the arena have been written.
-/// Keeping the list in blocks therefore lets the scatter hand each finished
-/// block straight back to the allocator, and the two halves of the build's
-/// scratch never both hold their full size. Without it the peak is `list +
-/// arena`, twice the index; with it the peak is the arena's final size, because
-/// whatever the arena has grown by is what the list has given up.
-///
-/// A megabyte per block is the size at which glibc hands the block back with
-/// `munmap` on free and the Windows heap decommits it -- verified on this box --
-/// while still costing one header per 262144 entries rather than per posting.
-const TBLK_LOG: usize = 18;
-const TBLK: usize = 1 << TBLK_LOG;
-const TBLK_MASK: usize = TBLK - 1;
-
-struct TermList {
-    /// Blocks that are full, oldest first. Entries are cleared as the scatter
-    /// passes them, which is what releases the pages.
-    done: Vec<Vec<u32>>,
-    /// The block being appended to; never full at rest except after the last
-    /// push of a run that lands exactly on a boundary.
-    cur: Vec<u32>,
-    freed: usize,
-}
-
-impl TermList {
-    fn new() -> Self {
-        TermList {
-            done: Vec::new(),
-            cur: Vec::with_capacity(TBLK),
-            freed: 0,
-        }
-    }
-
-    #[inline]
-    fn len(&self) -> usize {
-        self.done.len() * TBLK + self.cur.len()
-    }
-
-    #[inline]
-    fn push(&mut self, t: u32) {
-        if self.cur.len() == TBLK {
-            let next = Vec::with_capacity(TBLK);
-            self.done.push(std::mem::replace(&mut self.cur, next));
-        }
-        self.cur.push(t);
-    }
-
-    #[inline]
-    fn get(&self, i: usize) -> u32 {
-        let k = i >> TBLK_LOG;
-        if k == self.done.len() {
-            self.cur[i & TBLK_MASK]
-        } else {
-            self.done[k][i & TBLK_MASK]
-        }
-    }
-
-    /// The whole block that logical index `i` falls in.
-    #[inline]
-    fn block(&self, k: usize) -> &[u32] {
-        if k == self.done.len() {
-            &self.cur
-        } else {
-            &self.done[k]
-        }
-    }
-
-    /// Give back every block whose last entry is below `upto`. `upto` never
-    /// exceeds `len()`, so this can only reach blocks that are already full.
-    #[inline]
-    fn release(&mut self, upto: usize) {
-        let hi = (upto >> TBLK_LOG).min(self.done.len());
-        while self.freed < hi {
-            self.done[self.freed] = Vec::new();
-            self.freed += 1;
-        }
-    }
-}
-
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
 /// postings.
 ///
@@ -592,20 +509,22 @@ impl TermList {
 /// own id field, so a worker needs no global document counter and the ranges are
 /// independent.
 ///
-/// The partition rule is the one Track A uses: a range processes every line whose
+/// The partition rule is the one Track A uses: a worker processes every line whose
 /// FIRST byte is `< end`, discarding the partial line at its own `start`. The line
-/// that straddles a cut therefore belongs to exactly one range -- the one to its
-/// left -- and the next range drops it. `start == 0` is the only range that has
+/// that straddles a cut therefore belongs to exactly one worker -- the one to its
+/// left -- and the next worker drops it. `start == 0` is the only range that has
 /// nothing to drop.
 ///
-/// A cut that lands exactly ON a line start has no partial line: the line there
-/// begins at `start`, so it is not `< end` for the range to the left and must be
-/// kept here. Discarding blindly would drop that one document, so the byte before
-/// `start` is checked for the newline that would prove there is nothing to drop.
+/// The pass is a counting sort over the doc-ordered term-id list. `starts` holds
+/// the entry index at which each document begins, so the scatter pass recovers
+/// the document id of every entry without storing one per entry: 89 MB of term
+/// ids instead of 178 MB of pairs.
 fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Part {
     let mut nslot: Vec<u32> = vec![0u32; nterms];
     let mut gen: u32 = 0;
-    let mut terms = TermList::new();
+    // The corpus yields roughly one posting per nine bytes, and the reserve is
+    // what keeps the doubling memcpy out of the token loop.
+    let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
     let mut starts: Vec<u32> = Vec::new();
     let mut ids: Vec<u32> = Vec::new();
 
@@ -616,25 +535,18 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     let mut r = BufReader::with_capacity(1 << 20, f);
     let mut pos = start;
     if start > 0 {
-        // Discard the partial line that the range to our left already owned.
+        // Discard the partial line that the worker to our left already owned.
         // `pos` must advance by exactly the bytes discarded: it is what the
         // `pos < end` test below measures against, so leaving it at `start`
-        // makes that boundary wrong by the discarded length and this range
+        // makes that boundary wrong by the discarded length and this worker
         // then claims lines that belong to the next one.
-        let mut prev = [0u8; 1];
-        let on_line_start = match r.seek(SeekFrom::Start(start - 1)) {
-            Ok(_) => matches!(r.read_exact(&mut prev), Ok(()) if prev[0] == b'\n'),
-            Err(_) => return Part::empty(nterms),
-        };
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
         if r.seek(SeekFrom::Start(start)).is_err() {
             return Part::empty(nterms);
         }
-        if !on_line_start {
-            let mut junk: Vec<u8> = Vec::with_capacity(512);
-            match r.read_until(b'\n', &mut junk) {
-                Ok(0) | Err(_) => return Part::empty(nterms),
-                Ok(k) => pos += k as u64,
-            }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return Part::empty(nterms),
+            Ok(k) => pos += k as u64,
         }
     }
 
@@ -698,39 +610,18 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     // Second pass: walk the term list in document order and drop each id into
     // its term's own run. Each run is filled in ascending document order because
     // the list is, which is what makes the merge a plain concatenation.
-    //
-    // `terms` is read once, front to back, and never again, so every block the
-    // walk has finished with is released here. That is what keeps the peak at
-    // the arena instead of the arena plus the whole list.
-    //
-    // A document's entries cross a block boundary about once in three thousand
-    // documents, so the ordinary case takes one sub-slice of one block and pays
-    // no block dispatch at all; only the crossing case walks block by block.
     let mut cur: Vec<u32> = offs.clone();
     let mut arena: Vec<u32> = vec![0; acc as usize];
+    let mut i = 0usize;
     for d in 0..ids.len() {
         let doc = ids[d];
-        let lo = starts[d] as usize;
         let hi = starts[d + 1] as usize;
-        if lo == hi {
-            continue;
+        while i < hi {
+            let t = terms[i] as usize;
+            arena[cur[t] as usize] = doc;
+            cur[t] += 1;
+            i += 1;
         }
-        let k = lo >> TBLK_LOG;
-        if k == (hi - 1) >> TBLK_LOG {
-            let base = k << TBLK_LOG;
-            for &t in &terms.block(k)[(lo - base)..(hi - base)] {
-                let t = t as usize;
-                arena[cur[t] as usize] = doc;
-                cur[t] += 1;
-            }
-        } else {
-            for i in lo..hi {
-                let t = terms.get(i) as usize;
-                arena[cur[t] as usize] = doc;
-                cur[t] += 1;
-            }
-        }
-        terms.release(hi);
     }
     drop(terms);
     Part { arena, offs }
@@ -743,17 +634,9 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
 /// 772 MB/s. That ratio is twelve, and it was twelve because we were using one
 /// core and they were using about twelve.
 ///
-/// Merging is a concatenation per term in part order. Each part's run is already
-/// ascending in document id and the parts come out in document order, so the
-/// concatenation is globally ascending with no sort and no dedupe.
-///
-/// The merge is deliberately part-at-a-time rather than term-at-a-time. The
-/// term-major order needs every part live for every term, which is what put the
-/// peak at `parts + final`; copying whole parts in turn into a final arena that
-/// is pre-sized in one allocation means only one part is live at a time and its
-/// memory goes back to the allocator as soon as it has been consumed. The writes
-/// land at scattered term offsets, but every word is written exactly once either
-/// way, so this costs a table walk and nothing else.
+/// Merging is a concatenation per term in worker order. Each worker's run is
+/// already ascending in document id and the ranges increase, so the concatenation
+/// comes out globally ascending with no sort and no dedupe.
 fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Postings> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
@@ -776,37 +659,17 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             .collect()
     });
 
-    // Every term's final run is its runs in every part concatenated, so its
-    // length is their sum; the prefix sum then turns the lengths into offsets.
-    let mut offs: Vec<u32> = vec![0u32; nterms + 1];
-    for p in &parts {
-        for t in 0..nterms {
-            offs[t] += p.offs[t + 1] - p.offs[t];
+    let total: usize = parts.iter().map(|p| p.arena.len()).sum();
+    let mut arena: Vec<u32> = Vec::with_capacity(total);
+    let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
+    for ti in 0..nterms {
+        offs.push(arena.len() as u32);
+        for p in &parts {
+            let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
+            arena.extend_from_slice(&p.arena[a..b]);
         }
     }
-    let mut acc = 0u32;
-    for t in 0..nterms {
-        let c = offs[t];
-        offs[t] = acc;
-        acc += c;
-    }
-    offs[nterms] = acc;
-
-    // Zeroed rather than just reserved: the writes are scattered, so the whole
-    // arena is touched regardless, and the allocator hands back zero pages for
-    // free instead of a memset over 85 MB.
-    let mut arena: Vec<u32> = vec![0u32; acc as usize];
-    let mut cur: Vec<u32> = offs.clone();
-    for p in parts {
-        for t in 0..nterms {
-            let (a, b) = (p.offs[t] as usize, p.offs[t + 1] as usize);
-            if a != b {
-                let d = cur[t] as usize;
-                arena[d..d + (b - a)].copy_from_slice(&p.arena[a..b]);
-                cur[t] = (d + (b - a)) as u32;
-            }
-        }
-    }
+    offs.push(arena.len() as u32);
     Ok(Postings { arena, offs })
 }
 
@@ -994,23 +857,13 @@ fn verify_range(
     let mut r = BufReader::with_capacity(1 << 18, f);
     let mut pos = start;
     if start > 0 {
-        // Same cut rule as `build_slice`, including the cut that lands exactly
-        // on a line start: nothing to drop there, and dropping anyway would
-        // silently lose that document's phrase hits.
-        let mut prev = [0u8; 1];
-        let on_line_start = match r.seek(SeekFrom::Start(start - 1)) {
-            Ok(_) => matches!(r.read_exact(&mut prev), Ok(()) if prev[0] == b'\n'),
-            Err(_) => return out,
-        };
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
         if r.seek(SeekFrom::Start(start)).is_err() {
             return out;
         }
-        if !on_line_start {
-            let mut junk: Vec<u8> = Vec::with_capacity(512);
-            match r.read_until(b'\n', &mut junk) {
-                Ok(0) | Err(_) => return out,
-                Ok(k) => pos += k as u64,
-            }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return out,
+            Ok(k) => pos += k as u64,
         }
     }
 
