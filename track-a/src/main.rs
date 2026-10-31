@@ -724,6 +724,7 @@ fn main() {
     // k-way merge was the only one of the two paying reallocation transients -- and
     // that cost 5.6 MB, a 12.7% increase, which cancelled its 3.9% time win exactly.
     let mut rows: Vec<Group> = Vec::with_capacity(iters.iter().map(|it| it.len()).sum());
+    let mut extra: Vec<Group> = Vec::with_capacity(iters.len());
     loop {
         // The key is COPIED out of each peek, which ends the borrow immediately --
         // `peek` takes `&mut self` and returns a reference tied to it, so holding
@@ -740,10 +741,21 @@ fn main() {
         }
         let Some(i) = best else { break };
         let mut row = iters[i].next().unwrap();
-        // Equal keys across any of the lists are one group.
+        // A group split across workers is extended once per contributing list, and
+        // the Vec DOUBLES each time -- which is where the recorded `latcap 4,671,552`
+        // against `lat 3,100,000` came from: a 50% over-allocation, about 6 MB, on
+        // the track's largest single term. Collecting the contributors first costs a
+        // reused scratch Vec and makes the extend exact. `extra` is hoisted out of
+        // the loop so it is allocated once, not 126,908 times.
+        extra.clear();
         for it in iters.iter_mut() {
             while matches!(it.peek(), Some(x) if x.key == row.key) {
-                let g = it.next().unwrap();
+                extra.push(it.next().unwrap());
+            }
+        }
+        if !extra.is_empty() {
+            row.latencies.reserve(extra.iter().map(|g| g.latencies.len()).sum());
+            for g in extra.drain(..) {
                 row.latencies.extend_from_slice(&g.latencies);
                 row.errors += g.errors;
             }
