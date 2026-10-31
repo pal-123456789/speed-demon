@@ -843,16 +843,16 @@ fn parse_range(
 //       anyway. Pinning the threshold low makes every large allocation its own mapping,
 //       and dropping it returns the pages immediately.
 //
-//   prctl(PR_SET_THP_DISABLE)  the scoring box backs part-written regions with whole
-//       2 MB transparent huge pages, so touching one page of a region can be charged at
-//       2 MB. Disabling THP stops that inflation.
+//   prctl(PR_SET_THP_DISABLE) would also help -- the box backs part-written regions with
+//       whole 2 MB transparent huge pages -- but it measured as a TIME regression when
+//       it was tried alongside the threshold change, so it is recorded here and not
+//       applied. The threshold alone is kept because it is where the memory win came
+//       from.
 //
-// Both are Linux-only; the other target gets an empty function so the local build is
-// unaffected.
+// Linux-only; the other target gets an empty function so the local build is unaffected.
 #[cfg(target_os = "linux")]
 extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
-    fn prctl(option: i32, ...) -> i32;
 }
 
 #[inline]
@@ -860,9 +860,7 @@ fn tune_allocator() {
     #[cfg(target_os = "linux")]
     unsafe {
         const M_MMAP_THRESHOLD: i32 = -3;
-        const PR_SET_THP_DISABLE: i32 = 41;
-        mallopt(M_MMAP_THRESHOLD, 1 << 16);
-        prctl(PR_SET_THP_DISABLE, 1u64, 0u64, 0u64, 0u64);
+        mallopt(M_MMAP_THRESHOLD, 1 << 20);
     }
 }
 
