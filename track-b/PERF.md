@@ -152,21 +152,29 @@ phrase verify            0.691 s       0.088 s     9.6%
 write                    0.914 s       0.230 s    25.2%
 ```
 
-**The measurement that surprised me, and it was wrong in my head until this run:** I had been
-saying this track was roughly 57% build and 43% query. It is **49.7% build, 25.2% write, and
-22.9% query**. The write phase is a quarter of the runtime, and I had never once looked at it.
+**What the lap labels do and do not mean, because I got this wrong once already.** I first read
+the last lap as "the write phase is 25.2% of the track" and started planning a formatter change
+on the strength of it. Reading the code back: that lap brackets the thread scope that calls
+`eval_bool` for every BOOL query **as well as** `format_result` and the actual `write_all`. So
+`write` here means **evaluate + format + write**, and the evaluation is the dominant part of it
+-- 1,999 queries against posting lists, not 1,999 integer conversions.
 
-That matters because the fix is already written down elsewhere in this repository. The output
-here is one integer per line plus separators, and it is formatted the straightforward way.
-Track A had exactly the same shape, and compacting its integer formatter measured **9.5% off A's
-wall time** for a net gain of 0.15 points after the source-size cost. On B's numbers a
-comparable win would be about 10% of the write phase's 25%, which is small -- but B's write
-phase is four times larger as a share than A's was, so the same technique is worth roughly
-four times as much here.
+| lap | brackets |
+|---|---|
+| `parse queries` | reading and parsing `queries.txt` into the query list |
+| `build index` | the parallel tokenise and the posting scatter, plus the offset array |
+| `phrase candidates` | rarest-term anchor selection for the phrase queries |
+| `phrase verify` | one sequential positional scan over all 254 MB of `docs.txt` |
+| `write` | **BOOL evaluation, formatting, and the write -- all three** |
 
-The build's 49.7% is dominated by the token probe over the 300 KB term table, which is why the
-query phase and the memory peak both matter less than they look: B's measured 209.7 MB peak is real, but
-a third of this track's wall time is spent after the search is finished.
+**The measurement that did surprise me, and it stands:** I had been saying this track was
+roughly 57% build and 43% query. It is **49.7% build and 50.3% everything after it**. The
+phrase pass alone is 9.6%, and it is deliberately NOT parallelised -- twelve workers would read
+3 GB of `docs.txt` instead of 254 MB, so splitting it by query is strictly worse.
+
+The build's 49.7% is dominated by the token probe over the 300 KB term table. B's measured
+209.7 MB peak is real and so is the 5.4x memory ratio against the leader, but **half this
+track's wall time is spent after the index exists**, which is not where I had been looking.
 
 ---
 
