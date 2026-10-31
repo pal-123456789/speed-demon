@@ -67,34 +67,48 @@ per-thread set and got 15.6× on memory; Track A's own interning change removed 
 
 ### The change that would remove touches 3 to 6
 
-**Keep the interner, drop the group index, and append instead of looking up.**
-Per line, after the single interner probe, append a fixed-width record to a flat
-buffer — a *sequential* write:
+**First, a wrong turn worth recording, because I had it half-written.** The key
+packs as `(hour_ordinal << 32) | endpoint_id` with endpoint ids under 1842, so I
+spent a while designing a direct-indexed table in place of the group hash map — no
+hashing, one array access, and it would have fitted in L2. That design is
+impossible, and `hour_ord` says why:
+
+```rust
+fn hour_ord(h: &[u8]) -> u32 {
+    let d = |i: usize| h[i].wrapping_sub(b'0') as u32;
+    ((y * 100 + mo) * 100 + dy) * 24 + hh
+}
+```
+
+The ordinal is the **dense date-plus-hour**, not a 0..71 index. For `2026-10-30T18`
+it returns **486,264,738**. Monotone — which is exactly what the sort needs — but so
+sparse that indexing by it would want a table of 10^12 entries. **The hash map is
+the correct structure here, and no repacking makes it otherwise.**
+
+### So: keep the interner, drop the group index, append instead of looking up
+
+Per line, after the single interner probe (into ~1,842 cache-resident entries),
+append a fixed-width record to a flat buffer — a **sequential** write:
 
 ```
-record:  u32 packed_key   (hour ordinal << 11 | endpoint id, endpoint ids having
-                           been renumbered into sorted-byte order, so integer
-                           order IS the required (hour, endpoint) byte order)
-       + u32 latency
-       = 8 bytes per line
+record:  u64 key (hour_ordinal << 32 | endpoint_id)  +  u32 latency   = 12 bytes
+       or  u32 packed (ordinal_rank << 11 | endpoint_id) + u32 latency =  8 bytes
 ```
 
-3,100,000 lines × 8 bytes = **24.8 MB total across twelve workers, about 2 MB
-each** — L2/L3 resident, and comparable to the ~20 MB the current group tables and
-latency vectors occupy. Then each worker sorts its own records by `packed_key`
-(258 k records, ~18 comparisons each) and runs the existing order-statistic
-selection per run. Sorting 258 k keys per worker is a few milliseconds of work
-that is already spread over twelve cores, and sort comparisons on `u32` are far
-cheaper than ProbeHash plus a scattered `Vec` access.
+12 bytes × 3,100,000 lines = **37 MB total across twelve workers, about 3 MB each**
+— L2/L3 resident, and in the same range as the ~20 MB the current group tables and
+latency vectors occupy. Each worker then sorts its own ~258 k records by key and
+runs the existing order-statistic selection over each run of equal keys. Sorting
+258 k `u64`s per worker is a few milliseconds, spread over twelve cores, and an
+integer comparison is far cheaper than a hash probe plus a scattered `Vec` access.
 
-The endpoint interner stays because it is what makes the key small, and it is one
-probe into a table of ~1,842 entries — cache-resident — rather than the hundreds of
-thousands the group index grows to within a worker.
+If the 8-byte form is used, the ordinal must first be **ranked** (dense 0..k, in
+first-seen order) so it fits in 21 bits; the ranking already exists for hours in
+`Sink::hours` and is monotone, so the packed order still equals byte order.
 
 **Not implemented.** It is an ~80-line restructuring of `take`, `scan`, `merge` and
 the per-worker sort, and it needs a measured before/after rather than a projection.
-The numbers above are what the change is worth if the touch count is the cause,
-which is the hypothesis and not yet a result.
+What is measured is the touch count; what is proposed is a hypothesis.
 
 ## Ours versus the leaders
 
