@@ -174,14 +174,29 @@ fn hour_ord(h: &[u8]) -> u32 {
     ((y * 100 + mo) * 100 + dy) * 24 + hh
 }
 
-/// One line, in eight bytes: `lat` is the latency, `key` is the endpoint id
-/// with the 5xx flag in its low bit. Records are appended in arrival order and
-/// sorted once per hour, so a group is a contiguous run of the block and the
-/// scan never has to look one up.
+/// One line, in FOUR bytes: `packed = lat << KEY_BITS | key`, where `key` is the
+/// endpoint id with the 5xx flag in its low bit.
+///
+/// The two fields share one word because latency is microseconds and `key` is
+/// small, so the pair fits in 32 bits -- halving the record store from 24.8 MB to
+/// 12.4 MB, which is most of this track's peak. Sorting is by the low bits, so a
+/// group is still a contiguous run and the scan still never looks one up.
+///
+/// **A record that does not fit is NOT dropped and NOT truncated.** Neither the
+/// endpoint count nor the latency range is guaranteed by the spec, so both are
+/// checked at run time and anything too large goes to `Sink::big` instead. That
+/// is what makes this exact for any input rather than only for seed 1 -- an
+/// unguarded shift here would silently corrupt the key.
 struct Rec {
-    key: u32,
-    lat: u32,
+    packed: u32,
 }
+
+/// Bits 0..KEY_BITS of a packed record hold `key`; everything above holds `lat`.
+/// `key = (id << 1) | err`, so this is a mask over endpoint ids and the flag.
+const KEY_BITS: u32 = 12;
+const KEY_MASK: u32 = (1 << KEY_BITS) - 1;
+/// The largest latency that can share a word with the key.
+const LAT_MAX: u32 = 1 << (32 - KEY_BITS);
 
 /// The per-worker scan state, in one struct so the line parser can be a method.
 struct Sink {
@@ -196,6 +211,11 @@ struct Sink {
     /// only 72 distinct hours, and one block per run would multiply the groups
     /// by the number of runs.
     recs: Vec<Vec<Rec>>,
+    /// Records a packed word cannot hold: `(hour rank, key, latency)`. Bounded by
+    /// how many lines have an endpoint id past `KEY_MASK` or a latency at or above
+    /// `LAT_MAX`, which on this corpus is a handful -- but it is the reason the
+    /// packing is exact for any input rather than only for this one.
+    big: Vec<(u32, u32, u32)>,
     /// Distinct hours, each with the 13 bytes it was parsed from.
     hours: Vec<(u32, [u8; 13])>,
     hour: [u8; 13],
@@ -268,10 +288,14 @@ impl Sink {
 
         // The whole group lookup, replaced by one sequential append. The hour
         // is not in the record: it is the block the record lands in.
-        self.recs[self.hrank as usize].push(Rec {
-            key: (id << 1) | err,
-            lat: latency,
-        });
+        let key = (id << 1) | err;
+        if key <= KEY_MASK && latency < LAT_MAX {
+            self.recs[self.hrank as usize].push(Rec {
+                packed: (latency << KEY_BITS) | key,
+            });
+        } else {
+            self.big.push((self.hrank, key, latency));
+        }
     }
 
     /// Sort one hour's records and turn each run of equal keys into a group.
@@ -280,20 +304,18 @@ impl Sink {
     /// most two adjacent runs -- the clean lines and the errors -- and the merge
     /// adds them back together, because it folds every run of equal keys.
     fn flush(&mut self, hrank: usize, recs: &mut Vec<Rec>) {
-        if recs.is_empty() {
-            return;
-        }
-        recs.sort_unstable_by_key(|r| r.key);
         let hour = (self.hours[hrank].0 as u64) << 32;
+        let first = self.groups.len();
+        recs.sort_unstable_by_key(|r| r.packed & KEY_MASK);
         let mut i = 0;
         while i < recs.len() {
-            let key = recs[i].key;
+            let key = recs[i].packed & KEY_MASK;
             let mut j = i + 1;
-            while j < recs.len() && recs[j].key == key {
+            while j < recs.len() && (recs[j].packed & KEY_MASK) == key {
                 j += 1;
             }
             let mut latencies = Vec::with_capacity(j - i);
-            latencies.extend(recs[i..j].iter().map(|r| r.lat));
+            latencies.extend(recs[i..j].iter().map(|r| r.packed >> KEY_BITS));
             self.groups.push(Group {
                 key: hour | (key >> 1) as u64,
                 latencies,
@@ -304,6 +326,34 @@ impl Sink {
             });
             i = j;
         }
+
+        // Fold in what a packed word could not hold. A key appearing only here has
+        // no group yet, so this may create one -- and because `push` appends, the
+        // new group lands out of key order. Re-sorting this hour's slice is what
+        // keeps the merge correct; the earlier code could rely on the block being
+        // sorted because every record was in it.
+        for idx in 0..self.big.len() {
+            let (h, key, lat) = self.big[idx];
+            if h as usize != hrank {
+                continue;
+            }
+            let gk = hour | (key >> 1) as u64;
+            match self.groups[first..].iter_mut().find(|g| g.key == gk) {
+                Some(g) => {
+                    g.latencies.push(lat);
+                    g.errors += key & 1;
+                }
+                None => self.groups.push(Group {
+                    key: gk,
+                    latencies: vec![lat],
+                    errors: key & 1,
+                    p50: 0,
+                    p95: 0,
+                    p99: 0,
+                }),
+            }
+        }
+        self.groups[first..].sort_unstable_by_key(|g| g.key);
     }
 }
 
@@ -329,6 +379,7 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
         names: Vec::with_capacity(2048),
         groups: Vec::with_capacity(est),
         recs: Vec::new(),
+        big: Vec::new(),
         hours: Vec::new(),
         hour: [0xff; 13],
         ord: 0,
