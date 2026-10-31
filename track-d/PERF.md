@@ -184,3 +184,75 @@ phase split alone, and the search-size counter refuted it. The phase split tells
 phase costs the time; it does not tell you whether that phase is doing too much WORK or
 doing the right work too SLOWLY. Those need different counters, and assuming the first cost
 me a day on Track C.
+
+## 5. Determinism
+
+* Distances are integers. No float ever enters a shortest path.
+* If the output contract asks for a path rather than a distance, the tie-break
+  is fixed explicitly and exercised by a diamond-graph test suite, since a
+  graph with equal-length paths is where an unspecified tie-break produces a
+  different answer on a different run.
+* Query results are written into per-query slots and emitted in query order.
+* Any preprocessing variant is validated against the bidirectional baseline
+  on every graph in the fixture set; one mismatch removes it.
+
+---
+
+## 6. Memory
+
+CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
+the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
+Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
+42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
+fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
+workers. All of that fits inside the 8 GB ceiling with room to spare, which is
+what makes the 6-8 landmark range worth sweeping rather than dismissing.
+
+(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
+891 MB at 32". That was the superseded design: `u64` distances, two copies, no
+landmark cap. The spec of record fixes `u32` with per-landmark offsets and
+k = 6 to 8, so the old arithmetic described a structure nobody is building.)
+
+The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
+rather than a slowdown, so a preprocessing variant that runs out of memory
+is a failed run, not a slow one.
+
+---
+
+## 7. What I would do with another 24 hours
+
+* Hierarchical hub labelling or a transit-node routing scheme, both of which
+  beat CH on road-like graphs by a wide margin — this graph's structure
+  decides whether they are worth the time.
+* A proper `Delta-stepping` implementation for the case where the weights
+  turn out to be small and bounded, which would change the whole algorithm
+  choice.
+* Cache-block the CSR for the 24 MiB L3: the working set for a single search
+  is much smaller than the graph, and a blocked layout could matter more than
+  the search algorithm.
+* Measure the preprocessing break-even empirically instead of analytically,
+  by finding where the preprocessing stops paying for itself.
+
+---
+
+## 8. Reproducing these numbers
+
+```bash
+# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
+# on the dev host, so advertising it here produced commands that could not run).
+# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
+
+# 5 runs, discard the highest and lowest, mean of the middle three
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track D -Runs 5
+
+# the four gates: correctness, speed floor, timeout, sandbox
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track D
+
+# the full lockdown checklist
+powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track D
+
+# or, with a Rust toolchain and no PowerShell, the harness does the same work
+cargo run --release --offline --manifest-path verification/harness/Cargo.toml -- bench --track D --no-docker
+```
+
+Commit hash of this measurement: `_(fill)`.
