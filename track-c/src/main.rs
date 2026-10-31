@@ -600,7 +600,11 @@ fn first_boundary(path: &str, from: u64, mut parity: u8, len: u64) -> std::io::R
 /// need to know parity at an arbitrary offset. Twelve short forward scans then
 /// convert the split points into real boundaries.
 fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
-    const STEP: usize = 1 << 20;
+    // 256 KiB, not 1 MiB: every thread holds one buffer, so STEP is multiplied by
+    // twelve on the M axis. At 1 MiB that was 12 MB of buffers and the board charged
+    // this track 20 MB against 15 for the serial version -- the parallelism bought
+    // time and lost memory, and the buffer is where it went.
+    const STEP: usize = 1 << 18;
 
     let len = std::fs::metadata(path)?.len();
     let nchunk = (((len as usize).saturating_add(STEP - 1)) / STEP).max(1);
