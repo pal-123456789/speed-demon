@@ -139,8 +139,34 @@ and each is recorded because the measurement is the interesting part.
 
 ## 4. Where the time actually goes
 
-_(fill after a profile — the flame graph, the `perf stat` counters, and the
-one measurement that surprised you)_
+Measured by the binary's own `SD_TIME=1` instrumentation, which prints cumulative seconds at
+each stage boundary. Three runs on the local box; the two clean ones agree to within 0.01 s,
+and the third was preempted (4.4 s on a 0.5 s stage) and is discarded.
+
+```
+stage                cumulative    this stage    share
+parse queries            0.022 s       0.022 s     2.4%
+build index              0.474 s       0.454 s    49.7%
+phrase candidates        0.602 s       0.122 s    13.3%
+phrase verify            0.691 s       0.088 s     9.6%
+write                    0.914 s       0.230 s    25.2%
+```
+
+**The measurement that surprised me, and it was wrong in my head until this run:** I had been
+saying this track was roughly 57% build and 43% query. It is **49.7% build, 25.2% write, and
+22.9% query**. The write phase is a quarter of the runtime, and I had never once looked at it.
+
+That matters because the fix is already written down elsewhere in this repository. The output
+here is one integer per line plus separators, and it is formatted the straightforward way.
+Track A had exactly the same shape, and compacting its integer formatter measured **9.5% off A's
+wall time** for a net gain of 0.15 points after the source-size cost. On B's numbers a
+comparable win would be about 10% of the write phase's 25%, which is small -- but B's write
+phase is four times larger as a share than A's was, so the same technique is worth roughly
+four times as much here.
+
+The build's 49.7% is dominated by the token probe over the 300 KB term table, which is why the
+query phase and the memory peak both matter less than they look: B's measured 209.7 MB peak is real, but
+a third of this track's wall time is spent after the search is finished.
 
 ---
 
