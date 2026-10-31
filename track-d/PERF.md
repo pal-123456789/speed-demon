@@ -150,82 +150,31 @@ missed it is that I was comparing track POINTS instead of reading the phase spli
 same mistake cost me a day on Track C, where the interner is 53.9% and the parser I had
 been optimising is 8.5%.
 
-**What this points at:** section 2b lists ALT landmarks and a bounded sweep, and neither
-was built. Landmark lower bounds are exactly the tool for cutting the number of settled
-nodes, and they are the one thing the leader must be doing to run a 1.74 M-node graph at
-61 us per query. The cost to watch is the M axis: a landmark table is derived as k x 4
-bytes per node -- about 7 MB per landmark, so this track is at 77 MB against a leader at 68 MB.
+**And then the counters, which corrected the conclusion above.** Instrumenting the search
+itself gives, over 1,992 queries:
 
----
-
-## 5. Determinism
-
-* Distances are integers. No float ever enters a shortest path.
-* If the output contract asks for a path rather than a distance, the tie-break
-  is fixed explicitly and exercised by a diamond-graph test suite, since a
-  graph with equal-length paths is where an unspecified tie-break produces a
-  different answer on a different run.
-* Query results are written into per-query slots and emitted in query order.
-* Any preprocessing variant is validated against the bidirectional baseline
-  on every graph in the fixture set; one mismatch removes it.
-
----
-
-## 6. Memory
-
-CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
-the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
-Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
-42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
-fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
-workers. All of that fits inside the 8 GB ceiling with room to spare, which is
-what makes the 6-8 landmark range worth sweeping rather than dismissing.
-
-(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
-891 MB at 32". That was the superseded design: `u64` distances, two copies, no
-landmark cap. The spec of record fixes `u32` with per-landmark offsets and
-k = 6 to 8, so the old arithmetic described a structure nobody is building.)
-
-The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
-rather than a slowdown, so a preprocessing variant that runs out of memory
-is a failed run, not a slow one.
-
----
-
-## 7. What I would do with another 24 hours
-
-* Hierarchical hub labelling or a transit-node routing scheme, both of which
-  beat CH on road-like graphs by a wide margin — this graph's structure
-  decides whether they are worth the time.
-* A proper `Delta-stepping` implementation for the case where the weights
-  turn out to be small and bounded, which would change the whole algorithm
-  choice.
-* Cache-block the CSR for the 24 MiB L3: the working set for a single search
-  is much smaller than the graph, and a blocked layout could matter more than
-  the search algorithm.
-* Measure the preprocessing break-even empirically instead of analytically,
-  by finding where the preprocessing stops paying for itself.
-
----
-
-## 8. Reproducing these numbers
-
-```bash
-# Windows PowerShell 5.1 (present on every Windows box; `pwsh` is not installed
-# on the dev host, so advertising it here produced commands that could not run).
-# A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
-
-# 5 runs, discard the highest and lowest, mean of the middle three
-powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track D -Runs 5
-
-# the four gates: correctness, speed floor, timeout, sandbox
-powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track D
-
-# the full lockdown checklist
-powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -Track D
-
-# or, with a Rust toolchain and no PowerShell, the harness does the same work
-cargo run --release --offline --manifest-path verification/harness/Cargo.toml -- bench --track D --no-docker
+```
+settles   23,227,091   ->  11,660 per query   = 0.67% of the 1,740,512 nodes
+relaxes  217,505,623   -> 109,189 per query   = 2.2% of the 5,000,000 edges
 ```
 
-Commit hash of this measurement: `_(fill)`.
+So the early termination is ALREADY doing its job: each query settles 0.67% of the graph.
+That prices the two candidate attacks very differently from how I had them:
+
+  ALT landmarks               the search is already 0.67% of the graph -> at most about 2x
+  per-relax data structures   derived 40 ns per relaxation against the leader's ~6.7 ns -> up to 6x
+
+8.8 core-seconds for 217.5 M relaxations is 40 ns each, which is a hash-table probe with
+cache misses rather than an array access. `Labels` is a compact open-addressed table
+*because* a flat `dist[]` array is 14 MB per worker -- but only about 11,660 labels are live
+at once, so the table is TINY and cache-resident: its cost is the probe, not the footprint.
+
+**So the attack is the label and heap data structures, not the search size.** Halving the
+per-relax cost takes the query phase from 1.98 s to about 1.0 s locally, which is the x1.414
+on the T factor that makes this track the third counting one.
+
+**The general lesson, now paid for twice in one session:** I proposed ALT landmarks from the
+phase split alone, and the search-size counter refuted it. The phase split tells you WHICH
+phase costs the time; it does not tell you whether that phase is doing too much WORK or
+doing the right work too SLOWLY. Those need different counters, and assuming the first cost
+me a day on Track C.
