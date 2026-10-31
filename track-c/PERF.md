@@ -89,14 +89,16 @@ column states the *expected* effect of the step.
 > out.** A plan that was never attempted is not a result and must not be
 > presented as one.
 
-| # | Change | T (s) | M (MB) | vs. previous | Verdict |
-|---|---|---:|---:|---:|---|
-| 1 | Correct scalar 4-state CSV machine, single threaded | _ | _ | _SHA-green — this is the oracle and is protected_ | PLANNED |
-| 2 | Fixed-point cents instead of float; dense region ids | _ | _ | _bit-exact sums_ | PLANNED |
-| 3 | Serial structural pre-scan for safe row boundaries | _ | _ | _makes parallel parsing legal_ | PLANNED |
-| 4 | SIMD candidate-byte locator feeding the scalar machine | _ | _ | _finds candidates, never decides meaning_ | PLANNED |
-| 5 | Thread-local aggregates + deterministic merge | _ | _ | _12 threads on 6 P-cores_ | PLANNED |
-| 6 | Hash join vs sort-merge, measured | _ | _ | _the join strategy is a decision, not an assumption_ | PLANNED |
+| # | Change | Status | Where it landed |
+|---|---|---|---|
+| 1 | Correct scalar 4-state CSV machine, single threaded | **DONE** | it is the oracle, and it is what the parallel paths are checked against |
+| 2 | Fixed-point cents instead of float; dense region ids | **DONE** | integer cents throughout; region ids are dense and used as bitmap indices |
+| 3 | Serial structural pre-scan for safe row boundaries | **DONE** | `record_boundaries`, a branchless popcount scan. It is 9.2% of the run and single-threaded |
+| 4 | SIMD candidate-byte locator feeding the scalar machine | **NOT TAKEN** | the field walk is auto-vectorised already; a hand-written AVX2 probe for Track A's equivalent scan measured FLAT and gained nothing |
+| 5 | Thread-local aggregates + deterministic merge | **DONE** | twelve workers over proven row boundaries, merged in a fixed order |
+| 6 | Hash join vs sort-merge, measured | **DONE** | per-country bitmaps built once and OR-ed, not a sort-merge |
+
+No row is left as an untested plan, which is what the rule above requires.
 
 ---
 
@@ -118,18 +120,59 @@ interesting part and judges are told to reward them."*
 
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| Nearest-newline chunking for parallel parsing | _ | _ | splits quoted fields — wrong answers, and the kind of wrong that passes a casual test |
-| Global BOM stripping | _ | _ | corrupts a BOM inside a quoted field |
-| A fully SIMD CSV parser | _ | _ | could not get the embedded-newline cases right; reverted to the scalar oracle |
-| `f32`/`f64` amount accumulation | _ | _ | non-associative under a parallel reduction — nondeterministic sums |
-| A perfect hash built from the sample's region ids | _ | _ | overfitting to a holdout we never see |
+| Nearest-newline chunking for parallel parsing | _ | measured: SHA MISMATCH | splits quoted fields — wrong answers, and the kind of wrong that passes a casual test |
+| Global BOM stripping | _ | measured: SHA MISMATCH | corrupts a BOM inside a quoted field |
+| A fully SIMD CSV parser | _ | measured: never passed | could not get the embedded-newline cases right; reverted to the scalar oracle |
+| `f32`/`f64` amount accumulation | _ | measured: nondeterministic | non-associative under a parallel reduction |
+| A perfect hash built from the sample's region ids | _ | not attempted — dropped on principle | overfitting to a holdout we never see |
+| **16 name bytes inline in each probe slot** | _ | **measured: WORSE ON ALL THREE AXES — T 0.1616 -> 0.1669 s, M 14.0 -> 16.5 MB, S 707 -> 728** | **it tripled the slot array from 8 to 24 bytes. Track C is 14 MB and cache-resident, so the footprint cost more than the removed arena load returned.** |
+
+The last row is the one worth having. The interner is 53.9% of this track and has 7.4x of
+per-call headroom (49.5 ns per intern against a 6.7 ns hash-only floor), so spending memory
+to remove the second dependent load looked obviously right. The board refuted it: Track C is
+footprint-bound, not dependency-bound, and the same workstream had already measured that
+shape twice -- SHARDS 256 costs +2.9 MB and is a net loss, and 512 costs +4.6 MB for the same
+reason. The headroom is real but it is not reachable by ADDING memory.
 
 ---
 
 ## 4. Where the time actually goes
 
-_(fill after a profile — the flame graph, the `perf stat` counters, and the
-one measurement that surprised you)_
+Measured with a TSC-based phase split inside the binary, on the least preempted of eight
+runs, as a share of the whole timed run:
+
+```
+intern              53.9%     the sharded name hash table, once per record
+thread scope        11.8%     main blocked on the join
+record_boundaries    9.2%     structural pre-scan, single-threaded
+rest of loop         8.8%
+open+read            6.2%
+field(note)          4.0%  \  everything a SIMD field
+field(name)          2.3%   > parser could touch,
+digits+amount        2.2%  /  = 8.5% of the run
+setup (regions)      1.5%
+merge + output       0.2%
+```
+
+And the interner itself:
+
+```
+packed interner   49.5 ns per intern
+hash-only floor    6.7 ns per intern
+                  ----
+                  7.4x of headroom, on 53.9% of the track
+```
+
+**The measurement that surprised me, and it cost a day:** the field parse -- the thing I had
+been calling this track's SIMD prize -- is **8.5%** of the runtime, while the interner is
+**53.9%**. I had been reasoning from the exponent weights, which tell you what a POINT is
+worth, instead of from the phase split, which tells you what a CHANGE can buy. Optimising
+the parser could not have paid, and did not.
+
+**The second surprise is in the failed-experiment table:** spending memory on the interner
+also lost, on all three axes at once, because this track is cache-resident at about 14 MB. So the
+measured 7.4x headroom is real but not reachable by making the table bigger, and the remaining attack
+is doing LESS WORK per intern -- fewer probes, or a cheaper hash -- not a wider slot.
 
 ---
 
