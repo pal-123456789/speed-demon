@@ -14,9 +14,9 @@
 //!   (intersection / union / difference).  Galloping search is used whenever
 //!   one side is much smaller than the other.
 //! * PHRASE: intersect the terms' id lists (rarest first) for candidates,
-//!   collect the `(document, phrase)` pairs, and verify them in a second
-//!   sequential pass over `docs.txt` â€” the pairs are sorted by document id,
-//!   so the file is read front to back with no random access at all.
+//!   collect the `(document, phrase)` pairs, and verify them in a second pass
+//!   over `docs.txt` -- split across the same byte ranges as the build, so the
+//!   pairs' ascending document order is preserved without a sort.
 //!
 //! Tokenisation is exactly `re.findall(rb"[a-z0-9]+", text.lower())` on bytes:
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
@@ -367,14 +367,7 @@ impl Part {
 }
 
 #[inline]
-fn index_text(
-    text: &[u8],
-    tt: &TermTable,
-    terms: &mut Vec<u32>,
-    count: &mut [u32],
-    stamp: &mut [u32],
-    doc: u32,
-) {
+fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u64], doc: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -387,11 +380,14 @@ fn index_text(
         }
         if i > s {
             if let Some(t) = tt.get(&text[s..i]) {
-                let ti = t as usize;
-                if stamp[ti] != doc {
-                    stamp[ti] = doc;
+                // High half: this worker's per-document stamp.  Low half: the
+                // term's running count.  Fusing them makes the dedupe test and
+                // the count update one random access instead of two, and two
+                // separate arrays made this the most expensive line in the build.
+                let e = &mut nslot[t as usize];
+                if (*e >> 32) as u32 != doc {
+                    *e = ((doc as u64) << 32) | (*e as u32).wrapping_add(1) as u64;
                     terms.push(t);
-                    count[ti] += 1;
                 }
             }
         }
@@ -415,12 +411,10 @@ fn index_text(
 ///
 /// The pass is a counting sort over the doc-ordered term-id list. `starts` holds
 /// the entry index at which each document begins, so the scatter pass recovers
-/// the document id of every entry without storing one per entry: 115 MB of term
-/// ids instead of 230 MB of pairs.
+/// the document id of every entry without storing one per entry: 89 MB of term
+/// ids instead of 178 MB of pairs.
 fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Part {
-    // Counts first, then the prefix sum turns them into offsets in place.
-    let mut offs: Vec<u32> = vec![0; nterms + 1];
-    let mut stamp: Vec<u32> = vec![u32::MAX; nterms];
+    let mut nslot: Vec<u64> = vec![0xffff_ffff_0000_0000u64; nterms];
     // The corpus yields roughly one posting per nine bytes, and the reserve is
     // what keeps the doubling memcpy out of the token loop.
     let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
@@ -479,10 +473,14 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         ids.push(id);
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, &mut terms, &mut offs, &mut stamp, id);
+        index_text(text, tt, &mut terms, &mut nslot, id);
     }
     starts.push(terms.len() as u32);
 
+    // The low half of each slot is the term's df; the prefix sum turns the
+    // counts into offsets in place.
+    let mut offs: Vec<u32> = nslot.iter().map(|e| *e as u32).collect();
+    offs.push(0);
     let mut acc = 0u32;
     for t in 0..nterms {
         let c = offs[t];
@@ -717,9 +715,104 @@ fn spans_contain(text: &[u8], spans: &[(u32, u32)], terms: &[&[u8]]) -> bool {
     false
 }
 
-/// Second pass: walk `docs.txt` front to back and verify every
-/// `(document, phrase)` pair.  `pairs` is sorted by document id, so this never
-/// seeks; it stops as soon as the last pair has been looked at.
+/// Verify the `(document, phrase)` pairs that fall inside one byte range of
+/// `docs.txt`, returning the hits as `(query << 32) | document`.
+///
+/// The range rule is `build_range`'s: a line belongs to the worker whose range
+/// holds its first byte, and the straddling line is discarded here because the
+/// worker to the left already owned it.  Candidates are only looked for on the
+/// documents the caller asked about, so the corpus is still read front to back
+/// with no seeks inside the range.
+fn verify_range(
+    path: &Path,
+    pairs: &[u64],
+    queries: &[Query],
+    tt: &TermTable,
+    start: u64,
+    end: u64,
+) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return out,
+    };
+    let mut r = BufReader::with_capacity(1 << 18, f);
+    let mut pos = start;
+    if start > 0 {
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
+        if r.seek(SeekFrom::Start(start)).is_err() {
+            return out;
+        }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return out,
+            Ok(k) => pos += k as u64,
+        }
+    }
+
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
+    let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
+    let mut pi = 0usize;
+    loop {
+        if pi >= pairs.len() {
+            break;
+        }
+        line.clear();
+        let n = match r.read_until(b'\n', &mut line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 || pos >= end {
+            break;
+        }
+        pos += n as u64;
+        let mut stop = n;
+        if line[stop - 1] == b'\n' {
+            stop -= 1;
+        }
+        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
+            Some(t) => (parse_u32(&line[..t]), t + 1),
+            None => continue,
+        };
+        // `pairs` is sorted by document id, and the ids ascend with the byte
+        // offset, so this cursor only ever moves forward.
+        while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
+            pi += 1;
+        }
+        if pi >= pairs.len() {
+            break;
+        }
+        if (pairs[pi] >> 32) as u32 != id {
+            continue;
+        }
+        let text = &mut line[tstart..stop];
+        ascii_lower_in_place(text);
+        tokenize_spans(text, &mut spans);
+        loop {
+            let qi = (pairs[pi] & 0xffff_ffff) as usize;
+            if let Query::Phrase(ts) = &queries[qi] {
+                terms.clear();
+                terms.extend(ts.iter().map(|&t| tt.key(t)));
+                if spans_contain(text, &spans, &terms) {
+                    out.push(((qi as u64) << 32) | id as u64);
+                }
+            }
+            pi += 1;
+            if pi >= pairs.len() || (pairs[pi] >> 32) as u32 != id {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Second pass: verify every `(document, phrase)` pair.
+///
+/// This used to be the one serial phase left: 214k candidate pairs spread over
+/// 249,998 documents, so it read all 254 MB and tokenised 86% of the corpus on
+/// one core.  The byte ranges are disjoint and their document ids increase, so
+/// the per-worker hit lists concatenate into the ascending per-query id list the
+/// writer needs, in worker order, with no sort and no shared state.
 fn verify_phrases(
     path: &PathBuf,
     pairs: &[u64],
@@ -730,56 +823,28 @@ fn verify_phrases(
     if pairs.is_empty() {
         return Ok(());
     }
-    let f = File::open(path)?;
-    let mut r = BufReader::with_capacity(1 << 20, f);
-    let mut line: Vec<u8> = Vec::with_capacity(2048);
-    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
-    let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
-    let mut pi = 0usize;
-    let mut doc: u32 = 0;
-    loop {
-        if pi >= pairs.len() {
-            break;
+    let size = fs::metadata(path)?.len();
+    if size == 0 {
+        return Ok(());
+    }
+    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
+    let parts: Vec<Vec<u64>> = thread::scope(|s| {
+        let mut handles = Vec::with_capacity(nworkers);
+        for i in 0..nworkers {
+            let (a, b) = (
+                size * i as u64 / nworkers as u64,
+                size * (i as u64 + 1) / nworkers as u64,
+            );
+            handles.push(s.spawn(move || verify_range(path, pairs, queries, tt, a, b)));
         }
-        line.clear();
-        let n = r.read_until(b'\n', &mut line)?;
-        if n == 0 {
-            break;
-        }
-        let mut end = n;
-        if line[end - 1] == b'\n' {
-            end -= 1;
-        }
-        let (id, tstart) = match line[..end].iter().position(|&b| b == b'\t') {
-            Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => (doc, end),
-        };
-        doc += 1;
-        while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
-            pi += 1;
-        }
-        if pi >= pairs.len() {
-            break;
-        }
-        if (pairs[pi] >> 32) as u32 != id {
-            continue;
-        }
-        let text = &mut line[tstart..end];
-        ascii_lower_in_place(text);
-        tokenize_spans(text, &mut spans);
-        loop {
-            let qi = (pairs[pi] & 0xffff_ffff) as usize;
-            if let Query::Phrase(ts) = &queries[qi] {
-                terms.clear();
-                terms.extend(ts.iter().map(|&t| tt.key(t)));
-                if spans_contain(text, &spans, &terms) {
-                    hits[qi].push(id);
-                }
-            }
-            pi += 1;
-            if pi >= pairs.len() || (pairs[pi] >> 32) as u32 != id {
-                break;
-            }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+    for p in &parts {
+        for &e in p {
+            hits[(e >> 32) as usize].push(e as u32);
         }
     }
     Ok(())
