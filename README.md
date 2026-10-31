@@ -200,9 +200,11 @@ K = (T_ref/T)^0.50 × (M_ref/M)^0.20 × (S_ref/S)^0.15 × (D_ref/D)^0.15
 Speed score = `50 × log10(K)`, clamped to 0–100: K = 10 is half marks and
 K = 100 is full marks.
 
-**Gates (three):** correctness (SHA-256 match), the timeout (10× the reference
-time), and the sandbox (no network, read-only dataset, one output file).
-The speed floor gate is gone.
+**Gates (three):** correctness (SHA-256 match), the timeout, and the sandbox
+(no network, read-only dataset, one output file). The speed floor gate is gone.
+The practice board enforces `timeout_factor = 3.0` — three times the reference
+time. Every one of our tracks sits two to three orders of magnitude inside it:
+Track A's worst recorded run is 0.126 s against a 32.05 s reference.
 
 **Overall title:** the geometric mean of your best three track totals, from
 three or more tracks entered. Ties on the final total are broken by raw K, then

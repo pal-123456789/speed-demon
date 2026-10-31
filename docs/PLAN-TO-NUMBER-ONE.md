@@ -80,9 +80,36 @@ B  0.551 -> 0.148 s   3.7x
 ```
 
 **What those numbers mean physically.** The leader's A does 238 MB in 18 ms —
-**13 GB/s, about a third of the machine's memory bandwidth**. Across twelve threads
-and 3.1 M lines that is roughly **20 cycles per line per thread**. That is a programme
-doing almost nothing per byte.
+**13 GB/s, about a third of the machine's memory bandwidth**.
+
+> **An arithmetic slip in this section is corrected here, because the conclusion
+> depended on it.** The first version of this file divided 45 M cycles (18 ms at
+> 2.5 GHz) by **3.1 M lines** and got 14.5, then rounded it to "about 20 cycles per
+> line per thread" and concluded the leader was "doing almost nothing per byte".
+> That divides by the wrong quantity. Each of the twelve threads handles
+> 3.1 M / 12 = **258,000 lines**, so the real figure is 45 M / 258,000 = **about
+> 174 thread-cycles per line**, or roughly 87 core-cycles with SMT pairs sharing six
+> physical cores.
+>
+> **174 cycles per line is not magic; it is a real, well-engineered budget.** The
+> same arithmetic puts our 123 ms at about **1,190 cycles per line**. So the gap is
+> 6.8x of *ordinary work we have not removed*, not a different algorithm that we
+> cannot reach. That materially changes what is worth attempting, and it is the
+> reason the serial tail is now the first target rather than the last.
+
+A high-level review of our source, which could not run the code, estimated the
+breakdown and suggested timers at six points to confirm it:
+
+```
+scan (12 threads)                              55-65 ms
+serial pairwise tree merge                     15-20 ms
+percentiles (12 threads)                        2-4 ms
+serial output, write! with 6 integers per row  25-35 ms
+teardown (drop 145k Vecs, exit)                 5-8 ms
+```
+
+**If that is right, about 45% of T is serial tail** — which is why the
+append-and-sort change touches only the first row and looked worth just 1.5-2x.
 
 **Our per-line cost is now measured rather than guessed:**
 
