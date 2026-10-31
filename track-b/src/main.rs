@@ -472,8 +472,26 @@ impl Part {
 /// write into a 300 KB array rather than two 600 KB ones.
 const ST_DF: u32 = (1 << 20) - 1;
 
+/// Append a term id as three bytes.
+///
+/// Term ids run to 75,748 and need 17 bits, so a `u32` wastes 15 of them -- and
+/// this list is the larger half of Track B's memory peak: about 87 MB across the
+/// twelve workers on a track the board charges 215 MB. Three bytes is safe to
+/// 16.7 M distinct query terms and takes the list to 65 MB.
 #[inline]
-fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
+fn put_tid(v: &mut Vec<u8>, t: u32) {
+    v.extend_from_slice(&t.to_le_bytes()[..3]);
+}
+
+/// Read back the `i`-th three-byte term id.
+#[inline]
+fn get_tid(v: &[u8], i: usize) -> u32 {
+    let b = &v[i * 3..i * 3 + 3];
+    b[0] as u32 | ((b[1] as u32) << 8) | ((b[2] as u32) << 16)
+}
+
+#[inline]
+fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u8>, nslot: &mut [u32], gen: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -493,7 +511,7 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u3
                 let e = &mut nslot[t as usize];
                 if *e >> 20 != gen {
                     *e = (gen << 20) | ((*e & ST_DF) + 1);
-                    terms.push(t);
+                    put_tid(terms, t);
                 }
             }
         }
@@ -524,7 +542,10 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     let mut gen: u32 = 0;
     // The corpus yields roughly one posting per nine bytes, and the reserve is
     // what keeps the doubling memcpy out of the token loop.
-    let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
+    // Three bytes per term id, not four: ids need 17 bits and this list is most
+    // of B's memory peak. The reserve tracks the same one-posting-per-8-bytes
+    // estimate the u32 version used.
+    let mut terms: Vec<u8> = Vec::with_capacity(((end - start) / 8 * 3) as usize);
     let mut starts: Vec<u32> = Vec::new();
     let mut ids: Vec<u32> = Vec::new();
 
@@ -576,7 +597,7 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
             // borrowing an id that belongs to another worker's range.
             None => continue,
         };
-        starts.push(terms.len() as u32);
+        starts.push((terms.len() / 3) as u32);
         ids.push(id);
         // A fresh generation per document is what makes the stamp test work
         // without ever storing a document id.  Twelve bits is 4095 documents,
@@ -593,7 +614,7 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         ascii_lower_in_place(text);
         index_text(text, tt, &mut terms, &mut nslot, gen);
     }
-    starts.push(terms.len() as u32);
+    starts.push((terms.len() / 3) as u32);
 
     // The low twenty bits of each slot are the term's df; the prefix sum turns
     // the counts into offsets in place.
@@ -617,7 +638,7 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         let doc = ids[d];
         let hi = starts[d + 1] as usize;
         while i < hi {
-            let t = terms[i] as usize;
+            let t = get_tid(&terms, i) as usize;
             arena[cur[t] as usize] = doc;
             cur[t] += 1;
             i += 1;
