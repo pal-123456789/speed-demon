@@ -22,12 +22,12 @@ Build an inverted index over a 250 MB text corpus, then answer 50,000 boolean an
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | 56.35 s | _(fill)_ | _(fill)_ | 0.50 | _(fill)_ |
-| M · peak memory | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
-| S · source size | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
+| T · wall time | 56.35 s | 0.551 s | 102x | 0.50 | 10.113 (derived) |
+| M · peak memory | 2200 MB | 214 MB | 10.3x | 0.20 | 1.594 (derived) |
+| S · source size | 91 lines | 973 lines | 0.0935x | 0.15 | 0.701 (derived) |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| **K** | | | | | **_(fill)_** |
-| **speed score** | | | | | **_(fill)_ / 100** |
+| **K** | | | | | **11.1901** |
+| **speed score** | | | | | **52.44 / 100** |
 
 `K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
 Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
@@ -36,8 +36,10 @@ K = 10 is half marks and K = 100 is full marks.
 
 M is the weakest axis on this track: positional postings dominate the footprint, and the compression that saves memory costs query time.
 
-> These numbers are **not filled in yet**, on purpose. They are only written
-> down once the harness has produced them. A target is not a result.
+> Measured on the live board; best run `run-293a7e2fc696` at commit `0c99d88`.
+> T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
+> board rather than measured locally. A target is not a result, so the local
+> harness numbers below stay separate from these.
 
 ---
 

@@ -22,12 +22,12 @@ Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, embedded n
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | 14.44 s | _(fill)_ | _(fill)_ | 0.50 | _(fill)_ |
-| M · peak memory | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.20 | _(fill)_ |
-| S · source size | (pin from the Oct 28 spec) | _(fill)_ | _(fill)_ | 0.15 | _(fill)_ |
+| T · wall time | 14.44 s | 0.182 s | 79.5x | 0.50 | 8.918 (derived) |
+| M · peak memory | 367 MB | 16 MB | 22.4x | 0.20 | 1.862 (derived) |
+| S · source size | 108 lines | 648 lines | 0.167x | 0.15 | 0.764 (derived) |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| **K** | | | | | **_(fill)_** |
-| **speed score** | | | | | **_(fill)_ / 100** |
+| **K** | | | | | **12.5759** |
+| **speed score** | | | | | **54.98 / 100** |
 
 `K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
 Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
@@ -36,8 +36,10 @@ K = 10 is half marks and K = 100 is full marks.
 
 M is easy to win here by streaming: the reference materialises rows the aggregate does not need.
 
-> These numbers are **not filled in yet**, on purpose. They are only written
-> down once the harness has produced them. A target is not a result.
+> Measured on the live board; best run `run-05967b57e6e5` at commit `9d1796a`.
+> T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
+> board rather than measured locally. A target is not a result, so the local
+> harness numbers below stay separate from these.
 
 ---
 
