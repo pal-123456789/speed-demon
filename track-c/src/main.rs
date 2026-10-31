@@ -602,37 +602,116 @@ fn first_boundary(path: &str, from: u64, mut parity: u8, len: u64) -> std::io::R
 fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
     const STEP: usize = 1 << 20;
 
-    let mut f = File::open(path)?;
-    let len = f.metadata()?.len();
+    let len = std::fs::metadata(path)?.len();
     let nchunk = (((len as usize).saturating_add(STEP - 1)) / STEP).max(1);
     let targets: Vec<usize> = (1..nthreads).map(|i| i * nchunk / nthreads).collect();
-    let mut par = vec![0u8; nchunk + 1];
-    let mut buf = vec![0u8; STEP];
-    let mut q: u64 = 0;
-    let mut c = 0usize;
 
-    loop {
-        let k = f.read(&mut buf)?;
-        if k == 0 {
-            break;
+    // ── the quote count, one thread per chunk range ─────────────────────────
+    //
+    // The parity idea below was already right, but the pass that feeds it was SERIAL:
+    // one thread read all 202 MB in 1 MiB chunks, and that single loop was 29% of this
+    // track's wall time. Each thread now counts its own range and returns one parity
+    // per chunk, so the global prefix XOR is a serial walk over 202 bytes.
+    let per = nchunk.div_ceil(nthreads).max(1);
+    let want_workers = nchunk.div_ceil(per);
+    let ranges: Vec<(usize, Vec<u8>)> = std::thread::scope(|s| {
+        let mut hs = Vec::with_capacity(want_workers);
+        for w in 0..want_workers {
+            let c0 = w * per;
+            let c1 = ((w + 1) * per).min(nchunk);
+            let path = path.to_string();
+            hs.push(s.spawn(move || -> Option<(usize, Vec<u8>)> {
+                let mut f = File::open(&path).ok()?;
+                let mut buf = vec![0u8; STEP];
+                let mut out = Vec::with_capacity(c1 - c0);
+                for c in c0..c1 {
+                    let off = (c as u64) * STEP as u64;
+                    if f.seek(SeekFrom::Start(off)).is_err() {
+                        return None;
+                    }
+                    let want = ((len.saturating_sub(off)) as usize).min(STEP);
+                    let mut k = 0usize;
+                    while k < want {
+                        match f.read(&mut buf[k..want]) {
+                            Ok(0) => break,
+                            Ok(n) => k += n,
+                            Err(_) => return None,
+                        }
+                    }
+                    let b = &buf[..k];
+                    let mut i = 0usize;
+                    // No branch, no match list, no note(): just the byte-count of `"`.
+                    let mut q: u64 = 0;
+                    while i + 8 <= k {
+                        let wv = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+                        q += zero_byte(wv ^ QUOTE).count_ones() as u64;
+                        i += 8;
+                    }
+                    while i < k {
+                        if b[i] == b'"' {
+                            q += 1;
+                        }
+                        i += 1;
+                    }
+                    out.push((q & 1) as u8);
+                }
+                Some((c0, out))
+            }));
         }
-        let b = &buf[..k];
-        let mut i = 0usize;
-        // No branch, no match list, no note(): just the byte-count of `"`.
-        while i + 8 <= k {
-            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-            q += zero_byte(w ^ QUOTE).count_ones() as u64;
-            i += 8;
-        }
-        while i < k {
-            if b[i] == b'"' {
-                q += 1;
+        hs.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
+    });
+
+    let mut pc = vec![0u8; nchunk];
+    if ranges.len() == want_workers {
+        for (c0, out) in ranges {
+            for (j, v) in out.into_iter().enumerate() {
+                pc[c0 + j] = v;
             }
-            i += 1;
         }
-        c += 1;
-        par[c] = (q & 1) as u8;
+    } else {
+        // A worker failed, so the parity array would be partial -- and a wrong
+        // boundary is a wrong answer, not a slow one. Redo it on one thread here
+        // rather than carry a half-filled array into the split points below.
+        pc.fill(0);
+        let mut f = File::open(path)?;
+        let mut buf = vec![0u8; STEP];
+        for c in 0..nchunk {
+            f.seek(SeekFrom::Start((c as u64) * STEP as u64))?;
+            let off = (c as u64) * STEP as u64;
+            let want = ((len.saturating_sub(off)) as usize).min(STEP);
+            let mut k = 0usize;
+            while k < want {
+                match f.read(&mut buf[k..want]) {
+                    Ok(0) => break,
+                    Ok(n) => k += n,
+                    Err(e) => return Err(e),
+                }
+            }
+            let b = &buf[..k];
+            let mut i = 0usize;
+            let mut q: u64 = 0;
+            while i + 8 <= k {
+                let wv = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+                q += zero_byte(wv ^ QUOTE).count_ones() as u64;
+                i += 8;
+            }
+            while i < k {
+                if b[i] == b'"' {
+                    q += 1;
+                }
+                i += 1;
+            }
+            pc[c] = (q & 1) as u8;
+        }
     }
+
+    let mut par = vec![0u8; nchunk + 1];
+    let mut acc: u8 = 0;
+    for c in 0..nchunk {
+        par[c] = acc;
+        acc ^= pc[c];
+    }
+    par[nchunk] = acc;
 
     let mut pts = Vec::with_capacity(nthreads + 2);
     pts.push(first_boundary(path, 0, 0, len)?);
