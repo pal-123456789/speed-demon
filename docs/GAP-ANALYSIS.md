@@ -307,6 +307,78 @@ D the time factor is `sqrt` against memory's fifth root, so the time effect is t
 larger one.** If a hash map is used instead of the arena, the memory saving survives
 and the locality win does not.
 
+## THE FULL GAP TO #1 AND #2, DECOMPOSED
+
+Us: **55.997** (rank 41). #1 Cause Of Death **79.389**. #2 NickTrapp **77.833**.
+The product must rise **2.85x** to reach #1 and **2.69x** to reach #2.
+
+### Per track, against #1
+
+| Track | our K | #1 K | ratio | from T | from M | from S |
+|---|---|---|---|---|---|---|
+| A | 16.422 | 51.733 | **3.15x** | 2.614 (**82%**) | 1.211 (18%) | 1.010 (1%) |
+| B | 11.190 | 31.095 | **2.78x** | 1.930 (**63%**) | 1.398 (**33%**) | 1.040 (4%) |
+| C | 12.646 | 36.707 | **2.90x** | 2.410 (**84%**) | 1.072 (7%) | 1.118 (**11%**) |
+| D | 9.378 | 28.833 | **3.08x** | 2.619 (**85%**) | 1.212 (21%) | 0.968 (**-3%**) |
+
+### Per track, against #2
+
+| Track | our K | #2 K | ratio | from T | from M | from S |
+|---|---|---|---|---|---|---|
+| A | 16.422 | 51.982 | **3.17x** | 2.544 | 1.211 | 1.028 |
+| B | 11.190 | 23.977 | **2.14x** | 1.470 (**58%**) | 1.398 (**41%**) | 1.053 |
+| C | 12.646 | 39.200 | **3.10x** | 2.631 | 1.055 | 1.118 |
+| D | 9.378 | 21.677 | **2.31x** | 1.878 | 1.201 | 0.968 |
+
+### The single most important structural fact
+
+**The overall is the geometric mean of the best three, and B is our weakest counting
+track at 52.442 — with C 55.097 and A 60.771 above it, D dropped at 48.604.**
+
+Improving any one track by X% raises the overall by X^(1/3), so **the cheapest X% is
+wherever the effort is lowest, not where the number is highest.** But there is a
+sharper constraint on D: **D only counts if it exceeds B's 52.442.** Measured against
+the board's own numbers:
+
+```
+D's memory 178 -> 68 MB    K  9.378 -> 11.37   points 48.60 -> 52.80
+best three become A 60.771, C 55.097, D 52.80  ->  overall 56.15   (+0.15)
+```
+
+**Nine points of memory work on D is worth 0.15 on the overall, because it only
+swaps D for B at almost the same value.** D has to clear B by a real margin before
+any D work pays at all.
+
+### What each achievable change is actually worth
+
+| Change | New value | Track gain | Overall |
+|---|---|---|---|
+| **B time** 0.551 -> 0.148 s | K 21.60 | +93% | 55.997 -> **60.4** (+4.4) |
+| **C time** 0.180 -> 0.031 s | K 30.47 | +141% | -> **62.9** (+6.9) |
+| **A time** 0.123 -> 0.018 s | K 42.93 | +161% | -> **63.2** (+7.2) |
+| **B memory** 224 -> 100 MB | K 13.15 | +18% | -> **57.2** (+1.2) |
+| **B memory** 224 -> 42 MB | K 15.64 | +40% | -> **58.4** (+2.4) |
+| **A memory** 47 -> 30 MB | K 17.77 | +8% | -> **57.5** (+1.5) |
+| **C lines** 648 -> 400 | K 13.44 | +6% | -> **57.1** (+1.1) |
+| D memory 178 -> 68 MB | K 11.37 | +21% | -> 56.15 (**+0.15**) |
+
+**The whole realistic set — B's memory, A's memory, C's lines — is worth about +5, to
+roughly 61. The three time figures are what would reach #1, and each is a 5-to-7x
+reduction against the best in the field.**
+
+### Reachability of the ceiling
+
+The best score **any team** holds on each track: A 85.793, B 74.635, C 79.664. A
+hypothetical team holding all three simultaneously would score
+
+```
+(85.793 x 79.664 x 74.635)^(1/3) = 79.9
+```
+
+**#1 is at 79.389 — within 0.6% of that ceiling.** It is not a target anyone is
+going to overtake by a large margin; it is the field's frontier, and the top three
+teams are all within 1.6 points of it.
+
 ## Ours versus the leaders
 
 Read off the live board. The useful thing is not the gap in points but the gap in
