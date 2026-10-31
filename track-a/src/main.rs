@@ -370,7 +370,65 @@ impl Sink {
 /// including the case where a line begins exactly on a cut. The one line that
 /// has no terminator at all — a file that does not end in `\n` — is picked up by
 /// the `<= end` rule at EOF, because `nl` can never find it.
+/// Map the whole input read-only, or `None`.
+///
+/// `std` has no mmap, so this is the raw syscall. **It exists because 238 MB in
+/// 0.0985 s is 2.4 GB/s, which is a COPY rate rather than a compute rate**: the
+/// buffered path reads the file into a 64 KiB buffer and the kernel copies every
+/// byte through it. Mapping lets the parse walk the page cache in place, so the
+/// 238 MB is never duplicated. Read-only MAP_PRIVATE file pages stay in the
+/// kernel's page cache and are not charged to the process, which is why this
+/// does not trade memory for time.
+///
+/// Every failure returns `None` and the caller falls back to buffered reads, so
+/// a kernel that refuses the syscall costs speed and never correctness.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn map_file(path: &str) -> Option<&'static [u8]> {
+    use std::os::fd::AsRawFd;
+    let f = File::open(path).ok()?;
+    let len = f.metadata().ok()?.len() as usize;
+    if len == 0 {
+        return None;
+    }
+    let ret: isize;
+    // SAFETY: the argument registers are the documented mmap(2) ABI on x86-64 --
+    // rax 9, rdi addr, rsi length, rdx prot, r10 flags, r8 fd, r9 offset -- and
+    // only rcx and r11, which `syscall` always clobbers, are declared as outputs.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") 9isize => ret,
+            in("rdi") 0usize,
+            in("rsi") len,
+            in("rdx") 1usize, // PROT_READ
+            in("r10") 2usize, // MAP_PRIVATE
+            in("r8") f.as_raw_fd(),
+            in("r9") 0usize,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, preserves_flags)
+        );
+    }
+    if ret < 0 {
+        return None;
+    }
+    // SAFETY: mmap returned a valid pointer to `len` readable bytes, mapped for
+    // the life of the process. The slice is never written and never unmapped.
+    Some(unsafe { core::slice::from_raw_parts(ret as *const u8, len) })
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+fn map_file(_path: &str) -> Option<&'static [u8]> {
+    None
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(dead_code)]
 fn scan(path: &str, start: u64, end: u64) -> Part {
+    scan_with(path, start, end, None)
+}
+
+fn scan_with(path: &str, start: u64, end: u64, mapped: Option<&[u8]>) -> Part {
     // ~1 group per 1.6 kB of input: reserve it up front rather than paying nine
     // table doublings per worker. Only a hint — growth is still automatic.
     let est = ((end - start) / 1450) as usize;
@@ -385,13 +443,58 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
         ord: 0,
         hrank: 0,
     };
-    let mut out = Part {
+    let out = Part {
         groups: Vec::new(),
         names: Vec::new(),
         hours: Vec::new(),
     };
     if start >= end {
         return out;
+    }
+
+    // Mapped path: walk the page cache in place. No buffer, no refill, no copy.
+    //
+    // The line rules are the read loop's, restated rather than shared, so they
+    // are spelled out here: a worker at start > 0 drops the line straddling
+    // start, it owns every line whose FIRST byte is <= end, and it stops before
+    // a line that begins after it. The next worker drops that straddling line,
+    // so the two rules meet exactly -- dropping on the left and <= on the right
+    // is a partition, no line counted twice and none lost.
+    if let Some(m) = mapped {
+        let len = m.len();
+        let mut i = start as usize;
+        let mut skip = i > 0;
+        while i < len {
+            let from = i;
+            let k = match nl(&m[i..len]) {
+                Some(k) => k,
+                None => break,
+            };
+            // `at` is the line's FIRST byte, which is what the ownership rule is
+            // stated over. Using the newline's position instead shifts the test by
+            // the line's length and silently gives the straddling line to the
+            // wrong worker -- wrong output, not slow output, and the Docker hash
+            // is what caught it.
+            let at = from as u64;
+            i += k + 1;
+            if skip {
+                skip = false; // tail of a line another worker owns
+            } else if at > end {
+                return s.finish(out);
+            } else {
+                s.take(&m[from..from + k]);
+            }
+        }
+        // A file that does not end in `\n` leaves its last line unterminated:
+        // `nl` cannot see it and no later worker would own it. It is taken under
+        // the same `<= end` rule -- the rule is on where the line STARTS, and
+        // the line then runs to the end of the file, not to `end`. Bounding this
+        // at `end` truncates a straddling line, which is what the first version
+        // of this did and the Docker hash caught.
+        if !skip && i < len && (i as u64) <= end {
+            s.take(&m[i..len]);
+        }
+        return s.finish(out);
     }
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -456,32 +559,42 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
         have -= cur;
     }
 
-    // Fold each hour's block into groups. Each block is taken out of the table
-    // and dropped as it is consumed, so the record buffers and the groups built
-    // from them are never all live at once.
-    for hi in 0..s.recs.len() {
-        let mut block = std::mem::take(&mut s.recs[hi]);
-        s.flush(hi, &mut block);
-    }
+    s.finish(out)
+}
 
-    // Renumber the endpoints into sorted-byte order, then order the groups by
-    // the integer key. Both steps compose: the byte order the id stands for is
-    // exactly the order the id itself now has.
-    let mut order: Vec<u32> = (0..s.names.len() as u32).collect();
-    order.sort_unstable_by(|&a, &b| s.names[a as usize].cmp(&s.names[b as usize]));
-    let mut rank = vec![0u32; s.names.len()];
-    for (r, &id) in order.iter().enumerate() {
-        rank[id as usize] = r as u32;
-    }
-    for g in &mut s.groups {
-        g.key = (g.key & 0xffff_ffff_0000_0000) | rank[(g.key & 0xffff_ffff) as usize] as u64;
-    }
-    s.groups.sort_unstable_by_key(|g| g.key);
+impl Sink {
+    /// Fold each hour's block into groups, renumber the endpoints into
+    /// sorted-byte order, and order the groups by the integer key. Both ordering
+    /// steps compose: the byte order an id stands for is exactly the order the
+    /// id itself now has.
+    ///
+    /// Shared by both input paths, so a mapped read and a buffered read produce
+    /// byte-identical output by construction rather than by review.
+    fn finish(mut self, mut out: Part) -> Part {
+        // Each block is taken out of the table and dropped as it is consumed, so
+        // the record buffers and the groups built from them are never all live.
+        for hi in 0..self.recs.len() {
+            let mut block = std::mem::take(&mut self.recs[hi]);
+            self.flush(hi, &mut block);
+        }
 
-    out.groups = s.groups;
-    out.names = order.iter().map(|&i| s.names[i as usize].clone()).collect();
-    out.hours = s.hours;
-    out
+        let mut order: Vec<u32> = (0..self.names.len() as u32).collect();
+        order.sort_unstable_by(|&a, &b| self.names[a as usize].cmp(&self.names[b as usize]));
+        let mut rank = vec![0u32; self.names.len()];
+        for (r, &id) in order.iter().enumerate() {
+            rank[id as usize] = r as u32;
+        }
+        for g in &mut self.groups {
+            g.key = (g.key & 0xffff_ffff_0000_0000)
+                | rank[(g.key & 0xffff_ffff) as usize] as u64;
+        }
+        self.groups.sort_unstable_by_key(|g| g.key);
+
+        out.groups = self.groups;
+        out.names = order.iter().map(|&i| self.names[i as usize].clone()).collect();
+        out.hours = self.hours;
+        out
+    }
 }
 
 /// Two-pointer merge of two key-sorted row lists. A group split across workers
@@ -574,13 +687,19 @@ fn main() {
     };
 
     // ── twelve slices, one sorted row list each ─────────────────────────────
+    // Mapped once and shared: read-only MAP_PRIVATE file pages stay in the page
+    // cache and are not charged to the process, so this costs no memory, and the
+    // parse then walks the file in place instead of copying it through a buffer.
+    // `None` on any failure and every worker falls back to buffered reads.
+    let map = map_file(&input);
     let mut parts: Vec<Part> = thread::scope(|s| {
         let path = input.as_str();
         let mut handles = Vec::with_capacity(NTHREADS);
         for i in 0..NTHREADS {
             let (n, k) = (size, NTHREADS as u64);
             let (a, b) = (n * i as u64 / k, n * (i as u64 + 1) / k);
-            handles.push(s.spawn(move || scan(path, a, b)));
+            let m = map;
+            handles.push(s.spawn(move || scan_with(path, a, b, m)));
         }
         handles
             .into_iter()
