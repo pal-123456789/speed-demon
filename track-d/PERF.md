@@ -127,8 +127,34 @@ interesting part and judges are told to reward them."*
 
 ## 4. Where the time actually goes
 
-_(fill after a profile — the flame graph, the `perf stat` counters, and the
-one measurement that surprised you)_
+Measured by instrumenting the binary for three runs and removing it again; `build` is
+everything up to the CSR being complete, `queries` is the parallel search and output.
+
+```
+build   (stream + CSR, 92 MB graph)   0.365 s   16%
+queries (2,000 searches, 12 threads)  1.980 s   84%
+                                      -------
+                                      2.345 s   (local box; the board runs ~2.7x faster)
+```
+
+**The measurement that surprised me, and it invalidates an earlier judgement of mine:**
+the build is only 16%. I had written this track off as not worth an hour, on the reasoning
+that it sat 2.05 points behind Track B and could never catch it. But the query phase is
+84% of the runtime and a plain early-terminating Dijkstra, so the thing to attack is the
+search, not the graph load -- and halving it is a x1.414 on the T factor, which takes K
+from 10.261 to 14.51 and the track from 50.56 to about 58.1. That would make Track D the
+third counting track in place of B, and the overall 59.2 instead of 57.3.
+
+So Track D is the largest single opportunity left in this submission, and the reason I
+missed it is that I was comparing track POINTS instead of reading the phase split. The
+same mistake cost me a day on Track C, where the interner is 53.9% and the parser I had
+been optimising is 8.5%.
+
+**What this points at:** section 2b lists ALT landmarks and a bounded sweep, and neither
+was built. Landmark lower bounds are exactly the tool for cutting the number of settled
+nodes, and they are the one thing the leader must be doing to run a 1.74 M-node graph at
+61 us per query. The cost to watch is the M axis: a landmark table is derived as k x 4
+bytes per node -- about 7 MB per landmark, so this track is at 77 MB against a leader at 68 MB.
 
 ---
 
