@@ -269,7 +269,12 @@ impl Sink {
             }
             if hi == self.hours.len() {
                 self.hours.push((self.ord, self.hour));
-                self.recs.push(Vec::new());
+                // 3.1 M records over 72 hours and twelve workers is about 3,600 per
+                // block. Growing from zero costs twelve doublings per block, 864
+                // times; starting at 1,024 costs two. The k-way merge regression
+                // last round was entirely reallocation churn, so this is the same
+                // fix applied where the churn actually is.
+                self.recs.push(Vec::with_capacity(1024));
             }
             self.hrank = hi as u32;
         }

@@ -525,8 +525,14 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     // The corpus yields roughly one posting per nine bytes, and the reserve is
     // what keeps the doubling memcpy out of the token loop.
     let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
-    let mut starts: Vec<u32> = Vec::new();
-    let mut ids: Vec<u32> = Vec::new();
+    // One entry per document. docs.txt is about 1,015 bytes per document, so a
+    // worker's range holds roughly `(end - start) / 1000` of them -- and growing
+    // these from zero costs fifteen doublings per worker, where a reserve costs
+    // one allocation. The k-way merge regression in Track A last round was
+    // entirely reallocation churn, which is why these are reserved now.
+    let ndocs_hint = ((end - start) / 1000) as usize;
+    let mut starts: Vec<u32> = Vec::with_capacity(ndocs_hint + 1);
+    let mut ids: Vec<u32> = Vec::with_capacity(ndocs_hint + 1);
 
     let f = match File::open(path) {
         Ok(f) => f,
