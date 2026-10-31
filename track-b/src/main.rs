@@ -472,18 +472,8 @@ impl Part {
 /// write into a 300 KB array rather than two 600 KB ones.
 const ST_DF: u32 = (1 << 20) - 1;
 
-/// Term list entry whose id does not fit 16 bits; the real id waits in `over`.
-const TID_ESC: u16 = u16::MAX;
-
 #[inline]
-fn index_text(
-    text: &[u8],
-    tt: &TermTable,
-    terms: &mut Vec<u16>,
-    over: &mut Vec<u32>,
-    nslot: &mut [u32],
-    gen: u32,
-) {
+fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -503,15 +493,7 @@ fn index_text(
                 let e = &mut nslot[t as usize];
                 if *e >> 20 != gen {
                     *e = (gen << 20) | ((*e & ST_DF) + 1);
-                    // Ids need 17 bits, and this list is the larger half of the build
-                    // peak: 89 MB across twelve workers, held at the same time as the part
-                    // arena it feeds. The common case is one u16; the rest escape.
-                    if t < TID_ESC as u32 {
-                        terms.push(t as u16);
-                    } else {
-                        terms.push(TID_ESC);
-                        over.push(t);
-                    }
+                    terms.push(t);
                 }
             }
         }
@@ -542,9 +524,7 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     let mut gen: u32 = 0;
     // The corpus yields roughly one posting per nine bytes, and the reserve is
     // what keeps the doubling memcpy out of the token loop.
-    let mut terms: Vec<u16> = Vec::with_capacity(((end - start) / 8) as usize);
-    // Only the ids past 16 bits, so this stays small and is read in order.
-    let mut over: Vec<u32> = Vec::new();
+    let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
     let mut starts: Vec<u32> = Vec::new();
     let mut ids: Vec<u32> = Vec::new();
 
@@ -611,7 +591,7 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, &mut terms, &mut over, &mut nslot, gen);
+        index_text(text, tt, &mut terms, &mut nslot, gen);
     }
     starts.push(terms.len() as u32);
 
@@ -633,21 +613,11 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
     let mut cur: Vec<u32> = offs.clone();
     let mut arena: Vec<u32> = vec![0; acc as usize];
     let mut i = 0usize;
-    let mut oi = 0usize;
     for d in 0..ids.len() {
         let doc = ids[d];
         let hi = starts[d + 1] as usize;
         while i < hi {
-            let e = terms[i];
-            // The scatter walks this list strictly in order, so the escapes come out in
-            // exactly the order they were written and no index is needed.
-            let t = if e == TID_ESC {
-                let v = over[oi] as usize;
-                oi += 1;
-                v
-            } else {
-                e as usize
-            };
+            let t = terms[i] as usize;
             arena[cur[t] as usize] = doc;
             cur[t] += 1;
             i += 1;
