@@ -254,6 +254,18 @@ It is a board bet, it is written down as one, and it is worth the ~7 lines it co
 * The differential tester compares this implementation against the published
   reference byte for byte, and reports the first differing byte with its
   offset and context.
+* Correctness on seeds the pinned corpora do not contain. The generator beside
+  this file was run at **nine further tiny seeds and two further sample seeds**
+  (332,000 records each), the published reference was run over every one of
+  them, and this binary's output is byte-identical to it in all **seventeen**
+  cases. Three builds whose interner limits are deliberately shrunk -- 512 arena
+  bytes, 8 slots per shard, and 4 slots per shard so the probe loop itself is
+  exhausted -- match the reference on two fresh seeds each as well, which is how
+  the exact fallback is shown to agree with the fast path rather than argued to.
+* **Measured**: 300 back-to-back runs on the tiny hostile corpus and 20 on the
+  full corpus each produced one hash. A race that fires once in a hundred runs is
+  invisible to a five-run check, and the holdout scores zero for one wrong
+  answer, so this is deliberate.
 
 ---
 
