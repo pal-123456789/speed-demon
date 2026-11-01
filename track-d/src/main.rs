@@ -19,23 +19,18 @@
 //!    pages handed out on first touch. s == t is 0; a target with no in-edge is
 //!    -1 at once. Distances are unique, so thread order never changes output.
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Barrier, Mutex, Once, OnceLock};
+
+#[cfg(target_os = "linux")]
+use std::ffi::c_void;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 #[cfg(target_os = "linux")]
 extern "C" {
-    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64)
-        -> *mut c_void;
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
     fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
-}
-
-/// A file descriptor for the mapping call. Only the Linux mapping uses it.
-#[cfg(target_os = "linux")]
-fn raw_fd(f: &std::fs::File) -> i32 {
-    use std::os::fd::AsRawFd;
-    f.as_raw_fd()
 }
 
 const INF: u64 = u64::MAX;
@@ -83,27 +78,30 @@ fn tune_allocator() {
 #[cfg(not(target_os = "linux"))]
 fn tune_allocator() {}
 
-/// The whole file as a readable slice: an anonymous page of zeros, then the file
+/// The whole file as a readable slice.
+///
+/// On Linux this is a real mapping: an anonymous page of zeros, then the file
 /// over its start (PROT_READ; MAP_PRIVATE | MAP_ANONYMOUS, then MAP_PRIVATE |
-/// MAP_FIXED), so an 8-byte read at any byte of the file stays inside the mapping.
+/// MAP_FIXED), so an 8-byte read at ANY byte of the file stays inside the
+/// mapping. The scoring box is Linux. The other target reads the file into a
+/// leaked box instead, so the local fallback build compiles and the offline
+/// corpora can still be checked on a development machine.
 #[cfg(target_os = "linux")]
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
     let len = file.metadata().unwrap().len() as usize;
     unsafe {
         let p = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
-        let ok = len == 0 || mmap(p, len, 1, 0x12, raw_fd(&file), 0) == p;
+        let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p;
         assert!(p as isize != -1 && ok, "mmap {path}");
         std::slice::from_raw_parts(p as *const u8, len)
     }
 }
 
-/// The same bytes on a target with no `mmap`, so the offline corpora can still be checked on a
-/// development machine. The scoring box is Linux and takes the path above; this exists only so a
-/// local verification build links.
 #[cfg(not(target_os = "linux"))]
 fn map(path: &str) -> &'static [u8] {
-    Box::leak(std::fs::read(path).expect(path).into_boxed_slice())
+    let v = std::fs::read(path).expect(path);
+    Box::leak(v.into_boxed_slice())
 }
 
 /// The number at text[*i..], leaving *i past the one byte that ends it.
@@ -146,38 +144,13 @@ fn cuts(text: &[u8], from: usize, k: usize) -> Vec<usize> {
     c
 }
 
-type Job = &'static (dyn Fn(usize) + Sync);
-static POOL: OnceLock<(Mutex<Option<Job>>, Barrier)> = OnceLock::new();
-static STARTED: Once = Once::new();
-
-/// Runs f(t) on nt threads and collects what each returns. The threads are
-/// started once and reused by every phase: a new thread's stack is a new
-/// mapping, which waits behind every page fault and unmap in flight, so
-/// twelve fresh threads per phase cost milliseconds each time.
+/// Runs f(t) on nt threads and collects what each returns.
 fn on_threads<R: Send>(nt: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let (job, gate) = POOL.get_or_init(|| (Mutex::new(None), Barrier::new(nt)));
-    STARTED.call_once(|| {
-        for t in 1..nt {
-            std::thread::spawn(move || loop {
-                let (job, gate) = POOL.get().unwrap();
-                gate.wait();
-                let f = job.lock().unwrap().unwrap();
-                f(t);
-                gate.wait();
-            });
-        }
-    });
-    let out: Vec<Mutex<Option<R>>> = (0..nt).map(|_| Mutex::new(None)).collect();
-    let run = |t: usize| *out[t].lock().unwrap() = Some(f(t));
-    let run: &(dyn Fn(usize) + Sync) = &run;
-    // Safe while `run` outlives the phase, and the second wait ensures that.
-    *job.lock().unwrap() = Some(unsafe { std::mem::transmute::<_, Job>(run) });
-    gate.wait();
-    run(0);
-    gate.wait();
-    out.into_iter()
-        .map(|r| r.into_inner().unwrap().unwrap())
-        .collect()
+    let f = &f;
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..nt).map(|t| s.spawn(move || f(t))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
 }
 
 /// Thread t's share of 0..n.
@@ -187,80 +160,38 @@ fn share(n: usize, t: usize, nt: usize) -> std::ops::Range<usize> {
 
 /// A 4-ary min-heap of (key, node): it only ever holds the live frontier, so
 /// it stays small, and four children share one cache line.
-/// What a heap entry packs: a distance and a node.
-trait Key: Copy + Ord {
-    fn pack(d: u64, u: u32, hb: u32) -> Self;
-    fn dist(self, hb: u32) -> u64;
-    fn node(self, hb: u32) -> u32;
-}
+#[derive(Default)]
+struct Heap(Vec<(u64, u32)>);
 
-/// One word: the node in the low `hb` bits, the distance above them. Used when
-/// the sum of every edge weight (above any path's length) fits the 64 - hb bits.
-impl Key for u64 {
-    fn pack(d: u64, u: u32, hb: u32) -> u64 {
-        d << hb | u as u64
-    }
-    fn dist(self, hb: u32) -> u64 {
-        self >> hb
-    }
-    fn node(self, hb: u32) -> u32 {
-        (self & ((1 << hb) - 1)) as u32
-    }
-}
-
-/// Two words, for graphs whose distances could need all 64 bits.
-impl Key for u128 {
-    fn pack(d: u64, u: u32, _: u32) -> u128 {
-        (d as u128) << 32 | u as u128
-    }
-    fn dist(self, _: u32) -> u64 {
-        (self >> 32) as u64
-    }
-    fn node(self, _: u32) -> u32 {
-        self as u32
-    }
-}
-
-struct Heap<K>(Vec<K>, u32); // entries, node bits
-
-impl<K: Key> Heap<K> {
-    fn new(hb: u32) -> Self {
-        Heap(Vec::new(), hb)
-    }
-    fn top(&self) -> Option<u64> {
-        self.0.first().map(|k| k.dist(self.1))
-    }
-    fn push(&mut self, d: u64, u: u32) {
-        let (h, k) = (&mut self.0, K::pack(d, u, self.1));
+impl Heap {
+    fn push(&mut self, k: u64, u: u32) {
+        let h = &mut self.0;
         let mut i = h.len();
-        h.push(k);
-        while i > 0 && h[(i - 1) / 4] > k {
+        h.push((k, u));
+        while i > 0 && h[(i - 1) / 4].0 > k {
             h[i] = h[(i - 1) / 4];
             i = (i - 1) / 4;
         }
-        h[i] = k;
+        h[i] = (k, u);
     }
     /// The smallest entry (the heap must not be empty). The last entry sifts
     /// down from the root, unchecked: every index read is below n.
     fn pop(&mut self) -> (u64, u32) {
         let x = self.0.pop().unwrap();
-        let Some(&top) = self.0.first() else {
-            return (x.dist(self.1), x.node(self.1));
-        };
+        let Some(&top) = self.0.first() else { return x };
         let (h, n, mut i) = (self.0.as_mut_ptr(), self.0.len(), 0);
         unsafe {
             while 4 * i + 1 < n {
                 let c = 4 * i + 1;
-                let m =
-                    (c + 1..n.min(c + 4)).fold(c, |m, j| if *h.add(j) < *h.add(m) { j } else { m });
-                if *h.add(m) >= x {
+                let m = (c + 1..n.min(c + 4)).fold(c, |m, j| if (*h.add(j)).0 < (*h.add(m)).0 { j } else { m });
+                if (*h.add(m)).0 >= x.0 {
                     break;
                 }
                 (*h.add(i), i) = (*h.add(m), m);
             }
             *h.add(i) = x;
         }
-        (top.dist(self.1), top.node(self.1))
+        top
     }
 }
 
@@ -274,11 +205,7 @@ struct Dist {
 
 impl Dist {
     fn new(n: usize) -> Self {
-        Dist {
-            tab: vec![0; n / PAGE + 1],
-            used: Vec::new(),
-            pool: Vec::new(),
-        }
+        Dist { tab: vec![0; n / PAGE + 1], used: Vec::new(), pool: Vec::new() }
     }
     /// INF for a node this search never reached; hands out no page.
     fn get(&self, v: u32) -> u64 {
@@ -320,7 +247,6 @@ struct Filed {
     chunk: Vec<Vec<u32>>, // part -> the chunk numbers it owns, in order
     len: Vec<usize>,      // part -> records written
     heavy: Vec<Vec<u32>>, // part -> its oversized weights, in order
-    wsum: u64,            // the sum of its edges' weights
 }
 
 impl Filed {
@@ -329,10 +255,7 @@ impl Filed {
         self.chunk[p].iter().enumerate().flat_map(move |(k, &c)| {
             let at = c as usize * CHUNK;
             let n = (self.len[p] - k * CHUNK).min(CHUNK);
-            self.off[at..at + n]
-                .iter()
-                .map(|&o| o as usize)
-                .zip(self.word[at..at + n].iter().copied())
+            self.off[at..at + n].iter().map(|&o| o as usize).zip(self.word[at..at + n].iter().copied())
         })
     }
 }
@@ -346,9 +269,7 @@ fn main() {
     tune_allocator();
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
-    let nt = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .clamp(1, 12);
+    let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
     // Queries: every maximal run of digits is a number, whatever surrounds it.
     let qtext = map(&format!("{data}/queries.txt"));
     let nums: Vec<u32> = qtext
@@ -377,7 +298,6 @@ fn main() {
             chunk: vec![Vec::new(); parts],
             len: vec![0; parts],
             heavy: vec![Vec::new(); parts],
-            wsum: 0,
         };
         let (mut at, mut next, mut loops) = (vec![0u32; parts], 0usize, 0usize);
         let mut i = cut[t];
@@ -389,7 +309,6 @@ fn main() {
                 loops += 1;
                 continue; // a self-loop never shortens a path
             }
-            f.wsum += w as u64;
             let p = (u >> sh) as usize;
             if f.len[p] % CHUNK == 0 {
                 (at[p], next) = (next as u32 * CHUNK as u32, next + 1);
@@ -404,11 +323,7 @@ fn main() {
             f.word[k] = v | w << hb;
             (at[p], f.len[p]) = (at[p] + 1, f.len[p] + 1);
         }
-        assert_eq!(
-            i,
-            cut[t + 1],
-            "graph.txt: a line does not end where the grammar says"
-        );
+        assert_eq!(i, cut[t + 1], "graph.txt: a line does not end where the grammar says");
         (f, loops)
     });
     // Part p's edges start where part p - 1's end.
@@ -416,12 +331,8 @@ fn main() {
     for p in 0..parts {
         base[p + 1] = base[p] + filed.iter().map(|f| f.0.len[p] as u32).sum::<u32>();
     }
-    let wsum: u64 = filed.iter().map(|f| f.0.wsum).sum();
     let lines = base[parts] as usize + filed.iter().map(|f| f.1).sum::<usize>();
-    assert_eq!(
-        lines, declared,
-        "graph.txt: parsed {lines} edges, header declares {declared}"
-    );
+    assert_eq!(lines, declared, "graph.txt: parsed {lines} edges, header declares {declared}");
 
     // 2. Build each part's adjacency on its own.
     let m = base[parts] as usize;
@@ -439,9 +350,7 @@ fn main() {
             let lo = p << sh;
             let len = (n - lo).min(1 << sh);
             cursor.fill(0);
-            filed
-                .iter()
-                .for_each(|f| f.0.each(p).for_each(|(o, _)| cursor[o] += 1));
+            filed.iter().for_each(|f| f.0.each(p).for_each(|(o, _)| cursor[o] += 1));
             let mut at = base[p];
             for (k, c) in cursor[..len].iter_mut().enumerate() {
                 unsafe { *fr.at(lo + k) = at };
@@ -481,8 +390,7 @@ fn main() {
         // Fetch the offsets 8 queue entries ahead and the edges 4 ahead.
         let ahead = |ord: &Vec<u32>, i: usize| {
             ord.get(i + 8).map(|&u| prefetch(&first[u as usize]));
-            ord.get(i + 4)
-                .map(|&u| prefetch(link.as_ptr().wrapping_add(first[u as usize] as usize)));
+            ord.get(i + 4).map(|&u| prefetch(link.as_ptr().wrapping_add(first[u as usize] as usize)));
         };
         loop {
             let mut seed = None;
@@ -531,17 +439,9 @@ fn main() {
     for t in 0..nt {
         start[t + 1] = start[t] + chains[t].len() as u32;
     }
-    assert_eq!(
-        start[nt] as usize, n,
-        "every node must be in exactly one chain"
-    );
+    assert_eq!(start[nt] as usize, n, "every node must be in exactly one chain");
     let ir = Raw::of(&mut id_v);
-    on_threads(nt, |t| {
-        chains[t]
-            .iter()
-            .zip(start[t]..)
-            .for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k })
-    });
+    on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     drop((claimed, chains));
 
     // The graph in the new numbering: degrees scattered, summed, then each
@@ -550,10 +450,7 @@ fn main() {
     let id = &id_v[..];
     let mut off = vec![0u32; n + 1];
     let or = Raw::of(&mut off);
-    on_threads(nt, |t| {
-        share(n, t, nt)
-            .for_each(|u| unsafe { *or.at(id[u] as usize + 1) = first[u + 1] - first[u] })
-    });
+    on_threads(nt, |t| share(n, t, nt).for_each(|u| unsafe { *or.at(id[u] as usize + 1) = first[u + 1] - first[u] }));
     for v in 0..n {
         off[v + 1] += off[v];
     }
@@ -565,8 +462,7 @@ fn main() {
         for u in r.clone() {
             if u + 8 < r.end {
                 prefetch(&off[id[u + 8] as usize]);
-                (first[u + 8]..first[u + 9])
-                    .for_each(|e| prefetch(&id[(link[e as usize] & hmask) as usize]));
+                (first[u + 8]..first[u + 9]).for_each(|e| prefetch(&id[(link[e as usize] & hmask) as usize]));
             }
             if u + 4 < r.end {
                 prefetch(unsafe { ar.at(off[id[u + 4] as usize] as usize) });
@@ -587,10 +483,7 @@ fn main() {
     heavy2.sort_unstable();
     // Queries in the new numbering (sorted later), then the old graph and the
     // id map can go, freed on a side thread while the reverse graph is built.
-    let ends: Vec<(u32, u32)> = queries
-        .iter()
-        .map(|&(s, t)| (id[s as usize], id[t as usize]))
-        .collect();
+    let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
     std::thread::spawn(move || drop((heavy, first_v, link_v, id_v)));
 
     // The reverse graph in the same format: in-degrees counted into
@@ -600,13 +493,7 @@ fn main() {
     let mut roff = vec![0u32; n + 1];
     let rr = Raw::of(&mut roff);
     let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
-    on_threads(nt, |t| {
-        share(n, t, nt).for_each(|u| {
-            (off[u]..off[u + 1]).for_each(|e| {
-                bump((adj[e as usize] & hmask) as usize + 1);
-            })
-        })
-    });
+    on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
     for v in 0..n {
         roff[v + 1] += roff[v];
     }
@@ -635,74 +522,17 @@ fn main() {
     let mut order: Vec<usize> = (0..ends.len()).collect();
     order.sort_unstable_by_key(|&q| ends[q]);
     // Each direction: offsets, packed edge words, heavy weights.
-    let sides = [
-        (&off[..], &adj[..], &heavy2[..]),
-        (&roff[..], &radj[..], &rheavy[..]),
-    ];
+    let sides = [(&off[..], &adj[..], &heavy2[..]), (&roff[..], &radj[..], &rheavy[..])];
     let mut ans = vec![INF; ends.len()];
     let ansr = Raw::of(&mut ans);
-    let job = Queries {
-        nt,
-        n,
-        hb,
-        big,
-        order: &order,
-        queries: &queries,
-        ends: &ends,
-        roff: &roff,
-        sides,
-        ans: ansr,
-    };
-    // No path is longer than the sum of all weights, and every tentative
-    // distance is a path's length: when that sum fits above a node id, a heap
-    // entry is one word.
-    if hb < 64 && wsum >> (64 - hb) == 0 {
-        search::<u64>(&job);
-    } else {
-        search::<u128>(&job);
-    }
-
-    // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
-    let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
-    std::fs::write(format!("{outd}/distances.txt"), out).unwrap();
-}
-
-/// Everything the query phase reads.
-struct Queries<'a> {
-    nt: usize,
-    n: usize,
-    hb: u32,
-    big: u32,
-    order: &'a [usize],
-    queries: &'a [(u32, u32)],
-    ends: &'a [(u32, u32)],
-    roff: &'a [u32],
-    sides: [(&'a [u32], &'a [u32], &'a [(u32, u32)]); 2], // each direction: offsets, packed edge words, heavy weights
-    ans: Raw<u64>,
-}
-
-/// Bidirectional Dijkstra: grow the side with the smaller queue, record the
-/// best length where the sides meet, and stop once the two smallest queued
-/// keys add up to at least that. A side that runs dry has reached every node
-/// it can, so the best meeting seen is the answer.
-fn search<K: Key>(job: &Queries) {
-    let Queries {
-        nt,
-        n,
-        hb,
-        big,
-        order,
-        queries,
-        ends,
-        roff,
-        sides,
-        ans: ansr,
-    } = *job;
-    let hmask = (1u32 << hb) - 1;
     let next = AtomicUsize::new(0);
+    // Bidirectional Dijkstra: grow the side with the smaller queue, record the
+    // best length where the sides meet, and stop once the two smallest queued
+    // keys add up to at least that. A side that runs dry has reached every node
+    // it can, so the best meeting seen is the answer.
     on_threads(nt, |_| {
         let mut dist = [Dist::new(n), Dist::new(n)];
-        let mut queue = [Heap::<K>::new(hb), Heap::<K>::new(hb)];
+        let mut queue = [Heap::default(), Heap::default()];
         loop {
             let q = next.fetch_add(1, Relaxed);
             let Some(&i) = order.get(q) else { return };
@@ -719,8 +549,8 @@ fn search<K: Key>(job: &Queries) {
             queue[0].push(0, s);
             *dist[1].at(t) = 0;
             queue[1].push(0, t);
-            while let (Some(a), Some(b)) = (queue[0].top(), queue[1].top()) {
-                if a + b >= best {
+            while let (Some(a), Some(b)) = (queue[0].0.first(), queue[1].0.first()) {
+                if a.0 + b.0 >= best {
                     break;
                 }
                 let k = (queue[1].0.len() < queue[0].0.len()) as usize;
@@ -754,4 +584,8 @@ fn search<K: Key>(job: &Queries) {
             dist.iter_mut().for_each(Dist::reset);
         }
     });
+
+    // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
+    let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
+    std::fs::write(format!("{outd}/distances.txt"), out).unwrap();
 }
