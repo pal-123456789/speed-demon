@@ -1,4 +1,4 @@
-//! Speed Demon 2026 â€” Track B (Index).
+//! Speed Demon 2026 — Track B (Index).
 //!
 //! Strategy
 //! --------
@@ -21,7 +21,7 @@
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
 //! (including every byte >= 0x80) is a separator.
 //!
-//! `std` only â€” no crates, no Cargo.toml.
+//! `std` only — no crates, no Cargo.toml.
 
 use std::env;
 use std::fs::{self, File};
@@ -40,41 +40,7 @@ const QUERIES_FILE: &str = "queries.txt";
 /// where this track's 12x gap to the leader came from.
 const NWORKERS: usize = 12;
 
-/// Candidate `(document << 32) | query` pairs for every phrase query `qi` with
-/// `qi % nth == t`: the rarest term's list, intersected with the others in
-/// increasing length.  Intersection is commutative, so the candidate set is
-/// exactly the reference's.
-fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) -> Vec<u64> {
-    let mut pairs: Vec<u64> = Vec::new();
-    let mut cand: Vec<u32> = Vec::new();
-    let mut order: Vec<usize> = Vec::new();
-    for qi in (t..queries.len()).step_by(nth) {
-        if let Query::Phrase(terms) = &queries[qi] {
-            order.clear();
-            order.extend(0..terms.len());
-            order.sort_by_key(|&i| postings.len(terms[i]));
-            cand.clear();
-            if let Some(&first) = order.first() {
-                postings.decode_into(terms[first], &mut cand);
-            }
-            // Filter the rarest term's candidates in place instead of decoding
-            // each other term: they are the common ones, and the filter order
-            // does not change the set.
-            for &i in order.iter().skip(1) {
-                if cand.is_empty() {
-                    break;
-                }
-                cand.retain(|&d| postings.has(terms[i], d));
-            }
-            for &d in cand.iter() {
-                pairs.push(((d as u64) << 32) | qi as u64);
-            }
-        }
-    }
-    pairs
-}
-
-// â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── paths ───────────────────────────────────────────────────────────────────
 
 fn data_dir() -> PathBuf {
     env::var("SD_DATA_DIR")
@@ -98,7 +64,7 @@ fn output_path() -> PathBuf {
     out_dir().join(name)
 }
 
-// â”€â”€ tokenisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── tokenisation ────────────────────────────────────────────────────────────
 
 const fn build_is_tok() -> [bool; 256] {
     let mut t = [false; 256];
@@ -157,28 +123,9 @@ fn ascii_lower_in_place(b: &mut [u8]) {
     }
 }
 
-/// Token spans (start, len) of the already-lowercased text.
-#[inline]
-fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
-    spans.clear();
-    let n = text.len();
-    let mut i = 0usize;
-    while i < n {
-        while i < n && !IS_TOK[text[i] as usize] {
-            i += 1;
-        }
-        let s = i;
-        i = scan_token(text, i);
-        if i > s {
-            spans.push((s as u32, (i - s) as u32));
-        }
-    }
-}
-
-// â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── term interning ──────────────────────────────────────────────────────────
 
 /// Hash a term with the CPU's CRC32 instruction.
-#[inline]
 ///
 /// The previous version folded 8-byte chunks with a dependent multiply-and-shift
 /// per chunk, which is about four serialised multiply-shift chains for a 12-byte
@@ -274,13 +221,6 @@ impl TermTable {
     #[inline]
     fn len(&self) -> usize {
         self.offs.len()
-    }
-
-    #[inline]
-    fn key(&self, id: u32) -> &[u8] {
-        let o = self.offs[id as usize] as usize;
-        let l = self.lens[id as usize] as usize;
-        &self.arena[o..o + l]
     }
 
     #[inline]
@@ -404,7 +344,7 @@ impl TermTable {
     }
 }
 
-// â”€â”€ queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── queries ─────────────────────────────────────────────────────────────────
 
 const OP_AND: u8 = 0;
 const OP_OR: u8 = 1;
@@ -482,7 +422,7 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
     }
 }
 
-// â”€â”€ corpus scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── corpus scan ─────────────────────────────────────────────────────────────
 
 #[inline]
 fn parse_u32(b: &[u8]) -> u32 {
@@ -608,6 +548,7 @@ impl Stream {
 struct Part {
     count: Vec<u16>,
     streams: Vec<Stream>,
+    found: Vec<(u32, u32)>,
 }
 
 impl Part {
@@ -615,6 +556,7 @@ impl Part {
         Part {
             count: vec![0u16; nterms],
             streams: (0..nb).map(|_| Stream::new()).collect(),
+            found: Vec::new(),
         }
     }
 }
@@ -694,30 +636,6 @@ impl Postings {
         }
     }
 
-    /// Is `doc` in term `t`?  The runs ascend with the file and each is a plain
-    /// ascending `u16` array, so one binary search lands in the right worker and
-    /// answers without decoding anything.  The phrase path filters a rare term's
-    /// candidates against common terms, and materialising a common term there
-    /// costs a decode of millions of postings it never reads.
-    fn has(&self, t: u32, doc: u32) -> bool {
-        if let Some(b) = self.bits_of(t) {
-            return b[(doc >> 6) as usize] >> (doc & 63) & 1 != 0;
-        }
-        let w = match self.first.partition_point(|&f| f <= doc) {
-            0 => return false,
-            w => w - 1,
-        };
-        let off = doc - self.first[w];
-        if off > u16::MAX as u32 {
-            return false;
-        }
-        let mut at = self.offs[t as usize] as usize;
-        for u in 0..w {
-            at += self.seg[t as usize * self.nw + u] as usize;
-        }
-        let n = self.seg[t as usize * self.nw + w] as usize;
-        self.at[at..at + n].binary_search(&(off as u16)).is_ok()
-    }
 }
 
 /// The stamp and the df share one 32-bit word: the high twelve bits are the
@@ -730,35 +648,18 @@ const ST_DF: u32 = (1 << 20) - 1;
 /// A term number that names nothing: no bitmap, and no block in progress.
 const NONE: u32 = u32::MAX;
 
-/// Resolves every token of `text` that is a query term into `ids`, in token
-/// order.  A token's table slot is a random read, so its slot is prefetched and the
-/// token is looked up `LAG` tokens later.
-///
-/// `state` and `bmi` are the arrays the caller indexes with each id, and their
-/// slots are prefetched as each id is resolved.  The probe and the per-term state
-/// read are the two dependent random reads of the build and the ring covers only
-/// the first; resolving a whole document before any of its state is read gives the
-/// second one a document of lead time instead of nothing.
+/// Calls `on` with the term id of each token of `text` -- `NONE` for a token that is
+/// not a query term -- in token order.  A token's table slot is a random read, so its slot is prefetched and
+/// the token is looked up `LAG` tokens later; results are still reported in token
+/// order, so callers that keep per-document state see the document's tokens once
+/// each and in order.
 #[inline(always)]
-fn term_ids(text: &[u8], tt: &TermTable, ids: &mut Vec<u32>, state: *const u32, bmi: *const u32) {
+fn each_term(text: &[u8], tt: &TermTable, mut on: impl FnMut(u32)) {
     const LAG: usize = 8;
     let n = text.len();
-    ids.clear();
     let mut ring = [(0u64, 0usize, 0usize); LAG];
     let mut cnt = 0usize;
-    let mut hit = |found: Option<u32>| {
-        if let Some(t) = found {
-            ids.push(t);
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                // SAFETY: `t` is a term id, so both addresses lie inside arrays of
-                // `nterms` words, and a prefetch never faults.
-                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-                _mm_prefetch::<_MM_HINT_T0>(state.add(t as usize).cast());
-                _mm_prefetch::<_MM_HINT_T0>(bmi.add(t as usize).cast());
-            }
-        }
-    };
+    let mut hit = |found: Option<u32>| on(found.unwrap_or(NONE));
     let mut i = 0usize;
     while i < n {
         while i < n && !IS_TOK[text[i] as usize] {
@@ -793,6 +694,94 @@ fn term_ids(text: &[u8], tt: &TermTable, ids: &mut Vec<u32>, state: *const u32, 
     }
 }
 
+/// Phrases are answered inside the build scan.  A phrase can only match where its
+/// rarest term (by the sample's df) occurs, so each document's tokens are kept as
+/// term ids (`NONE` between query terms, which breaks adjacency) and checked
+/// only at the occurrences of terms that anchor a phrase.  Any term of a phrase
+/// would do as the anchor -- every match contains it -- so a poor sample costs
+/// time and cannot change an answer.
+struct PhraseIx<'a> {
+    queries: &'a [Query],
+    /// `a_ent[a_off[t]..a_off[t + 1]]`: the `(query, offset in phrase)` pairs
+    /// anchored at term `t`.
+    a_off: Vec<u32>,
+    a_ent: Vec<(u32, u32)>,
+    /// One bit per term: does it anchor any phrase?
+    anch: Vec<u64>,
+}
+
+fn phrase_ix<'a>(queries: &'a [Query], df: &[u32]) -> PhraseIx<'a> {
+    let mut pairs: Vec<(u32, u32, u32)> = Vec::new();
+    for (qi, q) in queries.iter().enumerate() {
+        if let Query::Phrase(ph) = q {
+            if let Some(&a) = ph.iter().min_by_key(|&&t| (df[t as usize], t)) {
+                for (k, &t) in ph.iter().enumerate() {
+                    if t == a {
+                        pairs.push((a, qi as u32, k as u32));
+                    }
+                }
+            }
+        }
+    }
+    let mut a_off = vec![0u32; df.len() + 1];
+    for &(t, _, _) in &pairs {
+        a_off[t as usize + 1] += 1;
+    }
+    for t in 0..df.len() {
+        a_off[t + 1] += a_off[t];
+    }
+    let mut cur = a_off.clone();
+    let mut a_ent = vec![(0u32, 0u32); pairs.len()];
+    for &(t, qi, k) in &pairs {
+        a_ent[cur[t as usize] as usize] = (qi, k);
+        cur[t as usize] += 1;
+    }
+    let mut anch = vec![0u64; df.len().div_ceil(64)];
+    for &(t, _, _) in &pairs {
+        anch[t as usize >> 6] |= 1u64 << (t & 63);
+    }
+    PhraseIx { queries, a_off, a_ent, anch }
+}
+
+/// One worker's phrase state: the current document's token ids, the last document
+/// each phrase matched in (a document counts once however often it matches), and
+/// the `(document, query)` matches in document order.
+struct PhraseScan<'a> {
+    ix: &'a PhraseIx<'a>,
+    toks: Vec<u32>,
+    /// Positions in `toks` of the tokens that anchor a phrase.
+    cands: Vec<u32>,
+    last: Vec<u32>,
+    found: Vec<(u32, u32)>,
+}
+
+impl<'a> PhraseScan<'a> {
+    fn new(ix: &'a PhraseIx<'a>) -> Self {
+        PhraseScan { ix, toks: Vec::new(), cands: Vec::new(), last: vec![u32::MAX; ix.queries.len()], found: Vec::new() }
+    }
+
+    fn check(&mut self, id: u32) {
+        let ix = self.ix;
+        for &p in &self.cands {
+            let (p, t) = (p as usize, self.toks[p as usize]);
+            for &(qi, k) in &ix.a_ent[ix.a_off[t as usize] as usize..ix.a_off[t as usize + 1] as usize] {
+                let (k, q) = (k as usize, qi as usize);
+                if self.last[q] == id {
+                    continue;
+                }
+                if let Query::Phrase(ph) = &ix.queries[q] {
+                    if p >= k && p - k + ph.len() <= self.toks.len() && self.toks[p - k..p - k + ph.len()] == ph[..] {
+                        self.last[q] = id;
+                        self.found.push((id, qi));
+                    }
+                }
+            }
+        }
+        self.toks.clear();
+        self.cands.clear();
+    }
+}
+
 /// Index one lowercased document.  A term that is held as a bitmap collects its
 /// document's bit, which is idempotent, so it needs no stamp and no unit; a term
 /// that is a posting list appends one unit to that term's bucket of this worker's
@@ -808,19 +797,29 @@ fn index_doc(
     nslot: &mut [u32],
     bmi: &[u32],
     pending: &mut [u64],
-    ids: &mut Vec<u32>,
+    ph: &mut PhraseScan,
     bit: u64,
     gen: u32,
+    id: u32,
     off: u32,
     nb: usize,
     nbsh: u32,
 ) {
-    term_ids(text, tt, ids, nslot.as_ptr(), bmi.as_ptr());
-    for &t in ids.iter() {
+    let phrases = !ph.last.is_empty();
+    each_term(text, tt, |t| {
+        if phrases {
+            if t != NONE && ph.ix.anch[t as usize >> 6] >> (t & 63) & 1 != 0 {
+                ph.cands.push(ph.toks.len() as u32);
+            }
+            ph.toks.push(t);
+        }
+        if t == NONE {
+            return;
+        }
         let bi = bmi[t as usize];
         if bi != NONE {
             pending[bi as usize] |= bit;
-            continue;
+            return;
         }
         let e = &mut nslot[t as usize];
         if *e >> 20 != gen {
@@ -830,6 +829,9 @@ fn index_doc(
             prev[b] = off;
             streams[b].put(t >> nbsh, gap);
         }
+    });
+    if phrases {
+        ph.check(id);
     }
 }
 
@@ -837,22 +839,17 @@ fn index_doc(
 /// range that hold it.  This only ever decides how a term is stored, never what
 /// it matches, so a sample that is wrong costs space or time and cannot change an
 /// answer.
-fn sample_doc(
-    text: &[u8],
-    tt: &TermTable,
-    last: &mut [u32],
-    df: &mut [u32],
-    gen: u32,
-    ids: &mut Vec<u32>,
-) {
-    term_ids(text, tt, ids, last.as_ptr(), df.as_ptr());
-    for &t in ids.iter() {
+fn sample_doc(text: &[u8], tt: &TermTable, last: &mut [u32], df: &mut [u32], gen: u32) {
+    each_term(text, tt, |t| {
+        if t == NONE {
+            return;
+        }
         let e = &mut last[t as usize];
         if *e != gen {
             *e = gen;
             df[t as usize] += 1;
         }
-    }
+    });
 }
 
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
@@ -884,11 +881,11 @@ fn build_range(
     nbm: usize,
     words: usize,
     bmp: Raw<AtomicU64>,
+    pix: &PhraseIx,
     first: u32,
     start: u64,
     end: u64,
 ) -> Part {
-    let mut ids: Vec<u32> = Vec::with_capacity(256);
     let mut nslot: Vec<u32> = vec![0u32; nterms];
     let mut prev: Vec<u32> = vec![0u32; nb];
     let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
@@ -896,6 +893,7 @@ fn build_range(
     let mut pending: Vec<u64> = vec![0u64; nbm];
     let mut block: u32 = NONE;
     let mut gen: u32 = 0;
+    let mut ph = PhraseScan::new(pix);
 
     let f = match File::open(path) {
         Ok(f) => f,
@@ -977,7 +975,7 @@ fn build_range(
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, bmi, &mut pending, &mut ids, bit, gen, off, nb, nbsh);
+        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, bmi, &mut pending, &mut ph, bit, gen, id, off, nb, nbsh);
     }
     if block != NONE {
         flush(&mut pending, block as usize, words, bmp);
@@ -994,7 +992,7 @@ fn build_range(
         }
         count[t] = c as u16;
     }
-    Part { count, streams }
+    Part { count, streams, found: ph.found }
 }
 
 /// Add a worker's gathered words to the shared bitmaps and clear them.  Every
@@ -1021,7 +1019,6 @@ fn flush(pending: &mut [u64], w: usize, words: usize, bmp: Raw<AtomicU64>) {
 /// malformed still reports the id the full scan will use.
 fn sample_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> (u32, Vec<u32>) {
     let (mut df, mut last) = (vec![0u32; nterms], vec![0u32; nterms]);
-    let mut ids: Vec<u32> = Vec::with_capacity(256);
     let (mut first, mut gen, mut seen) = (0u32, 0u32, false);
     let stop_at = start + (end - start) / 32;
     let f = match File::open(path) {
@@ -1070,7 +1067,7 @@ fn sample_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64
         gen += 1;
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        sample_doc(text, tt, &mut last, &mut df, gen, &mut ids);
+        sample_doc(text, tt, &mut last, &mut df, gen);
     }
     (first, df)
 }
@@ -1096,10 +1093,11 @@ fn build_index(
     bmi: &[u32],
     nbm: usize,
     words: usize,
-) -> io::Result<Postings> {
+    pix: &PhraseIx,
+) -> io::Result<(Postings, Vec<Vec<(u32, u32)>>)> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
-        return Ok(Postings::empty(nterms));
+        return Ok((Postings::empty(nterms), Vec::new()));
     }
 
     let (nb, nbsh) = bucket_count(nterms);
@@ -1109,13 +1107,13 @@ fn build_index(
     // only where their ranges meet inside one 64-document block.
     let mut bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbm * words]) };
     let bmp = Raw::of(&mut bits);
-    let parts: Vec<Part> = thread::scope(|s| {
+    let mut parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
         for i in 0..nworkers {
             let (start, end) = (cuts[i], cuts[i + 1]);
             let first = firsts[i];
             handles.push(s.spawn(move || {
-                build_range(path, tt, nterms, nb, nbsh, bmi, nbm, words, bmp, first, start, end)
+                build_range(path, tt, nterms, nb, nbsh, bmi, nbm, words, bmp, pix, first, start, end)
             }));
         }
         handles
@@ -1126,8 +1124,9 @@ fn build_index(
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let nw = parts.len();
     if nw == 0 {
-        return Ok(Postings::empty(nterms));
+        return Ok((Postings::empty(nterms), Vec::new()));
     }
+    let found: Vec<Vec<(u32, u32)>> = parts.iter_mut().map(|p| std::mem::take(&mut p.found)).collect();
 
     let mut seg: Vec<u16> = vec![0u16; nterms * nw];
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
@@ -1164,17 +1163,20 @@ fn build_index(
     let bdf: Vec<u32> = (0..nbm)
         .map(|i| bits[i * words..][..words].iter().map(|w| w.count_ones()).sum())
         .collect();
-    Ok(Postings {
-        seg,
-        offs,
-        first,
-        at,
-        nw,
-        bmi: bmi.to_vec(),
-        bits,
-        words,
-        bdf,
-    })
+    Ok((
+        Postings {
+            seg,
+            offs,
+            first,
+            at,
+            nw,
+            bmi: bmi.to_vec(),
+            bits,
+            words,
+            bdf,
+        },
+        found,
+    ))
 }
 
 /// Write one worker's units into the arena.  A unit names the term's index in its
@@ -1231,7 +1233,7 @@ fn scatter(
     }
 }
 
-// â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── set algebra on ascending id vectors ─────────────────────────────────────
 
 /// First index `>= from` whose value is `>= x`.
 #[inline]
@@ -1361,172 +1363,9 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     }
 }
 
-// â”€â”€ phrase verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── phrase verification ─────────────────────────────────────────────────────
 
-/// Does `text` (already lowercased) contain `terms` at `terms.len()`
-/// consecutive token positions?
-fn spans_contain(text: &[u8], spans: &[(u32, u32)], terms: &[&[u8]]) -> bool {
-    let k = terms.len();
-    if k == 0 {
-        return true;
-    }
-    if spans.len() < k {
-        return false;
-    }
-    let first = terms[0];
-    'win: for w in 0..=(spans.len() - k) {
-        let (s, l) = spans[w];
-        if l as usize != first.len() || &text[s as usize..s as usize + l as usize] != first {
-            continue;
-        }
-        for j in 1..k {
-            let (s, l) = spans[w + j];
-            let t = terms[j];
-            if l as usize != t.len() || &text[s as usize..s as usize + l as usize] != t {
-                continue 'win;
-            }
-        }
-        return true;
-    }
-    false
-}
-
-/// Verify the `(document, phrase)` pairs that fall inside one byte range of
-/// `docs.txt`, returning the hits as `(query << 32) | document`.
-///
-/// The range rule is `build_range`'s: a line belongs to the worker whose range
-/// holds its first byte, and the straddling line is discarded here because the
-/// worker to the left already owned it.  Candidates are only looked for on the
-/// documents the caller asked about, so the corpus is still read front to back
-/// with no seeks inside the range.
-fn verify_range(
-    path: &Path,
-    pairs: &[u64],
-    queries: &[Query],
-    tt: &TermTable,
-    start: u64,
-    end: u64,
-) -> Vec<u64> {
-    let mut out: Vec<u64> = Vec::new();
-    let f = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return out,
-    };
-    let mut r = BufReader::with_capacity(1 << 18, f);
-    let mut pos = start;
-    if start > 0 {
-        let mut junk: Vec<u8> = Vec::with_capacity(512);
-        if r.seek(SeekFrom::Start(start)).is_err() {
-            return out;
-        }
-        match r.read_until(b'\n', &mut junk) {
-            Ok(0) | Err(_) => return out,
-            Ok(k) => pos += k as u64,
-        }
-    }
-
-    let mut line: Vec<u8> = Vec::with_capacity(2048);
-    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
-    let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
-    let mut pi = 0usize;
-    loop {
-        if pi >= pairs.len() {
-            break;
-        }
-        line.clear();
-        let n = match r.read_until(b'\n', &mut line) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 || pos >= end {
-            break;
-        }
-        pos += n as u64;
-        let mut stop = n;
-        if line[stop - 1] == b'\n' {
-            stop -= 1;
-        }
-        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
-            Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => continue,
-        };
-        // `pairs` is sorted by document id, and the ids ascend with the byte
-        // offset, so this cursor only ever moves forward.
-        while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
-            pi += 1;
-        }
-        if pi >= pairs.len() {
-            break;
-        }
-        if (pairs[pi] >> 32) as u32 != id {
-            continue;
-        }
-        let text = &mut line[tstart..stop];
-        ascii_lower_in_place(text);
-        tokenize_spans(text, &mut spans);
-        loop {
-            let qi = (pairs[pi] & 0xffff_ffff) as usize;
-            if let Query::Phrase(ts) = &queries[qi] {
-                terms.clear();
-                terms.extend(ts.iter().map(|&t| tt.key(t)));
-                if spans_contain(text, &spans, &terms) {
-                    out.push(((qi as u64) << 32) | id as u64);
-                }
-            }
-            pi += 1;
-            if pi >= pairs.len() || (pairs[pi] >> 32) as u32 != id {
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Second pass: verify every `(document, phrase)` pair.
-///
-/// This used to be the one serial phase left: 214k candidate pairs spread over
-/// 249,998 documents, so it read all 254 MB and tokenised 86% of the corpus on
-/// one core.  The byte ranges are disjoint and their document ids increase, so
-/// the per-worker hit lists concatenate into the ascending per-query id list the
-/// writer needs, in worker order, with no sort and no shared state.
-fn verify_phrases(
-    path: &PathBuf,
-    pairs: &[u64],
-    queries: &[Query],
-    tt: &TermTable,
-    hits: &mut [Vec<u32>],
-) -> io::Result<()> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let size = fs::metadata(path)?.len();
-    if size == 0 {
-        return Ok(());
-    }
-    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
-    let parts: Vec<Vec<u64>> = thread::scope(|s| {
-        let mut handles = Vec::with_capacity(nworkers);
-        for i in 0..nworkers {
-            let (a, b) = (
-                size * i as u64 / nworkers as u64,
-                size * (i as u64 + 1) / nworkers as u64,
-            );
-            handles.push(s.spawn(move || verify_range(path, pairs, queries, tt, a, b)));
-        }
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
-    });
-    for p in &parts {
-        for &e in p {
-            hits[(e >> 32) as usize].push(e as u32);
-        }
-    }
-    Ok(())
-}
-
-// â”€â”€ output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── output ──────────────────────────────────────────────────────────────────
 
 #[inline]
 fn push_u64(out: &mut Vec<u8>, mut v: u64) {
@@ -1700,7 +1539,7 @@ fn format_bits(out: &mut Vec<u8>, b: &[u64]) {
     out.push(b'\n');
 }
 
-// â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── main ────────────────────────────────────────────────────────────────────
 
 /// The terms held as bitmaps: those the sample says hold at least 1/32 of the
 /// document-id range, which is where one bit per document stops being larger than
@@ -1732,9 +1571,14 @@ fn classify(df: &[u32], ndocs: usize, words: usize) -> (Vec<u32>, usize) {
     (bmi, nbm)
 }
 
+/// Back part-written regions with 4 KB pages: with transparent huge pages in `always`
+/// mode (as other teams' logs show on the scoring box) a part-written chunk can cost 2 MB.
+const THP_OFF: bool = true;
+
 #[cfg(target_os = "linux")]
 extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
+    fn prctl(option: i32, ...) -> i32;
 }
 
 /// Pin glibc's mmap threshold so a freed large allocation returns its pages.
@@ -1752,6 +1596,9 @@ extern "C" {
 fn tune_allocator() {
     unsafe {
         mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
+        if THP_OFF {
+            prctl(41, 1u64, 0u64, 0u64, 0u64); // PR_SET_THP_DISABLE
+        }
     }
 }
 
@@ -1823,10 +1670,11 @@ fn main() {
     let ndocs = firsts.iter().copied().max().map_or(0, |f| f as usize + 65536);
     let words = ndocs.div_ceil(256) * 4;
     let (bmi, nbm) = classify(&df, ndocs, words);
+    let pix = phrase_ix(&queries, &df);
     df.clear();
     lap!("sample");
 
-    let postings = match build_index(&docs_path, &tt, nterms, &cuts, &firsts, &bmi, nbm, words) {
+    let (postings, found) = match build_index(&docs_path, &tt, nterms, &cuts, &firsts, &bmi, nbm, words, &pix) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
@@ -1836,32 +1684,14 @@ fn main() {
 
     lap!("build index");
 
-    // Phrase candidates, gathered as `(document << 32) | query index` so the
-    // verification pass can walk the corpus in document order.
+    // Phrase answers came out of the scan: each worker's matches ascend by document
+    // and the workers' ranges ascend with the file, so every list ascends.
     let mut hits: Vec<Vec<u32>> = vec![Vec::new(); queries.len()];
-    let nth = NWORKERS.min(queries.len().max(1));
-    let cand_parts: Vec<Vec<u64>> = thread::scope(|s| {
-        let postings = &postings;
-        let queries = &queries;
-        let mut handles = Vec::with_capacity(nth);
-        for t in 0..nth {
-            handles.push(s.spawn(move || phrase_pairs(queries, t, nth, postings)));
+    for part in found {
+        for (doc, qi) in part {
+            hits[qi as usize].push(doc);
         }
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
-    });
-    let mut pairs: Vec<u64> = cand_parts.concat();
-    drop(cand_parts);
-    lap!("phrase candidates");
-    pairs.sort_unstable();
-
-    if let Err(e) = verify_phrases(&docs_path, &pairs, &queries, &tt, &mut hits) {
-        eprintln!("[track-{TRACK}] cannot verify phrases: {e}");
     }
-    drop(pairs);
-    lap!("phrase verify");
 
     if let Err(e) = fs::create_dir_all(out_dir()) {
         eprintln!("[track-{TRACK}] cannot create output dir: {e}");
