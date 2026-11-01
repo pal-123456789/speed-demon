@@ -40,6 +40,39 @@ const QUERIES_FILE: &str = "queries.txt";
 /// where this track's 12x gap to the leader came from.
 const NWORKERS: usize = 12;
 
+/// Candidate `(document << 32) | query` pairs for every phrase query `qi` with
+/// `qi % nth == t`: the rarest term's list, intersected with the others in
+/// increasing length.  Intersection is commutative, so the candidate set is
+/// exactly the reference's.
+fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) -> Vec<u64> {
+    let mut pairs: Vec<u64> = Vec::new();
+    let mut cand: Vec<u32> = Vec::new();
+    let mut nxt: Vec<u32> = Vec::new();
+    let mut order: Vec<usize> = Vec::new();
+    for qi in (t..queries.len()).step_by(nth) {
+        if let Query::Phrase(terms) = &queries[qi] {
+            order.clear();
+            order.extend(0..terms.len());
+            order.sort_by_key(|&i| postings.get(terms[i]).len());
+            cand.clear();
+            if let Some(&first) = order.first() {
+                cand.extend_from_slice(postings.get(terms[first]));
+            }
+            for &i in order.iter().skip(1) {
+                if cand.is_empty() {
+                    break;
+                }
+                intersect_into(&cand, postings.get(terms[i]), &mut nxt);
+                std::mem::swap(&mut cand, &mut nxt);
+            }
+            for &d in cand.iter() {
+                pairs.push(((d as u64) << 32) | qi as u64);
+            }
+        }
+    }
+    pairs
+}
+
 // â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn data_dir() -> PathBuf {
@@ -659,17 +692,47 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             .collect()
     });
 
-    let total: usize = parts.iter().map(|p| p.arena.len()).sum();
-    let mut arena: Vec<u32> = Vec::with_capacity(total);
+    // Offsets first: a term's slot is the sum of its length in every worker.
+    // Then each thread fills the disjoint stretch of one zeroed arena that
+    // belongs to its range of terms, copying the workers' runs in worker order.
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
+    let mut acc = 0u32;
     for ti in 0..nterms {
-        offs.push(arena.len() as u32);
+        offs.push(acc);
         for p in &parts {
-            let (a, b) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
-            arena.extend_from_slice(&p.arena[a..b]);
+            acc += p.offs[ti + 1] - p.offs[ti];
         }
     }
-    offs.push(arena.len() as u32);
+    offs.push(acc);
+    let mut arena: Vec<u32> = vec![0u32; acc as usize];
+    {
+        let nthr = NWORKERS.min(nterms.max(1));
+        let bounds: Vec<usize> = (0..=nthr).map(|k| nterms * k / nthr).collect();
+        let mut rest: &mut [u32] = &mut arena[..];
+        let mut slices: Vec<&mut [u32]> = Vec::with_capacity(nthr);
+        for k in 0..nthr {
+            let len = (offs[bounds[k + 1]] - offs[bounds[k]]) as usize;
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(len);
+            slices.push(head);
+            rest = tail;
+        }
+        let (parts, offs, bounds) = (&parts, &offs, &bounds);
+        thread::scope(|s| {
+            for (k, dst) in slices.into_iter().enumerate() {
+                s.spawn(move || {
+                    let base = offs[bounds[k]] as usize;
+                    for ti in bounds[k]..bounds[k + 1] {
+                        let mut at = offs[ti] as usize - base;
+                        for p in parts.iter() {
+                            let (x, y) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
+                            dst[at..at + (y - x)].copy_from_slice(&p.arena[x..y]);
+                            at += y - x;
+                        }
+                    }
+                });
+            }
+        });
+    }
     Ok(Postings { arena, offs })
 }
 
@@ -1088,34 +1151,22 @@ fn main() {
 
     // Phrase candidates, gathered as `(document << 32) | query index` so the
     // verification pass can walk the corpus in document order.
-    let mut pairs: Vec<u64> = Vec::with_capacity(1 << 18);
     let mut hits: Vec<Vec<u32>> = vec![Vec::new(); queries.len()];
-    let mut cand: Vec<u32> = Vec::new();
-    let mut nxt: Vec<u32> = Vec::new();
-    let mut order: Vec<usize> = Vec::new();
-    for (qi, q) in queries.iter().enumerate() {
-        if let Query::Phrase(terms) = q {
-            // Rarest list first; intersection is commutative, so the candidate
-            // set is exactly the reference's.
-            order.clear();
-            order.extend(0..terms.len());
-            order.sort_by_key(|&i| postings.get(terms[i]).len());
-            cand.clear();
-            if let Some(&first) = order.first() {
-                cand.extend_from_slice(postings.get(terms[first]));
-            }
-            for &i in order.iter().skip(1) {
-                if cand.is_empty() {
-                    break;
-                }
-                intersect_into(&cand, postings.get(terms[i]), &mut nxt);
-                std::mem::swap(&mut cand, &mut nxt);
-            }
-            for &d in cand.iter() {
-                pairs.push(((d as u64) << 32) | qi as u64);
-            }
+    let nth = NWORKERS.min(queries.len().max(1));
+    let cand_parts: Vec<Vec<u64>> = thread::scope(|s| {
+        let postings = &postings;
+        let queries = &queries;
+        let mut handles = Vec::with_capacity(nth);
+        for t in 0..nth {
+            handles.push(s.spawn(move || phrase_pairs(queries, t, nth, postings)));
         }
-    }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+    let mut pairs: Vec<u64> = cand_parts.concat();
+    drop(cand_parts);
     lap!("phrase candidates");
     pairs.sort_unstable();
 
@@ -1123,9 +1174,6 @@ fn main() {
         eprintln!("[track-{TRACK}] cannot verify phrases: {e}");
     }
     drop(pairs);
-    drop(cand);
-    drop(nxt);
-    drop(order);
     lap!("phrase verify");
 
     if let Err(e) = fs::create_dir_all(out_dir()) {
@@ -1199,4 +1247,6 @@ fn main() {
         eprintln!("[track-{TRACK}] write error on {}", out_path.display());
     }
     lap!("write");
+    // The answer is flushed; skip freeing the index and the query list.
+    std::process::exit(0);
 }
