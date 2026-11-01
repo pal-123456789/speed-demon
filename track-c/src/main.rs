@@ -23,6 +23,7 @@
 //!    chosen at run time. Both give identical results; only the instructions differ.
 use std::arch::x86_64::*;
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
 use std::ffi::c_void;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};

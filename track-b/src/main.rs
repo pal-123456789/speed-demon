@@ -176,8 +176,8 @@ fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
 
 // â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-#[inline]
 /// Hash a term with the CPU's CRC32 instruction.
+#[inline]
 ///
 /// The previous version folded 8-byte chunks with a dependent multiply-and-shift
 /// per chunk, which is about four serialised multiply-shift chains for a 12-byte
@@ -341,13 +341,7 @@ impl TermTable {
     }
 
     /// One random word, then the key bytes -- no `offs`/`lens` touch.
-    #[inline]
-    #[inline]
-    fn probe(&self, key: &[u8]) -> Option<u32> {
-        self.probe_h(key, hash_bytes(key))
-    }
-
-    /// `probe` with the key's hash already computed (so its slot can be prefetched).
+    /// Probe with the key's hash already computed, so its slot can be prefetched.
     #[inline]
     fn probe_h(&self, key: &[u8], h: u64) -> Option<u32> {
         let tag = h & SLOT_TAG;
