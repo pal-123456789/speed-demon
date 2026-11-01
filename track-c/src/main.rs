@@ -673,40 +673,11 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
             }
         }
     } else {
-        // A worker failed, so the parity array would be partial -- and a wrong
-        // boundary is a wrong answer, not a slow one. Redo it on one thread here
-        // rather than carry a half-filled array into the split points below.
-        pc.fill(0);
-        let mut f = File::open(path)?;
-        let mut buf = vec![0u8; STEP];
-        for c in 0..nchunk {
-            f.seek(SeekFrom::Start((c as u64) * STEP as u64))?;
-            let off = (c as u64) * STEP as u64;
-            let want = ((len.saturating_sub(off)) as usize).min(STEP);
-            let mut k = 0usize;
-            while k < want {
-                match f.read(&mut buf[k..want]) {
-                    Ok(0) => break,
-                    Ok(n) => k += n,
-                    Err(e) => return Err(e),
-                }
-            }
-            let b = &buf[..k];
-            let mut i = 0usize;
-            let mut q: u64 = 0;
-            while i + 8 <= k {
-                let wv = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-                q += zero_byte(wv ^ QUOTE).count_ones() as u64;
-                i += 8;
-            }
-            while i < k {
-                if b[i] == b'"' {
-                    q += 1;
-                }
-                i += 1;
-            }
-            pc[c] = (q & 1) as u8;
-        }
+        // A worker failed, so the parity array would be partial -- and a partial array
+        // produces WRONG BOUNDARIES, not slow ones. Every failure reaching here is an I/O
+        // error (open, seek or read), and the serial version this replaced returned on the
+        // first of those too. Failing loudly is smaller and cannot be silently wrong.
+        return Err(std::io::Error::other("boundary pre-pass: a worker failed"));
     }
 
     let mut par = vec![0u8; nchunk + 1];
