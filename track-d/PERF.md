@@ -56,6 +56,97 @@ the reference (final scoring 10x).
 | 0 | The reference, unchanged | — | 72.69 s | (pin from the Oct 28 spec) | 0 |
 | 1 | Real Traverse: CSR built in parallel across twelve windows, u64 distance labels, 2,000 Dijkstra queries across twelve threads | `run-c7cd32a91b0e` | 1.5791 s | 225.3 MB | 41.82 |
 
+## 1c. Rung measured locally — 6-byte parse records in a per-thread arena
+
+> The table in section 1 is the FIRST rung's arithmetic and is kept only as
+> history. Everything measured since lives below and in section 2a.
+
+**KNOWN (local, this machine).** The board has not run this rung. Everything
+below is a paired, interleaved A/B on the full seed-1 corpus, with the 92 MB
+input read from an ext4 copy so that the file read is not the measurement.
+
+What changed, all in `src/main.rs`:
+
+* a part is 16,384 nodes instead of 65,536, so a tail's offset inside its part
+  is 16 bits;
+* a parse record is that u16 offset plus the 32-bit edge word — 6 bytes, was 8;
+* each thread writes its records into 1,024-record chunks carved from one arena
+  per thread, replacing 107 growable lists per thread and the 1,284 mutexes that
+  passed them to the fill pass;
+* the count/fill cursor is allocated once per thread and refilled, replacing a
+  256 KB zeroed allocation per part.
+
+Twenty ABBA rounds of the frozen baseline against this rung. The unit is in the
+column header, and `before/after` is the median of the per-round ratios, so an
+order effect cannot enter it:
+
+| what (all measured) | before | after | before/after | unit |
+|---|---:|---:|---:|---|
+| wall clock (measured) | 0.4400 | 0.4000 | 1.130 | s |
+| child CPU, user+sys (measured) | 3.815 | 3.495 | 1.110 | s |
+| minor page faults (measured) | 40982 | 36938 | 1.110 | count |
+| peak RSS (measured) | 154 | 154 | 1.002 | MB |
+
+A/A control, the same binary under two names over 20 rounds of the same script:
+0.990 wall, 0.999 CPU, 1.000 minor faults, 0.999 RSS. The rig resolves about
+2%, and it reports wall and CPU together because either one alone is not
+evidence. The control earned its place: the first version of the script always
+ran the second binary second, and the control caught a 15% order effect.
+
+Where the time went. Paired over 15 rounds, durations in ms, unit in the header.
+Medians of cumulative stamps do not telescope — an earlier version of this table
+did that and produced nonsense in phases whose code is identical:
+
+| phase (measured) | before | after | delta | change |
+|---|---:|---:|---:|---:|
+| parse | 27.98 | 26.35 | -1.64 | -5.9% |
+| part build | 55.43 | 15.97 | -40.40 | -72.9% |
+| blob order and new ids | 69.80 | 67.88 | -1.80 | -2.6% |
+| renumbering | 104.54 | 105.52 | -1.15 | -1.1% |
+| reverse graph | 32.23 | 32.55 | -0.37 | -1.1% |
+| search | 161.13 | 153.25 | -10.41 | -6.5% |
+| total | 450.6 | 399.8 | -50.8 | -11.3% |
+
+The search phase is the control in this table: its code is identical in both
+builds, so its -6.5% is the residue the paired statistic cannot remove. The whole
+effect is the part build, which is the phase the record layout lives in.
+
+**Correctness.** Full seed-1 corpus 5/5 MATCH on the pinned hash `a23dbdf0…`,
+the tiny hostile oracle MATCH, the official sample MATCH, `check-consistency.py`
+227 assertions agree, `check-claims.py --strict` 0 unsourced. The layout is
+exact for any input rather than for this one: the offset is masked to
+`sh <= 14` bits before the `u16` store, and the arena is sized from a
+6-byte-per-line lower bound, so an overrun would be a panic and not a wrong
+answer.
+
+**Source size.** Post-rustfmt scc code lines (scc 4.1.0, rustfmt defaults, the
+organizers' rule) moved 499 to 521 in `src/main.rs` and 514 to 536 for the
+folder — 0.14 points of S, traded deliberately for the local T gain above.
+
+**REVERTED, same session: one thread gang for every phase.** A barrier-parked
+crew of twelve, replacing per-phase `std::thread::scope` spawning. It did what
+it was supposed to do — voluntary context switches per run fell from 157 to 104
+— and it cost time: paired median 0.933 and 0.935 in two independent 20-round
+blocks, about 7% more CPU, with 0.976 and 0.971 wall. Page faults and RSS were
+unchanged. Two blocks, 40 rounds, reproducible, and the A/A control says the rig
+resolves 2%, so it is a result and not noise. A bare-metal box starts threads
+differently and the board may disagree; nothing here is kept on a hypothesis, so
+it is out.
+
+**Allocator audit, measured, 12 paired rounds per comparison.** Both calls sit
+in `tune_allocator`, and each was isolated by rebuilding with only that one
+present. `mallopt(-3, 1<<16)` earns its place: peak RSS 154 MB against 161 MB
+when it is removed, ratio measured 0.957 with quartiles 0.946 to 0.969, wall and
+CPU unchanged. `prctl(41, 1)` (PR_SET_THP_DISABLE) is retained on board evidence
+only: measured here it changed nothing (RSS 0.999, faults 0.998, wall 1.000, CPU
+0.984), but this host's transparent-hugepage setting is `madvise`, under which an
+anonymous allocation never receives a huge page in the first place, so nothing
+here disables anything. That is a gap in the local evidence, not a result.
+
+**Not measured.** The board's T and M for this rung. Wall time on this host has a
+15 to 50% spread and a 2% resolution, so the 11% above transfers as "large
+enough to show", not as a predicted board number.
+
 ---
 
 ## 2. The ladder
@@ -129,6 +220,8 @@ interesting part and judges are told to reward them."*
 | Too many ALT landmarks | _ | REFUTED BY MEASUREMENT | the premise was that landmark bounds would shrink the search, and the search is already 0.67% of the graph, so they can save at most about 2x. Memory grows as k*n*4 with per-landmark offsets, and the M axis has about 9 MB of headroom against the leader |
 | 32-bit distances | _ | not attempted, deliberately | there is no proven bound on the maximum path weight, and a wrong answer is worse than a slow one. The labels stay 64-bit |
 | Preprocessing justified by sequential query timing | _ | resolved by measurement | the queries run 12-way parallel and the budget is 12x smaller than a sequential reading suggests. This is also why the build/query split matters: the build is 16% and the queries 84%, so any preprocessing has to pay for itself 2,000 times inside a single timed run |
+| **One thread gang, barrier-parked, shared by every phase** | spawning twelve threads per phase loses the last one's first slice | **REVERTED: it removes 53 voluntary context switches per run and still costs about 7% CPU** | measured 0.933 and 0.935 over two independent 20-round blocks, against an A/A control that says the rig resolves 2%; wall 0.976 and 0.971. It is not kept on the strength of the mechanism it was supposed to have |
+| **6-byte parse records, one arena per thread, parts of 16,384 nodes** | a per-part list per thread, an 8-byte record and a fresh 256 KB cursor per part are all avoidable work in the build | **KEPT (local): part build 55.43 to 15.97 ms, total 450.6 to 399.8 ms, minor faults 40,982 to 36,938, wall 1.130x, CPU 1.110x over 20 paired rounds** | nothing to revert; the search phase, whose code is identical, is the control at -6.5% |
 
 ---
 
