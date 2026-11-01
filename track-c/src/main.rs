@@ -1,569 +1,151 @@
-//! Track C — Join.
+//! Track C — Join, in Rust with no dependencies.
 //!
-//! Parse a hostile CSV (quoted commas, `""` escapes, embedded newlines, mixed
-//! CRLF/LF terminators, U+FEFF at some record boundaries), join each record
-//! against a region lookup, and emit one sorted line of aggregates per country.
-//!
-//! The organizers call this the correctness track and say most disqualifications
-//! happen here, so the parser follows spec section 2.1 literally and does nothing
-//! clever. What IS clever is where the work happens: twelve threads parse twelve
-//! disjoint byte ranges of the file, each found by a proven record boundary.
-//!
-//! * A field starting with `"` ends at the next `"` that is not part of a `""`
-//!   pair. Inside quotes every other byte is data, including `,`, LF and U+FEFF.
-//! * A U+FEFF at the very start of the file, or immediately after a record
-//!   terminator, is a byte order mark and is skipped. Anywhere else it is data.
-//! * A record terminator is a CRLF or a bare LF **outside quotes**.
-//! * Money is exact integer cents. `-5.25` is -525. No float ever touches the
-//!   value or the output, so `-0.00` cannot be produced even by accident.
-//! * `names_distinct` compares exact byte strings after unescaping, so `Betts` and
-//!   `Betts ` are two values, and the empty unquoted name and `""` are one.
-//!
-//! ## How the file is split safely
-//!
-//! A newline seen with an **even** running count of `"` bytes is a record
-//! boundary. That is a theorem about this format, not a heuristic: a quoted field
-//! is `DQUOTE *(qbyte / DQUOTE DQUOTE) DQUOTE`, so its quote count is
-//! `1 + 2k + 1`, and an unquoted field contains no `"` at all. Every record
-//! therefore contains an even number of quotes, and a `\n` inside a quoted field
-//! always sits at odd parity.
-//!
-//! So one sequential pass records the boundary nearest each twelfth of the file,
-//! and each thread then seeks to its own boundary and parses to the next one. No
-//! record is split, none is parsed twice, and no thread needs to know anything
-//! about another's bytes.
-//!
-//! ## Memory
-//!
-//! Each thread streams its range through its own buffer rather than reading the
-//! range whole. Holding all twelve ranges at once would have cost the 202 MB the
-//! streaming version was introduced to avoid.
-//!
-//! The structure that actually dominated the peak was `names`: a
-//! `HashSet<Vec<u8>>` **per country, per thread**. This corpus draws its names
-//! from a pool of ~100,000 distinct values, but it has 3,320,000 records, so with
-//! 240 countries every thread ends up with roughly one distinct name per record
-//! in each country, and the twelve threads together held ~3.3M live set entries.
-//! Each entry is a 24-byte `Vec` header plus a heap block plus a hash-table slot,
-//! about 60 bytes, so that one field was ~200 MB and the entire peak.
-//!
-//! Names are now interned **once**, in a table sharded 64 ways by name hash, and
-//! `names_distinct` is a **bitmap per country** over the global name ids. A
-//! country's distinct count is the popcount of its bitmap, so the twelve
-//! per-thread copies disappear: 3.3M entries collapse to ~100k interned names
-//! (about 3 MB) plus 240 bitmaps of 32 KB (about 8 MB). The bitmaps are shared
-//! and updated with one relaxed `fetch_or`, so the only synchronisation left on
-//! the record path is the interner's slot claim -- and that happens once per
-//! **distinct name**, not once per record: a lookup is a plain acquire load and
-//! a byte compare, and the mutex the old table took on all 3.32 M records is gone.
-
-use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
+//! Both files are memory-mapped; every phase runs on one pool of threads.
+//! 1. regions.csv is cut into line-aligned ranges and parsed in parallel into a
+//!    flat `region id -> country` table (verified: ids strictly ascending and
+//!    every line well formed, else an exact serial parse of the whole file).
+//! 2. records.csv is cut at proven record boundaries: a LF seen after an even
+//!    number of `"` bytes ends a record, because every record holds an even
+//!    number of quotes and a LF inside a quoted field sits at odd parity. One
+//!    parallel pass counts quotes per 256 KB chunk; the cuts follow from it.
+//! 3. Each piece is read with 64-byte structural scans (quotes, commas, LFs,
+//!    the quote mask by prefix XOR) and each record checked against the exact
+//!    shape of the grammar; a record that is not that shape goes through the
+//!    literal scalar parser, so the fast path can never change an answer.
+//! 4. Names are interned by their raw bytes (equal raw bytes mean equal values)
+//!    in one lock-free table whose entries point at the first occurrence in the
+//!    file and are always confirmed byte for byte. Each country has a bitset
+//!    over name ids. The region, name and bitset reads are prefetched records
+//!    ahead. A name table that fills up, or a file too big for its packed
+//!    entries, restarts the run on an exact locked map: slower, never wrong.
+use std::arch::x86_64::*;
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs::{File, read};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::ffi::c_void;
 use std::process::exit;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::Mutex;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
+    fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
+    fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
+}
+
+/// A file descriptor for the mapping call. Only the Linux mapping uses it.
+#[cfg(target_os = "linux")]
+fn raw_fd(f: &std::fs::File) -> i32 {
+    use std::os::fd::AsRawFd;
+    f.as_raw_fd()
+}
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
-/// Per-thread read buffer. Small enough that twelve of them cost less than the
-/// file, large enough that the read syscall is not the bottleneck. These used to
-/// be 4 MB each; once the name sets were gone, 48 MB of buffers was the largest
-/// single item in a ~25 MB total, so they are now 128 KB, which measured both
-/// smaller and slightly faster than 1 MB (fewer pages to fault in per thread).
-const CHUNK: usize = 128 << 10;
+fn die(msg: &str) -> ! {
+    eprintln!("[track-c] {msg}");
+    exit(1)
+}
 
-const NTHREADS: usize = 12;
+/// The file over a spare zero page, so a 64-byte read at any byte stays mapped.
+#[cfg(target_os = "linux")]
+fn map(path: &str) -> &'static [u8] {
+    let file = std::fs::File::open(path).unwrap_or_else(|e| die(&format!("cannot open {path}: {e}")));
+    let len = file.metadata().unwrap().len() as usize;
+    unsafe {
+        let p = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
+        let ok = len == 0 || mmap(p, len, 1, 0x12, raw_fd(&file), 0) == p;
+        if p as isize == -1 || !ok {
+            die(&format!("cannot map {path}"));
+        }
+        std::slice::from_raw_parts(p as *const u8, len)
+    }
+}
 
-/// A fast, non-cryptographic hasher (the FxHash multiply-rotate-xor).
-///
-/// The standard library's `HashMap` uses SipHash: DoS-resistant, and far more
-/// work than this program needs. Track C hashes millions of region ids and name
-/// byte strings, none of it attacker-controlled. Nothing about the ANSWER depends
-/// on the hash function -- only on set membership, and on which shard a name lands
-/// in -- so this changes speed and nothing else; the SHA-256 is the proof.
-struct FxHasher(u64);
+/// The same bytes on a target with no `mmap`, so the offline corpora can still be
+/// checked on a development machine. The scoring box is Linux and takes the path
+/// above; this exists only so a local verification build links.
+#[cfg(not(target_os = "linux"))]
+fn map(path: &str) -> &'static [u8] {
+    let v = std::fs::read(path).unwrap_or_else(|e| die(&format!("cannot read {path}: {e}")));
+    Box::leak(v.into_boxed_slice())
+}
 
-const FX_K: u64 = 0x517c_c1b7_2722_0a95;
+/// Lazily zeroed shared arrays (the allocator hands out untouched zero pages).
+fn zeroed_u64(n: usize) -> Vec<AtomicU64> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0u64; n]);
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut AtomicU64, v.len(), v.capacity()) }
+}
+fn zeroed_u16(n: usize) -> Vec<AtomicU16> {
+    let mut v = std::mem::ManuallyDrop::new(vec![0u16; n]);
+    unsafe { Vec::from_raw_parts(v.as_mut_ptr() as *mut AtomicU16, v.len(), v.capacity()) }
+}
 
-impl std::hash::Hasher for FxHasher {
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        for &x in bytes {
-            self.write_u64(x as u64);
+/// Thread t of nt faults in its share of the whole pages of v up front.
+#[cfg(target_os = "linux")]
+fn populate<T>(v: &[T], t: usize, nt: usize) {
+    let (base, bytes) = (v.as_ptr() as usize, std::mem::size_of_val(v));
+    let (first, last) = ((base + 4095) / 4096, (base + bytes) / 4096);
+    if last > first {
+        let n = last - first;
+        let (a, b) = (first + n * t / nt, first + n * (t + 1) / nt);
+        if b > a {
+            unsafe { madvise((a * 4096) as *mut c_void, (b - a) * 4096, 23) }; // MADV_POPULATE_WRITE
         }
     }
-    #[inline]
-    fn write_u64(&mut self, n: u64) {
-        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(FX_K);
-    }
-    #[inline]
-    fn write_i64(&mut self, n: i64) {
-        self.write_u64(n as u64);
-    }
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
 }
 
-#[derive(Default, Clone)]
-struct FxBuild;
-
-impl std::hash::BuildHasher for FxBuild {
-    type Hasher = FxHasher;
-    #[inline]
-    fn build_hasher(&self) -> FxHasher {
-        FxHasher(0)
-    }
+fn prefetch<T>(p: *const T) {
+    unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
 }
 
-type FxMap<K, V> = HashMap<K, V, FxBuild>;
-type FxSet<T> = HashSet<T, FxBuild>;
+/// Off Linux the pages are faulted in by the threads that touch them, which is
+/// what happens on Linux too when `MADV_POPULATE_WRITE` is unavailable.
+#[cfg(not(target_os = "linux"))]
+fn populate<T>(_v: &[T], _t: usize, _nt: usize) {}
 
-/// Hash a name into the shard index and the probe start. Nothing about the
-/// ANSWER depends on which function this is: a shard is chosen by this value
-/// and a probe starts from it, but every comparison is byte-for-byte against
-/// the arena, so a poor hash costs probes and can never merge two names. Ids
-/// are handed out in whatever order the threads reach a name, and an id only
-/// ever indexes a bitmap, whose popcount is order-free.
-///
-/// `FxHasher` was the wrong shape for these keys. It folds a byte string in
-/// 8-byte steps and then walks the 1-7 byte tail one byte at a time, each byte
-/// a dependent rotate-xor-multiply: a 12-byte name is four serialised 64-bit
-/// multiplies before the probe even starts, on every one of 3.32 M records.
-/// Reading the first and last eight bytes -- they overlap for 8-15 byte keys,
-/// which is 62% of this corpus -- plus a middle word for longer ones collapses
-/// The little-endian 8- and 4-byte words at `i`. Callers guarantee the range.
-#[inline]
-fn w8(b: &[u8], i: usize) -> u64 {
-    u64::from_le_bytes(b[i..i + 8].try_into().unwrap())
+fn load8(f: &[u8], i: usize) -> u64 {
+    u64::from_le_bytes(f[i..i + 8].try_into().unwrap())
 }
 
-#[inline]
-fn w4(b: &[u8], i: usize) -> u64 {
-    u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64
+/// The value of the n (1 to 8) digit bytes at the top of w (last digit in byte 7).
+fn fold(v: u64, n: usize) -> u64 {
+    let mut v = v & 0x0F0F_0F0F_0F0F_0F0F & (!0u64 << (8 * (8 - n)));
+    v = (v * 10 + (v >> 8)) & 0x00FF_00FF_00FF_00FF;
+    v = (v * 100 + (v >> 16)) & 0x0000_FFFF_0000_FFFF;
+    (v * 10000 + (v >> 32)) & 0xFFFF_FFFF
 }
 
-/// Hash a name into the shard index and the probe start. Nothing about the
-/// ANSWER depends on which function this is: a shard is chosen by this value
-/// and a probe starts from it, but every comparison is byte-for-byte against
-/// the arena, so a poor hash costs probes and can never merge two names. Ids
-/// are handed out in whatever order the threads reach a name, and an id only
-/// ever indexes a bitmap, whose popcount is order-free.
-///
-/// `FxHasher` was the wrong shape for these keys. It folds a byte string in
-/// 8-byte steps and then walks the 1-7 byte tail one byte at a time, each byte
-/// a dependent rotate-xor-multiply: a 12-byte name is four serialised 64-bit
-/// multiplies before the probe even starts, on every one of 3.32 M records.
-/// Reading the first and last eight bytes -- they overlap for 8-15 byte keys,
-/// which is 62% of this corpus -- plus a middle word for longer ones collapses
-/// that to three independent multiplies.
-#[inline]
-fn fxhash(b: &[u8]) -> u64 {
+/// Are the n (1 to 8) top bytes of w all ASCII digits?
+fn digits_ok(w: u64, n: usize) -> bool {
+    let keep = !0u64 << (8 * (8 - n));
+    let w = (w & keep) | (0x3030_3030_3030_3030 & !keep);
+    w & 0xF0F0_F0F0_F0F0_F0F0 == 0x3030_3030_3030_3030
+        && w.wrapping_add(0x0606_0606_0606_0606) & 0xF0F0_F0F0_F0F0_F0F0 == 0x3030_3030_3030_3030
+}
+
+/// A fast hash of a name. Only speed depends on it: every match is confirmed byte for byte.
+fn hash(b: &[u8]) -> u64 {
     const M: u64 = 0x9E37_79B9_7F4A_7C15;
     const M2: u64 = 0x2545_F491_4F6C_DD1D;
     let n = b.len();
-    let mut h = if n >= 4 {
-        // Both ends of the key, so a shared prefix is not a collision.
-        let (a, c) = if n >= 8 {
-            (w8(b, 0), w8(b, n - 8))
-        } else {
-            (w4(b, 0), w4(b, n - 4))
-        };
-        let mut h = (a ^ M).wrapping_mul(M);
-        h ^= (c ^ n as u64).wrapping_mul(M2);
+    let h = if n >= 4 {
+        let w4 = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64;
+        let w8 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        let (a, c) = if n >= 8 { (w8(0), w8(n - 8)) } else { (w4(0), w4(n - 4)) };
+        let mut h = (a ^ M).wrapping_mul(M) ^ (c ^ n as u64).wrapping_mul(M2);
         if n >= 16 {
-            // The uncovered middle, for the 9% of names this long.
-            h ^= w8(b, n / 2 - 4).wrapping_mul(M);
+            h ^= w8(n / 2 - 4).wrapping_mul(M);
         }
         h ^ (h >> 31)
     } else {
-        // 0-3 bytes, including the empty name. Packed into one word; the 0x100
-        // marker keeps the empty name and a single NUL byte apart.
-        let mut x = n as u64 | 0x100;
-        for &y in b {
-            x = (x << 8) | y as u64;
-        }
-        x.wrapping_mul(M)
+        b.iter().fold(n as u64 | 0x100, |x, &y| (x << 8) | y as u64).wrapping_mul(M)
     };
-    h = h.wrapping_mul(M2);
+    let h = h.wrapping_mul(M2);
     h ^ (h >> 31) ^ (h >> 29)
 }
 
-// ── the shared name interner ────────────────────────────────────────────────
-
-/// The interner is sharded by the name hash, so twelve threads almost never
-/// touch the same shard: this corpus's 100,520 names are about 1,570 per shard.
-const SHARDS: usize = 64;
-const SHARD_MASK: usize = SHARDS - 1;
-
-/// Slots per shard, allocated once and never resized. 64 shards of 2048 is
-/// 131,072 ids -- the same reach as `BITCAP` -- at the load factor the growable
-/// table used to settle on (1,570/2,048 = 0.77).
-const SLOTS_PER_SHARD: usize = 2048;
-/// The occupancy past which a shard sends new names to the exact fallback map.
-/// This is the old rehash threshold; without it, a nearly full table would
-/// degrade into long linear-probe chains instead.
-const SHARD_LOAD_MAX: usize = SLOTS_PER_SHARD - SLOTS_PER_SHARD / 8;
-/// Name text per shard. This corpus uses about 19 KB of it; the rest is address
-/// space rather than resident memory, because the allocator hands back pages
-/// only once they are written.
-const ARENA_CAP: usize = 64 << 10;
-
-/// One shard's byte arena: `ARENA_CAP` bytes, allocated once and **never moved,
-/// grown or freed** for the life of the run.
-///
-/// That immobility is the point. The old arena grew with
-/// `Vec::extend_from_slice`, whose reallocation frees the very bytes another
-/// thread is comparing against, and the old table grew by rehashing, which moves
-/// every entry. Neither can happen if twelve threads read without a lock.
-struct Arena {
-    base: *mut u8,
-    cap: usize,
-    used: AtomicUsize,
-}
-
-impl Arena {
-    fn new(cap: usize) -> Self {
-        let base = unsafe { alloc(Self::layout(cap)) };
-        if base.is_null() {
-            handle_alloc_error(Self::layout(cap));
-        }
-        Arena { base, cap, used: AtomicUsize::new(0) }
-    }
-
-    fn layout(cap: usize) -> Layout {
-        Layout::from_size_align(cap, 64).expect("arena layout")
-    }
-
-    /// Claim `len` bytes, or `None` when the shard's arena is full. The offset
-    /// is unique to this caller, so two threads writing their own names never
-    /// touch the same byte.
-    #[inline]
-    fn reserve(&self, len: usize) -> Option<u32> {
-        let off = self.used.fetch_add(len, Ordering::Relaxed);
-        if off + len <= self.cap {
-            Some(off as u32)
-        } else {
-            None
-        }
-    }
-
-    /// Write a name's bytes at a reserved offset. This must happen **before**
-    /// the slot carrying the offset is published.
-    #[inline]
-    unsafe fn put(&self, off: u32, bytes: &[u8]) {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(off as usize), bytes.len());
-    }
-
-    /// The bytes at an offset that a published slot carries.
-    #[inline]
-    unsafe fn get(&self, off: u32, len: usize) -> &[u8] {
-        std::slice::from_raw_parts(self.base.add(off as usize), len)
-    }
-}
-
-impl Drop for Arena {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.base, Self::layout(self.cap)) }
-    }
-}
-
-// The pointer is to one allocation that no field of this type moves, and every
-// access is at an offset a `reserve` gave to exactly one thread.
-unsafe impl Send for Arena {}
-unsafe impl Sync for Arena {}
-
-/// A probe slot holds the **whole entry**, packed: bit 63 occupied, then a
-/// 32-bit dense id, an 8-bit name length, and a 23-bit arena offset.
-///
-/// There used to be a third array, `ents: Vec<(off, len, id)>`, and a slot held
-/// an index into it. On this corpus that array was 1.2 MB of the interner's
-/// 2.9 MB working set, and it put a *third* dependent random load in the chain a
-/// lookup has to walk -- slot, index, bytes. Measured on the real 3.32 M names
-/// with a shared interner and twelve threads, dropping it took the interner from
-/// 109 ns to 50 ns per intern, because a probe can now reject a slot on a length
-/// mismatch (8 bits of the slot itself) without touching the arena at all.
-///
-/// The slot is a single `AtomicU64`, so the entire entry is published by one
-/// compare-exchange: a reader sees either nothing or a complete entry, never a
-/// half-written one, and **no lookup takes a lock**.
-struct Shard {
-    table: Vec<AtomicU64>,
-    arena: Arena,
-    /// Occupied slots. Only the insert path reads or writes it.
-    n: AtomicUsize,
-    /// Set once this shard can take no more names; from then on a *miss* is
-    /// answered by the exact fallback map. A lookup never consults it, so a name
-    /// that is already in the table still resolves from the table.
-    spilled: AtomicBool,
-}
-
-const LEN_SHIFT: u32 = 32;
-const OFF_SHIFT: u32 = 40;
-const SLOT_BUSY: u64 = 1 << 63;
-const ID_MASK: u64 = (1 << 32) - 1;
-const LEN_MAX: usize = (1 << (OFF_SHIFT - LEN_SHIFT)) - 1;
-const OFF_MAX: usize = (1 << (63 - OFF_SHIFT)) - 1;
-
-impl Shard {
-    fn new() -> Self {
-        Shard {
-            table: (0..SLOTS_PER_SHARD).map(|_| AtomicU64::new(0)).collect(),
-            arena: Arena::new(ARENA_CAP),
-            n: AtomicUsize::new(0),
-            spilled: AtomicBool::new(false),
-        }
-    }
-
-    /// The id of the entry in `word`, if `word` holds exactly `name`.
-    ///
-    /// The comparison is **byte for byte** against the arena, never by hash: a
-    /// hash collision costs one extra probe and can never merge two names, which
-    /// is what keeps `names_distinct` exact without storing a hash-only set.
-    #[inline]
-    fn match_of(&self, word: u64, name: &[u8]) -> Option<u32> {
-        let e = word & !SLOT_BUSY;
-        if ((e >> LEN_SHIFT) as usize) & LEN_MAX != name.len() {
-            return None;
-        }
-        let off = ((e >> OFF_SHIFT) as u32) & (OFF_MAX as u32);
-        // Safety: `word` was published by a release compare-exchange *after*
-        // these bytes were written, and this thread read it with an acquire
-        // load. `base` is never moved or freed while the shard lives, and the
-        // offset was reserved for exactly this name.
-        let stored = unsafe { self.arena.get(off, name.len()) };
-        if stored == name {
-            Some((e & ID_MASK) as u32)
-        } else {
-            None
-        }
-    }
-}
-
-struct Interner {
-    next: AtomicU32,
-    shards: Vec<Shard>,
-    /// Exact fallback, consulted only when a name cannot be packed into a shard:
-    /// longer than 255 bytes, or reaching a shard whose table or arena is full.
-    /// Its keys are the name bytes themselves, so it stays exact.
-    rare: Mutex<FxMap<Vec<u8>, u32>>,
-}
-
-impl Interner {
-    fn new() -> Self {
-        Interner {
-            next: AtomicU32::new(0),
-            shards: (0..SHARDS).map(|_| Shard::new()).collect(),
-            rare: Mutex::new(FxMap::with_hasher(FxBuild)),
-        }
-    }
-
-    /// Dense global id for a name a packed slot cannot hold: longer than 255
-    /// bytes, or seen after its shard's table or arena filled. Byte-exact,
-    /// because the map keys are the name bytes themselves. This corpus reaches
-    /// none of those (100,520 names, 1.2 MB, longest 25 bytes, about 1,570 names
-    /// and 19 KB per shard), but the interner has to be exact at any size, so
-    /// the escape hatch is real code and not a comment.
-    fn rare_intern(&self, name: &[u8]) -> u32 {
-        let mut r = match self.rare.lock() {
-            Ok(r) => r,
-            Err(e) => e.into_inner(),
-        };
-        if let Some(&id) = r.get(name) {
-            return id;
-        }
-        let id = self.next.fetch_add(1, Ordering::Relaxed);
-        r.insert(name.to_vec(), id);
-        id
-    }
-
-    /// Read the probe slot `h` will want.
-    ///
-    /// Called while the record that owns the name is still being read, so the
-    /// probe -- `LAG` records later -- finds the line in cache instead of
-    /// stalling for it. This is an atomic load rather than a prefetch hint
-    /// because it cannot be optimised away and needs no target feature.
-    #[inline]
-    fn touch(&self, h: u64) {
-        let g = &self.shards[(h as usize) & SHARD_MASK];
-        let _ = g.table[(h >> 6) as usize & (SLOTS_PER_SHARD - 1)].load(Ordering::Relaxed);
-    }
-
-    /// The dense global id of `name`, whose hash is already `h`, inserting it on
-    /// first sight.
-    ///
-    /// The comparison is **byte for byte** against the arena, never by hash, so
-    /// a hash collision costs one extra probe and can never merge two names.
-    /// Nothing is locked on the way: the whole entry is claimed with one
-    /// compare-exchange of the packed slot, and a reader is a single acquire
-    /// load plus that same byte compare. An insert takes the arena bytes before
-    /// it publishes the slot, so the two orders cannot be observed wrong.
-    fn intern_hashed(&self, name: &[u8], h: u64) -> u32 {
-        if name.len() > LEN_MAX {
-            return self.rare_intern(name);
-        }
-        let g = &self.shards[(h as usize) & SHARD_MASK];
-        let mask = SLOTS_PER_SHARD - 1;
-        let mut slot = (h >> 6) as usize & mask;
-        // The arena offset reserved for this name, taken the first time an empty
-        // slot is met and reused if that claim loses. `u32::MAX` means "none
-        // yet"; a real offset can never reach it, since the arena is 64 KB.
-        let mut off: u32 = u32::MAX;
-        for _ in 0..SLOTS_PER_SHARD {
-            let v = g.table[slot].load(Ordering::Acquire);
-            if v == 0 {
-                // A miss. This is the only path that mutates anything, and it is
-                // taken about once per distinct name rather than once per record.
-                if g.spilled.load(Ordering::Relaxed) {
-                    return self.rare_intern(name);
-                }
-                if off == u32::MAX {
-                    if g.n.load(Ordering::Relaxed) >= SHARD_LOAD_MAX {
-                        g.spilled.store(true, Ordering::Relaxed);
-                        return self.rare_intern(name);
-                    }
-                    match g.arena.reserve(name.len()) {
-                        Some(o) => {
-                            off = o;
-                            // Safety: `o` is this call's own range, and the
-                            // write is ordered before the releasing claim below.
-                            unsafe { g.arena.put(o, name) };
-                        }
-                        None => {
-                            g.spilled.store(true, Ordering::Relaxed);
-                            return self.rare_intern(name);
-                        }
-                    }
-                }
-                let id = self.next.fetch_add(1, Ordering::Relaxed);
-                let packed = SLOT_BUSY
-                    | id as u64
-                    | ((name.len() as u64) << LEN_SHIFT)
-                    | ((off as u64) << OFF_SHIFT);
-                match g.table[slot].compare_exchange(
-                    0,
-                    packed,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        g.n.fetch_add(1, Ordering::Relaxed);
-                        return id;
-                    }
-                    // Somebody claimed this slot between the load and the CAS.
-                    // What beat us is read back and compared **unconditionally**:
-                    // if it is this same name, its id is the answer. Skipping
-                    // that compare would let one name hold two ids, which is a
-                    // wrong `names_distinct`, not a slow one.
-                    Err(cur) => {
-                        if let Some(id) = g.match_of(cur, name) {
-                            return id;
-                        }
-                    }
-                }
-            } else if let Some(id) = g.match_of(v, name) {
-                return id;
-            }
-            slot = (slot + 1) & mask;
-        }
-        // Every slot was walked without finding the name or a free one.
-        g.spilled.store(true, Ordering::Relaxed);
-        self.rare_intern(name)
-    }
-}
-
-// ── the per-country name bitmaps ────────────────────────────────────────────
-
-/// Name ids below this live in a country's bitmap: 128 K ids, or 16 KB per
-/// country. This corpus interns exactly 100,520 distinct names (a pool of
-/// 100,000, fixed by the generator's scale table, plus the ~520 names the
-/// edge-case blocks generate), so the cap clears it by 30% at the smallest
-/// power-of-two cost. A seed change moves the extras by a few hundred, never by
-/// 30,000.
-const BITCAP: usize = 1 << 17;
-const BITWORDS: usize = BITCAP / 64;
-
-/// The distinct-name state of one country (or of `_UNMATCHED`).
-///
-/// The bitmap is allocated on first use, so a country that never appears costs
-/// nothing. Ids at or past `BITCAP` -- which this corpus never reaches, but a
-/// different scale or seed could -- fall back to an exact set, so the count is
-/// right at any size; only the memory shape changes.
-#[derive(Default)]
-struct CountryNames {
-    bits: OnceLock<Box<[AtomicU64]>>,
-    rare: OnceLock<Mutex<FxSet<u32>>>,
-}
-
-impl CountryNames {
-    /// Allocate this country's bitmap now, so its pages are faulted in by the
-    /// pre-pass instead of by twelve threads in the middle of the record loop.
-    ///
-    /// A first touch on a shared, twelve-thread-touched array costs two faults
-    /// (the shared zero page, then a private one for the write) and the faults
-    /// serialise on the kernel's page-table locks, so the parse threads are made
-    /// to queue on the kernel for work that is not theirs. One pass over the
-    /// array before the parse removes that; it does not add memory, because a
-    /// country that is ever marked allocates this anyway.
-    fn reserve(&self) {
-        let _ = self
-            .bits
-            .get_or_init(|| (0..BITWORDS).map(|_| AtomicU64::new(0)).collect());
-    }
-
-    /// Record that this country saw the name with global id `id`.
-    #[inline]
-    fn mark(&self, id: u32) {
-        if (id as usize) < BITCAP {
-            let bits = self
-                .bits
-                .get_or_init(|| (0..BITWORDS).map(|_| AtomicU64::new(0)).collect());
-            // Almost every mark on a real corpus is a repeat: this one has
-            // 3.32 M records over 100,520 names, and within a single country
-            // only about one record in fifteen is a name that country has not
-            // seen. A bit that is already set needs no read-modify-write, and a
-            // concurrent thread setting the same bit is idempotent, so a plain
-            // load that sees it can skip the atomic. That matters because
-            // `fetch_or` demands exclusive ownership of a random line out of
-            // the 3.8 MB of bitmaps; the load can read a shared copy.
-            let w = &bits[(id >> 6) as usize];
-            let b = 1u64 << (id & 63);
-            if w.load(Ordering::Relaxed) & b == 0 {
-                w.fetch_or(b, Ordering::Relaxed);
-            }
-        } else {
-            let set = self.rare.get_or_init(|| Mutex::new(FxSet::default()));
-            if let Ok(mut s) = set.lock() {
-                s.insert(id);
-            }
-        }
-    }
-
-    /// The number of distinct names this country saw.
-    fn count(&self) -> u64 {
-        let mut c = match self.bits.get() {
-            Some(b) => b
-                .iter()
-                .map(|w| w.load(Ordering::Relaxed).count_ones() as u64)
-                .sum(),
-            None => 0,
-        };
-        if let Some(s) = self.rare.get() {
-            if let Ok(s) = s.lock() {
-                c += s.len() as u64;
-            }
-        }
-        c
-    }
-}
-
-/// Per-country running aggregate. No name set lives here any more: distinctness
-/// is counted globally, in `CountryNames`.
-#[derive(Default)]
+/// One country's running aggregate (per thread, merged at the end).
+#[derive(Clone, Copy)]
 struct Agg {
     count: u64,
     id_sum: i64,
@@ -576,721 +158,785 @@ struct Agg {
 
 impl Agg {
     fn new() -> Self {
-        Agg {
-            amount_min: i64::MAX,
-            amount_max: i64::MIN,
-            ..Default::default()
+        Agg { count: 0, id_sum: 0, amount_sum: 0, amount_min: i64::MAX, amount_max: i64::MIN, name_bytes: 0, note_bytes: 0 }
+    }
+    fn merge(&mut self, o: &Agg) {
+        if o.count == 0 {
+            return;
         }
+        self.count += o.count;
+        self.id_sum += o.id_sum;
+        self.amount_sum += o.amount_sum;
+        self.amount_min = self.amount_min.min(o.amount_min);
+        self.amount_max = self.amount_max.max(o.amount_max);
+        self.name_bytes += o.name_bytes;
+        self.note_bytes += o.note_bytes;
     }
 }
 
-/// Fold one thread's aggregate into another. Every field is a sum, a min or a
-/// max, so the result does not depend on the order the threads are merged in.
-fn merge(dst: &mut Agg, src: Agg) {
-    dst.count += src.count;
-    dst.id_sum += src.id_sum;
-    dst.amount_sum += src.amount_sum;
-    if src.count > 0 {
-        dst.amount_min = dst.amount_min.min(src.amount_min);
-        dst.amount_max = dst.amount_max.max(src.amount_max);
-    }
-    dst.name_bytes += src.name_bytes;
-    dst.note_bytes += src.note_bytes;
+/// Exact cents as `-?int.dd`, never `-0.00`.
+fn money(cents: i64, out: &mut Vec<u8>) {
+    let a = cents.unsigned_abs();
+    out.extend_from_slice(format!("{}{}.{:02}", if cents < 0 { "-" } else { "" }, a / 100, a % 100).as_bytes());
 }
 
-/// Step over the separator that ends a field, if the field ended on one.
-#[inline]
-fn comma(buf: &[u8], pos: &mut usize) {
-    if buf.get(*pos) == Some(&b',') {
-        *pos += 1;
-    }
-}
-
-/// Read one field at `*pos` into `out`, honouring the quoting rules.
-fn field(buf: &[u8], pos: &mut usize, out: &mut Vec<u8>) {
-    out.clear();
-    if *pos < buf.len() && buf[*pos] == b'"' {
-        *pos += 1;
-        while *pos < buf.len() {
-            let b = buf[*pos];
-            if b != b'"' {
-                out.push(b);
-                *pos += 1;
-            } else if *pos + 1 < buf.len() && buf[*pos + 1] == b'"' {
-                out.push(b'"'); // `""` is one literal quote
-                *pos += 2;
-            } else {
-                *pos += 1; // closing quote
-                break;
-            }
-        }
-    } else {
-        while *pos < buf.len() {
-            let b = buf[*pos];
-            if b == b',' || b == b'\n' || b == b'\r' {
-                break;
-            }
-            out.push(b);
-            *pos += 1;
-        }
-    }
-}
-
-/// Unsigned decimal, no leading zeros in the data.
-#[inline]
-fn digits(buf: &[u8], pos: &mut usize) -> i64 {
-    let mut v: i64 = 0;
-    while *pos < buf.len() && buf[*pos].is_ascii_digit() {
-        v = v * 10 + (buf[*pos] - b'0') as i64;
-        *pos += 1;
-    }
-    v
-}
-
-/// One output line: `<country> <count> <id_sum> <amount_sum> <amount_min>
-/// <amount_max> <names_distinct> <name_bytes> <note_bytes>`.
 fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg, names: u64) {
     out.extend_from_slice(key);
-    let _ = write!(out, " {} {} ", a.count, a.id_sum);
+    out.extend_from_slice(format!(" {} {} ", a.count, a.id_sum).as_bytes());
     money(a.amount_sum, out);
     out.push(b' ');
     money(a.amount_min, out);
     out.push(b' ');
     money(a.amount_max, out);
-    let _ = write!(out, " {} {} {}\n", names, a.name_bytes, a.note_bytes);
+    out.extend_from_slice(format!(" {names} {} {}\n", a.name_bytes, a.note_bytes).as_bytes());
 }
 
-/// Exact cents as `-?int.dd`, never `-0.00`.
-fn money(cents: i64, out: &mut Vec<u8>) {
-    let neg = cents < 0;
-    let a = cents.unsigned_abs();
-    if neg {
-        out.push(b'-');
+const STEP: usize = 1 << 18; // bytes per quote-parity chunk
+
+/// The commas and LFs outside quotes, in order, from a start offset onwards,
+/// each with the number of `"` bytes before it (counted from the start).
+/// The file must be mapped with a zero page after it (see `map`).
+struct Scan<'a> {
+    f: &'a [u8],
+    next: usize,
+    bits: u64,
+    carry: u64,
+    q: u64,
+    before: u64,
+}
+
+impl<'a> Scan<'a> {
+    fn new(f: &'a [u8], p: usize) -> Self {
+        Scan { f, next: p, bits: 0, carry: 0, q: 0, before: 0 }
     }
-    let _ = write!(out, "{}.{:02}", a / 100, a % 100);
-}
 
-/// Nonzero in byte position `i` when byte `i` of `x` is zero.
-#[inline]
-fn zero_byte(x: u64) -> u64 {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGH: u64 = 0x8080_8080_8080_8080;
-    x.wrapping_sub(ONES) & !x & HIGH
-}
-
-/// The byte offsets that begin a record: `[first_record, b1, .., len]`.
-///
-/// One sequential pass. `parity` is the running count of `"` bytes modulo two,
-/// and a `\n` at even parity is a record boundary by the argument in the module
-/// comment. The first boundary is the end of the header line; the last is the
-/// length of the file.
-///
-/// The scan is word-at-a-time. A byte-at-a-time version of exactly this loop
-/// measured as the dominant cost of the whole track: twelve threads then race
-/// through 202 MB while one thread first walks the same 202 MB one byte at a
-/// time, so the parallel parse was being throttled by its own setup. Eight bytes
-/// per iteration with a zero-byte test on a repeated constant finds both bytes of
-/// interest at once, and the set bits are consumed in ascending address order,
-/// which is what keeps the parity running total correct.
-const QUOTE: u64 = 0x2222_2222_2222_2222; // b'"' repeated
-const NL: u64 = 0x0a0a_0a0a_0a0a_0a0a; // b'\n' repeated
-
-/// Offset just past the first `\n` at global even quote parity at or after
-/// `from`, or `len` if there is none.
-///
-/// `parity` is the running count of `"` in `[0, from)` modulo two, so the test
-/// is the record-boundary theorem applied from an arbitrary starting point: a
-/// `\n` seen with an even running total of quotes ends a record. This runs over
-/// at most a few hundred bytes -- the first qualifying newline is inside the
-/// record that spans `from` -- so it is allowed to be the branchy version.
-fn first_boundary(path: &str, from: u64, mut parity: u8, len: u64) -> std::io::Result<u64> {
-    let mut f = File::open(path)?;
-    f.seek(SeekFrom::Start(from))?;
-    let mut buf = vec![0u8; 64 << 10];
-    let mut base = from;
-    loop {
-        let k = f.read(&mut buf)?;
-        if k == 0 {
-            return Ok(len);
-        }
-        let b = &buf[..k];
-        let mut i = 0usize;
-        while i + 8 <= k {
-            let w = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-            let mut m = zero_byte(w ^ QUOTE) | zero_byte(w ^ NL);
-            while m != 0 {
-                let idx = i + (m.trailing_zeros() as usize >> 3);
-                if b[idx] == b'"' {
-                    parity ^= 1;
-                } else if parity == 0 {
-                    return Ok(base + idx as u64 + 1);
+    /// The next separator, or (file length, ..) once there is none.
+    #[inline(always)]
+    fn next(&mut self) -> (usize, u64) {
+        while self.bits == 0 {
+            if self.next >= self.f.len() {
+                return (self.f.len(), self.before + self.q.count_ones() as u64);
+            }
+            self.before += self.q.count_ones() as u64;
+            let (mut q, mut c, mut n) = (0u64, 0u64, 0u64);
+            unsafe {
+                let p = self.f.as_ptr().add(self.next);
+                let (kq, kc, kn) = (_mm_set1_epi8(b'"' as i8), _mm_set1_epi8(b',' as i8), _mm_set1_epi8(b'\n' as i8));
+                for k in 0..4 {
+                    let v = _mm_loadu_si128(p.add(16 * k) as *const __m128i);
+                    q |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 as u64) << (16 * k);
+                    c |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kc)) as u32 as u64) << (16 * k);
+                    n |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kn)) as u32 as u64) << (16 * k);
                 }
-                m &= m - 1;
             }
-            i += 8;
+            // Bit i of the prefix XOR is set from an opening quote up to its closing quote;
+            // a "" pair flips it twice and so changes nothing.
+            let mut x = q;
+            x ^= x << 1;
+            x ^= x << 2;
+            x ^= x << 4;
+            x ^= x << 8;
+            x ^= x << 16;
+            x ^= x << 32;
+            let inside = x ^ self.carry;
+            self.carry = ((inside as i64) >> 63) as u64;
+            self.bits = (c | n) & !inside;
+            self.q = q;
+            self.next += 64;
         }
-        while i < k {
-            if b[i] == b'"' {
-                parity ^= 1;
-            } else if b[i] == b'\n' && parity == 0 {
-                return Ok(base + i as u64 + 1);
-            }
-            i += 1;
-        }
-        base += k as u64;
+        let i = self.bits.trailing_zeros();
+        self.bits &= self.bits - 1;
+        (self.next - 64 + i as usize, self.before + (self.q & ((1u64 << i) - 1)).count_ones() as u64)
     }
 }
 
-/// The byte offsets that begin a record: `[first_record, b1, .., len]`.
-///
-/// A `\n` seen with an even running count of `"` is a record boundary, by the
-/// argument in the module comment. Only the ones nearest each twelfth of the
-/// file are wanted, and the *only* thing that makes finding them hard is that
-/// the starting parity is a global property.
-///
-/// So the pass that used to compare, branch and record 19.8 million times -- one
-/// match for every 12.8 bytes, since this corpus has 16.0 M quotes and 3.7 M
-/// newlines -- is now a pure popcount: count quotes per chunk, and the parity at
-/// every chunk boundary falls out for free. Splitting at chunk boundaries rather
-/// than at exact twelfths costs at most one chunk of imbalance and removes the
-/// need to know parity at an arbitrary offset. Twelve short forward scans then
-/// convert the split points into real boundaries.
-fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
-    // 256 KiB, not 1 MiB: every thread holds one buffer, so STEP is multiplied by
-    // twelve on the M axis. At 1 MiB that was 12 MB of buffers and the board charged
-    // this track 20 MB against 15 for the serial version -- the parallelism bought
-    // time and lost memory, and the buffer is where it went.
-    const STEP: usize = 1 << 18;
+/// Offset just past the first LF at even quote parity at or after `from`
+/// (`parity` = quotes in [0, from) mod 2), or the file length.
+fn first_boundary(f: &[u8], from: usize, mut parity: u8) -> usize {
+    for (i, &b) in f.iter().enumerate().skip(from) {
+        if b == b'"' {
+            parity ^= 1;
+        } else if b == b'\n' && parity == 0 {
+            return i + 1;
+        }
+    }
+    f.len()
+}
 
-    let len = std::fs::metadata(path)?.len();
-    let nchunk = (((len as usize).saturating_add(STEP - 1)) / STEP).max(1);
-    let targets: Vec<usize> = (1..nthreads).map(|i| i * nchunk / nthreads).collect();
+/// The quote parity of each STEP-byte chunk c0..c1.
+fn quote_parity(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
+    let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
+    (c0..c1)
+        .map(|c| {
+            let (a, b) = (c * STEP, ((c + 1) * STEP).min(f.len()));
+            let (mut i, mut q) = (a, 0u32);
+            while i + 16 <= b {
+                let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
+                q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
+                i += 16;
+            }
+            q += f[i..b].iter().filter(|&&x| x == b'"').count() as u32;
+            (q & 1) as u8
+        })
+        .collect()
+}
 
-    // ── the quote count, one thread per chunk range ─────────────────────────
-    //
-    // The parity idea below was already right, but the pass that feeds it was SERIAL:
-    // one thread read all 202 MB in 1 MiB chunks, and that single loop was 29% of this
-    // track's wall time. Each thread now counts its own range and returns one parity
-    // per chunk, so the global prefix XOR is a serial walk over 202 bytes.
-    let per = nchunk.div_ceil(nthreads).max(1);
-    let want_workers = nchunk.div_ceil(per);
-    let ranges: Vec<(usize, Vec<u8>)> = std::thread::scope(|s| {
-        let mut hs = Vec::with_capacity(want_workers);
-        for w in 0..want_workers {
-            let c0 = w * per;
-            let c1 = ((w + 1) * per).min(nchunk);
-            let path = path.to_string();
-            hs.push(s.spawn(move || -> Option<(usize, Vec<u8>)> {
-                let mut f = File::open(&path).ok()?;
-                let mut buf = vec![0u8; STEP];
-                let mut out = Vec::with_capacity(c1 - c0);
-                for c in c0..c1 {
-                    let off = (c as u64) * STEP as u64;
-                    if f.seek(SeekFrom::Start(off)).is_err() {
-                        return None;
-                    }
-                    let want = ((len.saturating_sub(off)) as usize).min(STEP);
-                    let mut k = 0usize;
-                    while k < want {
-                        match f.read(&mut buf[k..want]) {
-                            Ok(0) => break,
-                            Ok(n) => k += n,
-                            Err(_) => return None,
+/// k line-aligned cuts of f[from..].
+fn cuts(f: &[u8], from: usize, k: usize) -> Vec<usize> {
+    let mut c = vec![f.len(); k + 1];
+    c[0] = from;
+    for t in 1..k {
+        let mut x = (from + (f.len() - from) * t / k).max(c[t - 1]);
+        while x < f.len() && f[x - 1] != b'\n' {
+            x += 1;
+        }
+        c[t] = x;
+    }
+    c
+}
+
+/// Runs f(t) on nt threads and collects what each returns.
+fn on_threads<R: Send>(nt: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let f = &f;
+    std::thread::scope(|s| {
+        let hs: Vec<_> = (0..nt).map(|t| s.spawn(move || f(t))).collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// Country codes (3 bytes, packed) in a small lock-free table; a code's slot is its position.
+struct CodeTab {
+    t: Vec<AtomicU32>,
+    n: AtomicUsize,
+}
+
+impl CodeTab {
+    fn new() -> Self {
+        CodeTab { t: (0..4096).map(|_| AtomicU32::new(0)).collect(), n: AtomicUsize::new(0) }
+    }
+    fn intern(&self, code: u32) -> u16 {
+        let want = code | 1 << 24;
+        let mut s = (code.wrapping_mul(0x9E37_79B1) >> 20) as usize;
+        loop {
+            let e = self.t[s].load(Relaxed);
+            if e == want {
+                return s as u16;
+            }
+            if e == 0 {
+                match self.t[s].compare_exchange(0, want, Relaxed, Relaxed) {
+                    Ok(_) => {
+                        if self.n.fetch_add(1, Relaxed) >= 2048 {
+                            die("too many countries");
                         }
+                        return s as u16;
                     }
-                    let b = &buf[..k];
-                    let mut i = 0usize;
-                    // No branch, no match list, no note(): just the byte-count of `"`.
-                    let mut q: u64 = 0;
-                    while i + 8 <= k {
-                        let wv = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
-                        q += zero_byte(wv ^ QUOTE).count_ones() as u64;
-                        i += 8;
-                    }
-                    while i < k {
-                        if b[i] == b'"' {
-                            q += 1;
-                        }
-                        i += 1;
-                    }
-                    out.push((q & 1) as u8);
-                }
-                Some((c0, out))
-            }));
-        }
-        hs.into_iter().filter_map(|h| h.join().ok()).flatten().collect()
-    });
-
-    let mut pc = vec![0u8; nchunk];
-    if ranges.len() == want_workers {
-        for (c0, out) in ranges {
-            for (j, v) in out.into_iter().enumerate() {
-                pc[c0 + j] = v;
-            }
-        }
-    } else {
-        // A worker failed, so the parity array would be partial -- and a partial array
-        // produces WRONG BOUNDARIES, not slow ones. Every failure reaching here is an I/O
-        // error (open, seek or read), and the serial version this replaced returned on the
-        // first of those too. Failing loudly is smaller and cannot be silently wrong.
-        return Err(std::io::Error::other("boundary pre-pass: a worker failed"));
-    }
-
-    let mut par = vec![0u8; nchunk + 1];
-    let mut acc: u8 = 0;
-    for c in 0..nchunk {
-        par[c] = acc;
-        acc ^= pc[c];
-    }
-    par[nchunk] = acc;
-
-    let mut pts = Vec::with_capacity(nthreads + 2);
-    pts.push(first_boundary(path, 0, 0, len)?);
-    for t in targets {
-        let s = (t as u64) * STEP as u64;
-        if s >= len || s <= *pts.last().unwrap() {
-            continue;
-        }
-        // `par[t]` is the quote parity at byte `t * STEP`, and this scan carries
-        // it forward byte by byte from there.
-        let b = first_boundary(path, s, par[t], len)?;
-        if b > *pts.last().unwrap() {
-            pts.push(b);
-        }
-    }
-    // `len` terminates the last range. It is not a record boundary in its own
-    // right, but the parser stops at end-of-input and never needs it to be one.
-    pts.push(len);
-    Ok(pts)
-}
-
-/// How many records are in flight between the parse of a name and its intern.
-///
-/// One record is about 61 bytes here, so 16 records is roughly a kilobyte of
-/// straight-line parsing -- enough to cover the two dependent loads a lookup
-/// waits on (the probe slot, then the arena bytes it compares) without holding
-/// sixteen name copies for longer than they are useful.
-const LAG: usize = 16;
-
-/// A record parsed but not yet folded in: its name (a copy, because the read
-/// buffer is reused), the hash the probe will start from, and its numbers.
-///
-/// The copy is the price of the deferral. It is a dozen bytes into a buffer that
-/// is reused ring-slot by ring-slot, and it buys the hash and the slot read
-/// while the record's own fields are still being walked, so the dependent loads
-/// of the intern are not on the critical path of the parse.
-#[derive(Default)]
-struct Pending {
-    h: u64,
-    name: Vec<u8>,
-    id: i64,
-    region: i64,
-    cents: i64,
-    note_len: u64,
-}
-
-/// Finish one parsed record: join its region, intern its name, mark its bit and
-/// fold its sums into this thread's aggregates.
-#[allow(clippy::too_many_arguments)]
-fn retire(
-    p: &Pending,
-    groups: &mut [Agg],
-    distinct: &[CountryNames],
-    names: &Interner,
-    rarr: &[u16],
-    big: &FxMap<i64, u32>,
-    unmatched_slot: u32,
-) {
-    // One random load instead of a hash plus a probe through a 3 MB table, for
-    // the 99.7% of ids the flat array reaches. `region` is never negative:
-    // `digits` stops at the first byte that is not a digit, so the cast widens.
-    let slot = if (p.region as u64) < rarr.len() as u64 {
-        match rarr[p.region as usize] {
-            0 => unmatched_slot,
-            v => (v - 1) as u32,
-        }
-    } else {
-        match big.get(&p.region) {
-            Some(&code) => code,
-            None => unmatched_slot,
-        }
-    };
-    distinct[slot as usize].mark(names.intern_hashed(&p.name, p.h));
-    let agg = &mut groups[slot as usize];
-    agg.count += 1;
-    agg.id_sum += p.id;
-    agg.amount_sum += p.cents;
-    if p.cents < agg.amount_min {
-        agg.amount_min = p.cents;
-    }
-    if p.cents > agg.amount_max {
-        agg.amount_max = p.cents;
-    }
-    agg.name_bytes += p.name.len() as u64;
-    agg.note_bytes += p.note_len;
-}
-
-/// Parse `[start, end)` and return this range's aggregates, **indexed by the
-/// country slot itself**.
-///
-/// `start` and `end` are both record boundaries, so the range holds whole records
-/// and no record is shared with a neighbour. The parser is the same one the
-/// sequential version used; only the framing differs.
-///
-/// Every record's name is interned (a shared, exact id) and marked in that
-/// country's bitmap. The per-thread aggregate holds only scalars, so twelve
-/// threads never duplicate name storage.
-///
-/// The aggregate used to be a `FxMap<u32, Agg>` probed once per record -- three
-/// million hashes and probes for what is at most 241 live slots. It is now one
-/// 241-element array: the slot the join already produced is the index. It also
-/// makes the merge a fixed 241-element walk per thread instead of a map walk.
-///
-/// The region join is `rarr[region]` for the ids the flat array covers and the
-/// exact hash map for the rest. `rarr` is 2 MB of `u16` and holds slot+1, with
-/// 0 meaning "this id is not in regions.csv"; the map is still the authority
-/// for ids at or past `regcap`, and for a corpus whose regions.csv names more
-/// countries than a `u16` can hold.
-fn parse_range(
-    path: &str,
-    start: u64,
-    end: u64,
-    rarr: &[u16],
-    big: &FxMap<i64, u32>,
-    names: &Interner,
-    distinct: &[CountryNames],
-    unmatched_slot: u32,
-) -> Vec<Agg> {
-    let mut groups: Vec<Agg> = (0..=unmatched_slot as usize).map(|_| Agg::new()).collect();
-    let mut name: Vec<u8> = Vec::with_capacity(64);
-    let mut note: Vec<u8> = Vec::with_capacity(64);
-    let mut ring: Vec<Pending> = (0..LAG).map(|_| Pending::default()).collect();
-    let mut parsed = 0usize;
-    let mut retired = 0usize;
-
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return groups,
-    };
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return groups;
-    }
-
-    let total = (end - start) as usize;
-    let mut buf: Vec<u8> = vec![0u8; CHUNK];
-    let mut have = 0usize;
-    let mut pos = 0usize;
-    let mut done = 0usize;
-
-    loop {
-        if pos > 0 {
-            buf.copy_within(pos..have, 0);
-            have -= pos;
-            pos = 0;
-        }
-        if done < total {
-            if have == buf.len() {
-                // The buffer is full and still no whole record came out of it, so
-                // one record is longer than `CHUNK`. Grow instead of giving up:
-                // the old `want == 0 { break }` dropped the rest of the range
-                // silently, which a small chunk would have made much likelier.
-                // This corpus cannot reach it, but the cost of being wrong here
-                // is a wrong answer, not a slow one.
-                buf.resize(buf.len() * 2, 0);
-            }
-            let want = (total - done).min(buf.len() - have);
-            match file.read(&mut buf[have..have + want]) {
-                Ok(0) => break,
-                Ok(k) => {
-                    have += k;
-                    done += k;
-                }
-                Err(_) => break,
-            }
-        }
-
-        let recs: &[u8] = &buf[..have];
-        while pos < have {
-            let rec_start = pos;
-            if recs[pos..].starts_with(&BOM) {
-                pos += 3;
-                if pos >= have {
-                    pos = rec_start;
-                    break;
+                    Err(c) if c == want => return s as u16,
+                    Err(_) => {}
                 }
             }
-            let id = digits(recs, &mut pos);
-            if pos < have && recs[pos] == b',' {
-                pos += 1;
-            }
-            field(recs, &mut pos, &mut name);
-            comma(recs, &mut pos);
-            field(recs, &mut pos, &mut note);
-            comma(recs, &mut pos);
-            let region = digits(recs, &mut pos);
-            comma(recs, &mut pos);
-            let mut neg = false;
-            if pos < have && recs[pos] == b'-' {
-                neg = true;
-                pos += 1;
-            }
-            // `pos + 2 < have`, not `pos + 1 < have`: the two digits are read at
-            // `pos + 1` and `pos + 2` *before* the advance, so a `.` landing two
-            // bytes short of the chunk end indexed `recs[have]`. The guard is the
-            // only thing that has to be right, because a record whose tail is cut
-            // off fails the terminator test below and is re-parsed after a refill.
-            let mut cents = digits(recs, &mut pos) * 100;
-            if pos + 2 < have && recs[pos] == b'.' {
-                pos += 1;
-                let d1 = (recs[pos] - b'0') as i64;
-                let d2 = (recs[pos + 1] - b'0') as i64;
-                pos += 2;
-                cents += d1 * 10 + d2;
-            }
-            if neg {
-                cents = -cents;
-            }
-
-            // The terminator is the proof the record was complete. `end` is a
-            // record boundary, so the only way to run out is the tail of a chunk,
-            // in which case the parse is discarded and retried after a refill.
-            let mut terminated = false;
-            if pos < have && recs[pos] == b'\r' {
-                pos += 1;
-            }
-            if pos < have && recs[pos] == b'\n' {
-                pos += 1;
-                terminated = true;
-            }
-            if !terminated {
-                pos = rec_start;
-                break;
-            }
-
-            // The record is whole. Hash its name and read the probe slot it will
-            // want now, while the next fifteen records are still being walked,
-            // and hand the rest of the work to `retire` when this record's turn
-            // comes back round the ring.
-            if parsed - retired == LAG {
-                retire(
-                    &ring[retired % LAG],
-                    &mut groups,
-                    distinct,
-                    names,
-                    rarr,
-                    big,
-                    unmatched_slot,
-                );
-                retired += 1;
-            }
-            let p = &mut ring[parsed % LAG];
-            p.h = fxhash(&name);
-            names.touch(p.h);
-            p.name.clear();
-            p.name.extend_from_slice(&name);
-            p.id = id;
-            p.region = region;
-            p.cents = cents;
-            p.note_len = note.len() as u64;
-            parsed += 1;
+            s = (s + 1) & 4095;
         }
+    }
+}
 
-        if done >= total && (pos >= have || pos == 0) {
+struct RegOut {
+    ok: bool,
+    first: u64,
+    last: u64,
+    n: usize,
+    over: Vec<(u64, u16)>, // ids past the flat table, in file order
+}
+
+/// Parse the region lines in f[a..b) strictly: `digits , XXX` per line. Any other shape sets !ok.
+fn regions_part(f: &[u8], a: usize, b: usize, rarr: &[AtomicU16], codes: &CodeTab) -> RegOut {
+    let mut o = RegOut { ok: true, first: 0, last: 0, n: 0, over: Vec::new() };
+    let mut p = a;
+    while p < b && o.ok {
+        let eol = f[p..b].iter().position(|&c| c == b'\n').map_or(b, |k| p + k);
+        let line = &f[p..eol];
+        let line = if line.last() == Some(&b'\r') { &line[..line.len() - 1] } else { line };
+        let nd = line.iter().take_while(|c| c.is_ascii_digit()).count();
+        if nd == 0 || nd > 18 || line.len() != nd + 4 || line[nd] != b',' || line[nd + 1..].iter().any(|&c| c == b',' || c == b'\r' || c == b'\n') {
+            o.ok = false;
             break;
         }
-    }
-
-    while retired < parsed {
-        retire(
-            &ring[retired % LAG],
-            &mut groups,
-            distinct,
-            names,
-            rarr,
-            big,
-            unmatched_slot,
-        );
-        retired += 1;
-    }
-
-    groups
-}
-
-#[cfg(target_os = "linux")]
-extern "C" {
-    fn mallopt(param: i32, value: i32) -> i32;
-}
-
-/// Pin glibc's mmap threshold so a freed large allocation returns its pages.
-///
-/// glibc RAISES its own threshold as large blocks are freed, up to 32 MB, so a
-/// dropped array can stay on the heap and keep being charged against a
-/// high-water mark. Pinning it low makes every large allocation its own mapping,
-/// whose pages return on free. Measured on this project's track-d at 4.3% of
-/// peak RSS with no time cost, in a four-variant A/B that isolated each call.
-///
-/// `prctl(PR_SET_THP_DISABLE)` is deliberately NOT called: it measured as a time
-/// loss on every track, and this host runs THP in `madvise` mode, so the call
-/// disables nothing here anyway.
-#[cfg(target_os = "linux")]
-fn tune_allocator() {
-    unsafe {
-        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn tune_allocator() {}
-
-fn main() {
-    tune_allocator();
-    let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
-    let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
-    let records = format!("{data}/records.csv");
-
-    // ── the lookup table ────────────────────────────────────────────────────
-    // `region_id` maps straight to a dense country slot, so the join and the
-    // bitmap index cost one probe, not two.
-    let regions = match read(format!("{data}/regions.csv")) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("[track-c] cannot read regions.csv: {e}");
-            exit(1);
+        let rid = line[..nd].iter().fold(0u64, |v, &d| v * 10 + (d - b'0') as u64);
+        let code = (line[nd + 1] as u32) << 16 | (line[nd + 2] as u32) << 8 | line[nd + 3] as u32;
+        let pos = codes.intern(code) + 1;
+        if o.n == 0 {
+            o.first = rid;
+        } else if rid <= o.last {
+            o.ok = false;
         }
-    };
-    let mut codes: Vec<[u8; 3]> = Vec::with_capacity(256);
-    let mut slot_of: FxMap<[u8; 3], u32> = FxMap::with_capacity_and_hasher(256, FxBuild);
-    let mut lookup: FxMap<i64, u32> = FxMap::with_capacity_and_hasher(200_000, FxBuild);
-    {
-        let mut p = 0usize;
-        while p < regions.len() && regions[p] != b'\n' {
+        (o.last, o.n) = (rid, o.n + 1);
+        match rarr.get(rid as usize) {
+            Some(slot) => slot.store(pos, Relaxed),
+            None => o.over.push((rid, pos)),
+        }
+        p = eol + 1;
+    }
+    o
+}
+
+/// The literal scalar parse of regions.csv (last line wins), used when the strict one declines.
+fn regions_exact(f: &[u8], rarr: &[AtomicU16], codes: &CodeTab) -> Vec<(u64, u16)> {
+    let mut over = Vec::new();
+    let mut p = f.iter().position(|&c| c == b'\n').unwrap_or(f.len());
+    while p < f.len() {
+        p += 1;
+        if p >= f.len() {
+            break;
+        }
+        let mut rid = 0u64;
+        while p < f.len() && f[p].is_ascii_digit() {
+            rid = rid.wrapping_mul(10).wrapping_add((f[p] - b'0') as u64);
             p += 1;
         }
-        while p < regions.len() {
-            p += 1; // step over the newline
-            if p >= regions.len() {
-                break;
+        if p < f.len() && f[p] == b',' {
+            p += 1;
+        }
+        if p + 2 < f.len() {
+            let code = (f[p] as u32) << 16 | (f[p + 1] as u32) << 8 | f[p + 2] as u32;
+            let pos = codes.intern(code) + 1;
+            match rarr.get(rid as usize) {
+                Some(slot) => slot.store(pos, Relaxed),
+                None => over.push((rid, pos)),
             }
-            let rid = digits(&regions, &mut p);
-            if p < regions.len() && regions[p] == b',' {
-                p += 1;
-            }
-            if p + 2 < regions.len() {
-                let code = [regions[p], regions[p + 1], regions[p + 2]];
-                let slot = *slot_of.entry(code).or_insert_with(|| {
-                    codes.push(code);
-                    (codes.len() - 1) as u32
-                });
-                lookup.insert(rid, slot);
-                p += 3;
-            }
-            while p < regions.len() && regions[p] != b'\n' {
-                p += 1;
-            }
+            p += 3;
+        }
+        while p < f.len() && f[p] != b'\n' {
+            p += 1;
         }
     }
-    drop(slot_of);
-    drop(regions);
-    let unmatched_slot = codes.len() as u32;
+    over
+}
 
-    // ── the region join as one flat array ───────────────────────────────────
-    // `region_id` is a sparse id, not an index, so this only pays while the ids
-    // stay inside a window: 1..=999,993 here, which is 2 MB of `u16` against
-    // the 3.3 MB hash map it replaces, and one load instead of a hash and a
-    // probe. Above the window, and whenever the map cannot be expressed as
-    // `u16` slots, the map is still consulted, so the join is exact at any id
-    // or country count -- only the memory shape and the speed change.
-    let maxr = lookup.keys().copied().max().unwrap_or(0).max(0) as u64;
-    let want = (maxr + 1).checked_next_power_of_two().unwrap_or(u64::MAX);
-    let regcap = if codes.len() <= 65534 && want <= 1 << 21 { want as usize } else { 0 };
-    let mut rarr: Vec<u16> = vec![0; regcap];
-    let mut big: FxMap<i64, u32> = FxMap::with_hasher(FxBuild);
-    for (rid, slot) in lookup.drain() {
-        if (rid as u64) < regcap as u64 {
-            rarr[rid as usize] = (slot + 1) as u16;
+// ── names ───────────────────────────────────────────────────────────────────
+// A table entry packs: occupied (bit 63), 6 hash bits, a 17-bit dense name id,
+// the raw name length (8 bits) and the file offset of its first occurrence
+// (32 bits). A match is confirmed against the file bytes, never by hash alone.
+const TB: u32 = 18; // table slots: 2^18, at most half full
+const LIMIT: u32 = 1 << 17; // names the packed table (and the bitsets) can hold
+const OCC: u64 = 1 << 63;
+const MMASK: u64 = OCC | 0x3F << 57 | 0xFF << 32;
+
+struct Names {
+    table: Vec<AtomicU64>,
+    next: AtomicU32,
+    over: AtomicBool, // the table could not hold the names: restart on the exact map
+    rare: Mutex<HashMap<Vec<u8>, u32>>,
+    slow: bool, // every name goes through `rare`
+}
+
+enum Hit {
+    Id(u32),
+    Cand(usize, u64),
+}
+
+impl Names {
+    fn new(slow: bool) -> Self {
+        Names {
+            table: zeroed_u64(1 << TB),
+            next: AtomicU32::new(0),
+            over: AtomicBool::new(false),
+            rare: Mutex::new(HashMap::new()),
+            slow,
+        }
+    }
+
+    /// Exact intern of any name (long names, slow mode).
+    fn rare_intern(&self, name: &[u8]) -> u32 {
+        let mut r = self.rare.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = r.get(name) {
+            return id;
+        }
+        let id = self.next.fetch_add(1, Relaxed);
+        if id >= LIMIT && !self.slow {
+            self.over.store(true, Relaxed);
+        }
+        r.insert(name.to_vec(), id);
+        id
+    }
+
+    /// Probe from slot s for a name with hash h: a candidate entry whose tag and
+    /// length match (to be confirmed by the caller), or a fresh id if the name is new.
+    fn find(&self, noff: usize, nlen: usize, h: u64, mut s: usize) -> Hit {
+        let want = OCC | (h & 0x3F) << 57 | (nlen as u64) << 32;
+        loop {
+            let mut e = self.table[s].load(Relaxed);
+            if e == 0 {
+                let id = self.next.fetch_add(1, Relaxed);
+                if id >= LIMIT {
+                    self.over.store(true, Relaxed);
+                    return Hit::Id(0);
+                }
+                match self.table[s].compare_exchange(0, want | (id as u64) << 40 | noff as u64, Relaxed, Relaxed) {
+                    Ok(_) => return Hit::Id(id),
+                    Err(c) => e = c, // another thread took the slot first
+                }
+            }
+            if (e ^ want) & MMASK == 0 {
+                return Hit::Cand(s, e);
+            }
+            s = (s + 1) & (self.table.len() - 1);
+        }
+    }
+}
+
+/// Is the name of entry e the same bytes as the nlen bytes at noff?
+fn same(f: &[u8], e: u64, noff: usize, nlen: usize) -> bool {
+    let eo = (e & 0xFFFF_FFFF) as usize;
+    f[eo..eo + nlen] == f[noff..noff + nlen]
+}
+
+// One bitset over name ids per country (the last is _UNMATCHED). Ids past the
+// bitset (slow mode only) go to an exact set.
+const BITCAP: usize = LIMIT as usize;
+const BW: usize = BITCAP / 64;
+
+struct Bits {
+    w: Vec<AtomicU64>,
+    sets: Vec<Mutex<HashSet<u32>>>,
+}
+
+impl Bits {
+    fn new(nco: usize) -> Self {
+        Bits { w: zeroed_u64(nco * BW), sets: (0..nco).map(|_| Mutex::new(HashSet::new())).collect() }
+    }
+    fn prefetch(&self, c: usize, id: u32) {
+        if (id as usize) < BITCAP {
+            prefetch(&self.w[c * BW + (id >> 6) as usize]);
+        }
+    }
+    fn mark(&self, c: usize, id: u32) {
+        if (id as usize) < BITCAP {
+            // No test first: most marks are first sightings, and a read would fetch the line twice.
+            self.w[c * BW + (id >> 6) as usize].fetch_or(1 << (id & 63), Relaxed);
         } else {
-            big.insert(rid, slot);
+            self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).insert(id);
         }
     }
-    drop(lookup);
+    fn count(&self, c: usize) -> u64 {
+        let n: u64 = self.w[c * BW..(c + 1) * BW].iter().map(|w| w.load(Relaxed).count_ones() as u64).sum();
+        n + self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).len() as u64
+    }
+}
 
-    // ── the split, then twelve threads over disjoint records ────────────────
-    let pts = match record_boundaries(&records, NTHREADS) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[track-c] cannot scan records.csv: {e}");
-            exit(1);
+// ── records ─────────────────────────────────────────────────────────────────
+#[derive(Clone, Copy, Default)]
+struct Rec {
+    rid: u64,
+    region: u64,
+    cents: i64,
+    noff: usize, // the name's raw bytes (between the quotes when quoted) at noff in the file
+    nlen: u32,
+    nbytes: u32, // its value length (a "" pair counts one)
+    tbytes: u32, // the note's value length
+}
+
+/// A field's value length given its text length and its quote count.
+fn value_len(text: usize, q: u64) -> u32 {
+    (text - if q > 0 { q as usize / 2 + 1 } else { 0 }) as u32
+}
+
+/// One record in exactly the expected shape, or None (the scalar parser then decides).
+/// `qb` is the quote count before this record; the scan has consumed up to its LF.
+#[inline(always)]
+fn fast(f: &[u8], sc: &mut Scan, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
+    let ((c1, q1), (c2, q2), (c3, q3), (c4, q4), (e, q5)) = (sc.next(), sc.next(), sc.next(), sc.next(), sc.next());
+    if e >= end || f.len() < p + 3 || (f[c1], f[c2], f[c3], f[c4], f[e]) != (b',', b',', b',', b',', b'\n') {
+        return None;
+    }
+    if q1 != *qb || q4 != q3 || q5 != q4 {
+        return None; // id, region and amount hold no quotes
+    }
+    let mut s = p;
+    if f[s] == 0xEF {
+        if f[s + 1] != 0xBB || f[s + 2] != 0xBF {
+            return None;
+        }
+        s += 3;
+    }
+    let (n1, n3) = (c1.wrapping_sub(s), c4 - c3 - 1);
+    if n1 == 0 || n1 > 8 || n3 == 0 || n3 > 8 || c1 < 8 {
+        return None;
+    }
+    let (w1, w3) = (load8(f, c1 - 8), load8(f, c4 - 8));
+    if !digits_ok(w1, n1) || !digits_ok(w3, n3) {
+        return None;
+    }
+    // amount: -?digits.dd with at most 7 digits; the eight bytes ending at its end, dot dropped, are one number
+    let a0 = c4 + 1;
+    let neg = f[a0] == b'-';
+    let ae = e - (f[e - 1] == b'\r') as usize;
+    let alen = ae.wrapping_sub(a0 + neg as usize);
+    if !(4..=8).contains(&alen) || f[ae - 3] != b'.' {
+        return None;
+    }
+    let w = load8(f, ae - 8);
+    let w = (w & 0xFF_FFFF_FFFF) << 8 | (w & 0xFFFF_0000_0000_0000);
+    if !digits_ok(w, alen - 1) {
+        return None;
+    }
+    let cents = fold(w, alen - 1) as i64;
+    // name and note: unquoted, or one quoted run with its two delimiting quotes
+    let (qn, qt) = (q2 - q1, q3 - q2);
+    let (nt, tt) = (c2 - c1 - 1, c3 - c2 - 1);
+    let quoted_ok = |from: usize, text: usize, q: u64| q == 0 || (q % 2 == 0 && text >= 2 && f[from] == b'"' && f[from + text - 1] == b'"');
+    if !quoted_ok(c1 + 1, nt, qn) || !quoted_ok(c2 + 1, tt, qt) {
+        return None;
+    }
+    *qb = q5;
+    let (noff, nlen) = if qn > 0 { (c1 + 2, nt - 2) } else { (c1 + 1, nt) };
+    let rec = Rec {
+        rid: fold(w1, n1),
+        region: fold(w3, n3),
+        cents: if neg { -cents } else { cents },
+        noff,
+        nlen: nlen as u32,
+        nbytes: value_len(nt, qn),
+        tbytes: value_len(tt, qt),
+    };
+    Some((rec, e + 1))
+}
+
+/// A field at pos: (raw start, raw length, value length). Quoted: the run up to the
+/// closing quote, `""` being one literal quote; unquoted: up to a comma, LF or CR.
+fn field(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
+    let s = *pos;
+    if s < b.len() && b[s] == b'"' {
+        let (mut i, mut v) = (s + 1, 0);
+        loop {
+            if i >= b.len() {
+                *pos = i;
+                return (s + 1, i - (s + 1), v);
+            }
+            if b[i] != b'"' {
+                (i, v) = (i + 1, v + 1);
+            } else if i + 1 < b.len() && b[i + 1] == b'"' {
+                (i, v) = (i + 2, v + 1);
+            } else {
+                *pos = i + 1;
+                return (s + 1, i - (s + 1), v);
+            }
+        }
+    }
+    let mut i = s;
+    while i < b.len() && b[i] != b',' && b[i] != b'\n' && b[i] != b'\r' {
+        i += 1;
+    }
+    *pos = i;
+    (s, i - s, i - s)
+}
+
+fn digits(b: &[u8], pos: &mut usize) -> u64 {
+    let mut v = 0u64;
+    while *pos < b.len() && b[*pos].is_ascii_digit() {
+        v = v.wrapping_mul(10).wrapping_add((b[*pos] - b'0') as u64);
+        *pos += 1;
+    }
+    v
+}
+
+/// The record at p, parsed by the literal rules of the format. The last record of the
+/// file may lack its terminator; any other record that does not end in CRLF or LF is
+/// not parsed (None), and the rest of its piece with it.
+fn slow(f: &[u8], p: usize, end: usize) -> Option<(Rec, usize)> {
+    let b = &f[..end];
+    let mut pos = p;
+    if b[pos..].starts_with(&BOM) {
+        pos += 3;
+        if pos >= end {
+            return None;
+        }
+    }
+    let rid = digits(b, &mut pos);
+    let comma = |pos: &mut usize| {
+        if b.get(*pos) == Some(&b',') {
+            *pos += 1;
         }
     };
+    comma(&mut pos);
+    let (noff, nlen, nval) = field(b, &mut pos);
+    comma(&mut pos);
+    let (_, _, tval) = field(b, &mut pos);
+    comma(&mut pos);
+    let region = digits(b, &mut pos);
+    comma(&mut pos);
+    let neg = pos < end && b[pos] == b'-';
+    pos += neg as usize;
+    let mut cents = (digits(b, &mut pos) as i64).wrapping_mul(100);
+    if pos + 2 < end && b[pos] == b'.' {
+        let (d1, d2) = (b[pos + 1].wrapping_sub(b'0') as i64, b[pos + 2].wrapping_sub(b'0') as i64);
+        pos += 3;
+        cents = cents.wrapping_add(d1 * 10 + d2);
+    }
+    if neg {
+        cents = -cents;
+    }
+    if pos < end && b[pos] == b'\r' {
+        pos += 1;
+    }
+    if pos < end && b[pos] == b'\n' {
+        pos += 1;
+    } else if !(pos == end && end == f.len()) {
+        return None;
+    }
+    let rec = Rec { rid, region, cents, noff, nlen: nlen as u32, nbytes: nval as u32, tbytes: tval as u32 };
+    Some((rec, pos))
+}
 
-    let names = Interner::new();
-    let distinct: Vec<CountryNames> = (0..=codes.len()).map(|_| CountryNames::default()).collect();
-    let ncodes = distinct.len();
+// ── the pipeline ────────────────────────────────────────────────────────────
+// Each record passes three stages, LAG records apart, so the random reads of
+// each (region row, name slot, name bytes, bitset word) are prefetched ahead:
+// 1 country, sums, name probe; 2 confirm the name, prefetch its bit; 3 mark.
+const LAG: u64 = 16;
 
-    let mut parts: Vec<Vec<Agg>> = Vec::with_capacity(pts.len());
-    let workers = pts.len().saturating_sub(1).max(1);
-    let per = ncodes.div_ceil(workers).max(1);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(pts.len());
-        for (wi, w) in pts.windows(2).enumerate() {
-            let (a, b) = (w[0], w[1]);
-            let path = records.as_str();
-            let rarr = &rarr;
-            let big = &big;
-            let names = &names;
-            let distinct = &distinct;
-            handles.push(scope.spawn(move || {
-                // Fault this thread's share of the bitmaps in before it parses.
-                // They are 3.9 MB that every thread writes a random line of for
-                // all 3.32 M records; left to the record loop, each page is read
-                // first (the shared zero page) and faulted again for its first
-                // write, from up to twelve threads at once, all of it serialised
-                // on the kernel's page-table locks. One slice per thread touches
-                // each page once, and no page a mark would not touch anyway.
-                let c0 = (wi * per).min(ncodes);
-                let c1 = ((wi + 1) * per).min(ncodes);
-                for c in &distinct[c0..c1] {
-                    c.reserve();
-                }
-                parse_range(path, a, b, rarr, big, names, distinct, unmatched_slot)
-            }));
+struct Ctx<'a> {
+    f: &'a [u8],
+    rarr: &'a [AtomicU16],
+    big: &'a HashMap<u64, u16>,
+    rank: &'a [u16], // region slot (0 = none) -> country index
+    names: &'a Names,
+    bits: &'a Bits,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Pend {
+    r: Rec,
+    h: u64,
+    cand: u64,
+    slot: u32,
+    country: u32,
+    nid: u32,
+}
+
+struct Pipe<'a> {
+    cx: &'a Ctx<'a>,
+    aggs: Vec<Agg>,
+    ring: Vec<Pend>,
+    n: u64,
+}
+
+impl<'a> Pipe<'a> {
+    fn new(cx: &'a Ctx<'a>, nco: usize) -> Self {
+        Pipe { cx, aggs: vec![Agg::new(); nco], ring: vec![Pend::default(); 64], n: 0 }
+    }
+
+    fn push(&mut self, r: &Rec) {
+        self.advance(self.n);
+        let cx = self.cx;
+        let h = hash(&cx.f[r.noff..r.noff + r.nlen as usize]);
+        let slot = (h >> (64 - TB)) as u32;
+        prefetch(&cx.names.table[slot as usize]);
+        if (r.region as usize) < cx.rarr.len() {
+            prefetch(&cx.rarr[r.region as usize]);
         }
-        for h in handles {
-            if let Ok(r) = h.join() {
-                parts.push(r);
+        self.ring[(self.n & 63) as usize] = Pend { r: *r, h, slot, ..Pend::default() };
+        self.n += 1;
+    }
+
+    fn advance(&mut self, vn: u64) {
+        let (cx, n) = (self.cx, self.n);
+        if vn >= 3 * LAG && vn - 3 * LAG < n {
+            let p = &self.ring[((vn - 3 * LAG) & 63) as usize];
+            cx.bits.mark(p.country as usize, p.nid);
+        }
+        if vn >= 2 * LAG && vn - 2 * LAG < n {
+            let p = &mut self.ring[((vn - 2 * LAG) & 63) as usize];
+            if p.cand != 0 {
+                let (noff, nlen) = (p.r.noff as usize, p.r.nlen as usize);
+                let (mut e, mut s) = (p.cand, p.slot as usize);
+                loop {
+                    if same(cx.f, e, noff, nlen) {
+                        p.nid = (e >> 40) as u32 & (LIMIT - 1);
+                        break;
+                    }
+                    // a tag collision: keep probing, exactly
+                    match cx.names.find(noff, nlen, p.h, (s + 1) & (cx.names.table.len() - 1)) {
+                        Hit::Id(id) => {
+                            p.nid = id;
+                            break;
+                        }
+                        Hit::Cand(cs, ce) => (s, e) = (cs, ce),
+                    }
+                }
+            }
+            cx.bits.prefetch(p.country as usize, p.nid);
+        }
+        if vn >= LAG && vn - LAG < n {
+            let (ring, aggs) = (&mut self.ring, &mut self.aggs);
+            let p = &mut ring[((vn - LAG) & 63) as usize];
+            let rs = match cx.rarr.get(p.r.region as usize) {
+                Some(s) => s.load(Relaxed),
+                None => cx.big.get(&p.r.region).copied().unwrap_or(0),
+            };
+            let c = cx.rank[rs as usize] as usize;
+            p.country = c as u32;
+            let a = &mut aggs[c];
+            a.count += 1;
+            a.id_sum = a.id_sum.wrapping_add(p.r.rid as i64);
+            a.amount_sum += p.r.cents;
+            a.amount_min = a.amount_min.min(p.r.cents);
+            a.amount_max = a.amount_max.max(p.r.cents);
+            a.name_bytes += p.r.nbytes as u64;
+            a.note_bytes += p.r.tbytes as u64;
+            let (noff, nlen) = (p.r.noff as usize, p.r.nlen as usize);
+            if cx.names.slow || nlen > 255 {
+                p.nid = cx.names.rare_intern(&cx.f[noff..noff + nlen]);
+            } else {
+                match cx.names.find(noff, nlen, p.h, p.slot as usize) {
+                    Hit::Id(id) => p.nid = id,
+                    Hit::Cand(s, e) => {
+                        (p.cand, p.slot) = (e, s as u32);
+                        prefetch(cx.f.as_ptr().wrapping_add((e & 0xFFFF_FFFF) as usize));
+                    }
+                }
             }
         }
-    });
+    }
 
-    // ── merge, then one total order ─────────────────────────────────────────
-    let mut groups: Vec<Agg> = (0..ncodes).map(|_| Agg::new()).collect();
-    for g in parts {
-        for (i, a) in g.into_iter().enumerate() {
-            merge(&mut groups[i], a);
+    fn finish(mut self) -> Vec<Agg> {
+        for vn in self.n..self.n + 3 * LAG {
+            self.advance(vn);
+        }
+        self.aggs
+    }
+}
+
+/// Parse every record that starts in [start, end), both being record boundaries.
+fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
+    let f = cx.f;
+    let (mut p, mut sc, mut qb) = (start, Scan::new(f, start), 0u64);
+    while p < end {
+        if pipe.n & 0xFFF == 0 && cx.names.over.load(Relaxed) {
+            return;
+        }
+        match fast(f, &mut sc, p, end, &mut qb) {
+            Some((r, np)) => {
+                pipe.push(&r);
+                p = np;
+            }
+            None => match slow(f, p, end) {
+                Some((r, np)) => {
+                    pipe.push(&r);
+                    (p, sc, qb) = (np, Scan::new(f, np), 0);
+                }
+                None => return,
+            },
         }
     }
+}
 
-    // Country slots are numbered in first-seen order, so the output's total order
-    // is the country code's, and a country with no records prints nothing.
-    let mut keys: Vec<u32> = (0..codes.len() as u32)
-        .filter(|&k| groups[k as usize].count > 0)
-        .collect();
-    keys.sort_unstable_by(|a, b| codes[*a as usize].cmp(&codes[*b as usize]));
+fn main() {
+    // Plain pages: a table touched in part must not be charged as whole 2 MB pages.
+    #[cfg(target_os = "linux")]
+    unsafe { prctl(41, 1, 0, 0, 0) }; // PR_SET_THP_DISABLE
+    let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
+    let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
+    let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
+    let rf = map(&format!("{data}/regions.csv"));
+    let f = map(&format!("{data}/records.csv"));
 
-    let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
-    for k in keys {
-        let a = &groups[k as usize];
-        line(&mut out, &codes[k as usize], a, distinct[k as usize].count());
+    // 1. regions.csv in parallel, and the quote parity of every chunk of records.csv.
+    let rstart = rf.iter().position(|&c| c == b'\n').map_or(rf.len(), |i| i + 1);
+    // The last line holds the largest id when ids ascend; any other id is still handled exactly.
+    let tail = rf.strip_suffix(b"\n").unwrap_or(rf);
+    let tail = tail.strip_suffix(b"\r").unwrap_or(tail);
+    let ls = tail.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+    let hint = tail[ls..].iter().take_while(|c| c.is_ascii_digit()).take(8).fold(0usize, |v, &d| v * 10 + (d - b'0') as usize);
+    let rarr = zeroed_u16((hint + 1).min(1 << 23));
+    let codes = CodeTab::new();
+    let rcut = cuts(rf, rstart.min(rf.len()), nt);
+    let nchunk = f.len().div_ceil(STEP);
+    let per = nchunk.div_ceil(nt).max(1);
+    let got = on_threads(nt, |t| {
+        let r = regions_part(rf, rcut[t], rcut[t + 1], &rarr, &codes);
+        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk)))
+    });
+    let mut ok = got.iter().all(|g| g.0.ok);
+    let mut prev: Option<u64> = None;
+    for g in got.iter().filter(|g| g.0.n > 0) {
+        ok &= prev.map_or(true, |l| l < g.0.first);
+        prev = Some(g.0.last);
     }
-    if groups[unmatched_slot as usize].count > 0 {
-        let a = &groups[unmatched_slot as usize];
-        line(&mut out, b"_UNMATCHED", a, distinct[unmatched_slot as usize].count());
+    let mut over: Vec<(u64, u16)> = Vec::new();
+    let mut par = Vec::with_capacity(nchunk + 1);
+    for (r, p) in got {
+        over.extend(r.over);
+        par.extend(p);
+    }
+    if !ok {
+        // not strictly ascending, or a line of another shape: the literal parse decides
+        rarr.iter().for_each(|s| s.store(0, Relaxed));
+        over = regions_exact(rf, &rarr, &codes);
+    }
+    let big: HashMap<u64, u16> = over.into_iter().collect();
+    let mut present: Vec<(u32, usize)> = (0..4096).filter_map(|s| match codes.t[s].load(Relaxed) {
+        0 => None,
+        e => Some((e & 0xFF_FFFF, s)),
+    }).collect();
+    present.sort_unstable();
+    let ncodes = present.len();
+    let mut rank = vec![ncodes as u16; 4097]; // 0 = no region row: _UNMATCHED
+    for (k, &(_, s)) in present.iter().enumerate() {
+        rank[s + 1] = k as u16;
     }
 
-    if let Err(e) =
-        File::create(format!("{outd}/aggregates.txt")).and_then(|mut f| f.write_all(&out))
-    {
-        eprintln!("[track-c] cannot write aggregates.txt: {e}");
-        exit(1);
+    // 2. Piece boundaries: LFs at even quote parity, found from the chunk parities.
+    let mut acc = 0u8;
+    let before: Vec<u8> = par.iter().map(|&p| { let b = acc; acc ^= p; b }).collect();
+    let start = first_boundary(f, 0, 0);
+    let npieces = 4 * nt;
+    let mut cut = vec![f.len(); npieces + 1];
+    cut[0] = start;
+    for i in 1..npieces {
+        let c = ((start + (f.len() - start) * i / npieces) / STEP).min(nchunk.saturating_sub(1));
+        cut[i] = cut[i - 1].max(first_boundary(f, c * STEP, before.get(c).copied().unwrap_or(0)));
+    }
+
+    // 3. Parse the pieces. A run that needs the exact name map is repeated with it.
+    let nco = ncodes + 1;
+    let run = |slow: bool| {
+        let (names, bits) = (Names::new(slow), Bits::new(nco));
+        let cx = Ctx { f, rarr: &rarr, big: &big, rank: &rank, names: &names, bits: &bits };
+        let next = AtomicUsize::new(0);
+        let parts = on_threads(nt, |t| {
+            populate(&names.table, t, nt);
+            populate(&bits.w, t, nt);
+            let mut pipe = Pipe::new(&cx, nco);
+            loop {
+                let k = next.fetch_add(1, Relaxed);
+                if k >= npieces {
+                    break;
+                }
+                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1]);
+            }
+            pipe.finish()
+        });
+        (parts, bits, names.over.load(Relaxed))
+    };
+    let (mut parts, mut bits, over) = run(f.len() >= u32::MAX as usize);
+    if over {
+        (parts, bits, _) = run(true);
+    }
+
+    // 4. Merge and write: countries in code order, then _UNMATCHED.
+    let mut out: Vec<u8> = Vec::new();
+    for c in 0..nco {
+        let mut a = Agg::new();
+        parts.iter().for_each(|p| a.merge(&p[c]));
+        if a.count == 0 {
+            continue;
+        }
+        if c < ncodes {
+            let k = present[c].0;
+            line(&mut out, &[(k >> 16) as u8, (k >> 8) as u8, k as u8], &a, bits.count(c));
+        } else {
+            line(&mut out, b"_UNMATCHED", &a, bits.count(c));
+        }
+    }
+    if let Err(e) = std::fs::write(format!("{outd}/aggregates.txt"), out) {
+        die(&format!("cannot write aggregates.txt: {e}"));
     }
 }
