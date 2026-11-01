@@ -18,6 +18,9 @@
 //!    over name ids. The region, name and bitset reads are prefetched records
 //!    ahead. A name table that fills up, or a file too big for its packed
 //!    entries, restarts the run on an exact locked map: slower, never wrong.
+//! 5. The record parse and the quote-parity pass are compiled twice from the same source:
+//!    once for the baseline x86-64 target and once with AVX2, BMI, POPCNT and PCLMULQDQ,
+//!    chosen at run time. Both give identical results; only the instructions differ.
 use std::arch::x86_64::*;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
@@ -94,6 +97,7 @@ fn populate<T>(v: &[T], t: usize, nt: usize) {
     }
 }
 
+#[inline(always)]
 fn prefetch<T>(p: *const T) {
     unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
 }
@@ -103,11 +107,13 @@ fn prefetch<T>(p: *const T) {
 #[cfg(not(target_os = "linux"))]
 fn populate<T>(_v: &[T], _t: usize, _nt: usize) {}
 
+#[inline(always)]
 fn load8(f: &[u8], i: usize) -> u64 {
     u64::from_le_bytes(f[i..i + 8].try_into().unwrap())
 }
 
 /// The value of the n (1 to 8) digit bytes at the top of w (last digit in byte 7).
+#[inline(always)]
 fn fold(v: u64, n: usize) -> u64 {
     let mut v = v & 0x0F0F_0F0F_0F0F_0F0F & (!0u64 << (8 * (8 - n)));
     v = (v * 10 + (v >> 8)) & 0x00FF_00FF_00FF_00FF;
@@ -116,6 +122,7 @@ fn fold(v: u64, n: usize) -> u64 {
 }
 
 /// Are the n (1 to 8) top bytes of w all ASCII digits?
+#[inline(always)]
 fn digits_ok(w: u64, n: usize) -> bool {
     let keep = !0u64 << (8 * (8 - n));
     let w = (w & keep) | (0x3030_3030_3030_3030 & !keep);
@@ -124,6 +131,7 @@ fn digits_ok(w: u64, n: usize) -> bool {
 }
 
 /// A fast hash of a name. Only speed depends on it: every match is confirmed byte for byte.
+#[inline(always)]
 fn hash(b: &[u8]) -> u64 {
     const M: u64 = 0x9E37_79B9_7F4A_7C15;
     const M2: u64 = 0x2545_F491_4F6C_DD1D;
@@ -154,11 +162,12 @@ struct Agg {
     amount_max: i64,
     name_bytes: u64,
     note_bytes: u64,
+    distinct: u64, // names first marked for this country by this thread
 }
 
 impl Agg {
     fn new() -> Self {
-        Agg { count: 0, id_sum: 0, amount_sum: 0, amount_min: i64::MAX, amount_max: i64::MIN, name_bytes: 0, note_bytes: 0 }
+        Agg { count: 0, id_sum: 0, amount_sum: 0, amount_min: i64::MAX, amount_max: i64::MIN, name_bytes: 0, note_bytes: 0, distinct: 0 }
     }
     fn merge(&mut self, o: &Agg) {
         if o.count == 0 {
@@ -171,6 +180,7 @@ impl Agg {
         self.amount_max = self.amount_max.max(o.amount_max);
         self.name_bytes += o.name_bytes;
         self.note_bytes += o.note_bytes;
+        self.distinct += o.distinct;
     }
 }
 
@@ -180,7 +190,7 @@ fn money(cents: i64, out: &mut Vec<u8>) {
     out.extend_from_slice(format!("{}{}.{:02}", if cents < 0 { "-" } else { "" }, a / 100, a % 100).as_bytes());
 }
 
-fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg, names: u64) {
+fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
     out.extend_from_slice(key);
     out.extend_from_slice(format!(" {} {} ", a.count, a.id_sum).as_bytes());
     money(a.amount_sum, out);
@@ -188,7 +198,7 @@ fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg, names: u64) {
     money(a.amount_min, out);
     out.push(b' ');
     money(a.amount_max, out);
-    out.extend_from_slice(format!(" {names} {} {}\n", a.name_bytes, a.note_bytes).as_bytes());
+    out.extend_from_slice(format!(" {} {} {}\n", a.distinct, a.name_bytes, a.note_bytes).as_bytes());
 }
 
 const STEP: usize = 1 << 18; // bytes per quote-parity chunk
@@ -196,7 +206,7 @@ const STEP: usize = 1 << 18; // bytes per quote-parity chunk
 /// The commas and LFs outside quotes, in order, from a start offset onwards,
 /// each with the number of `"` bytes before it (counted from the start).
 /// The file must be mapped with a zero page after it (see `map`).
-struct Scan<'a> {
+struct Scan<'a, const A: bool> {
     f: &'a [u8],
     next: usize,
     bits: u64,
@@ -205,7 +215,8 @@ struct Scan<'a> {
     before: u64,
 }
 
-impl<'a> Scan<'a> {
+impl<'a, const A: bool> Scan<'a, A> {
+    #[inline(always)]
     fn new(f: &'a [u8], p: usize) -> Self {
         Scan { f, next: p, bits: 0, carry: 0, q: 0, before: 0 }
     }
@@ -218,29 +229,44 @@ impl<'a> Scan<'a> {
                 return (self.f.len(), self.before + self.q.count_ones() as u64);
             }
             self.before += self.q.count_ones() as u64;
-            let (mut q, mut c, mut n) = (0u64, 0u64, 0u64);
+            let (q, cn, x);
             unsafe {
                 let p = self.f.as_ptr().add(self.next);
-                let (kq, kc, kn) = (_mm_set1_epi8(b'"' as i8), _mm_set1_epi8(b',' as i8), _mm_set1_epi8(b'\n' as i8));
-                for k in 0..4 {
-                    let v = _mm_loadu_si128(p.add(16 * k) as *const __m128i);
-                    q |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 as u64) << (16 * k);
-                    c |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kc)) as u32 as u64) << (16 * k);
-                    n |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kn)) as u32 as u64) << (16 * k);
+                if A {
+                    // Only reached on a CPU that has AVX2 and PCLMULQDQ (see `native`).
+                    let (kq, kc, kn) = (_mm256_set1_epi8(b'"' as i8), _mm256_set1_epi8(b',' as i8), _mm256_set1_epi8(b'\n' as i8));
+                    let (v0, v1) = (_mm256_loadu_si256(p as *const __m256i), _mm256_loadu_si256(p.add(32) as *const __m256i));
+                    q = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, kq)) as u32 as u64) | (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, kq)) as u32 as u64) << 32;
+                    cn = (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v0, kc), _mm256_cmpeq_epi8(v0, kn))) as u32 as u64)
+                        | (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v1, kc), _mm256_cmpeq_epi8(v1, kn))) as u32 as u64) << 32;
+                    // Carry-less multiply by all ones is the prefix XOR of the quote bits.
+                    x = _mm_cvtsi128_si64(_mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), _mm_set1_epi8(-1))) as u64;
+                } else {
+                    let (mut qq, mut c, mut n) = (0u64, 0u64, 0u64);
+                    let (kq, kc, kn) = (_mm_set1_epi8(b'"' as i8), _mm_set1_epi8(b',' as i8), _mm_set1_epi8(b'\n' as i8));
+                    for k in 0..4 {
+                        let v = _mm_loadu_si128(p.add(16 * k) as *const __m128i);
+                        qq |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 as u64) << (16 * k);
+                        c |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kc)) as u32 as u64) << (16 * k);
+                        n |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kn)) as u32 as u64) << (16 * k);
+                    }
+                    q = qq;
+                    cn = c | n;
+                    // Bit i of the prefix XOR is set from an opening quote up to its closing quote;
+                    // a "" pair flips it twice and so changes nothing.
+                    let mut y = q;
+                    y ^= y << 1;
+                    y ^= y << 2;
+                    y ^= y << 4;
+                    y ^= y << 8;
+                    y ^= y << 16;
+                    y ^= y << 32;
+                    x = y;
                 }
             }
-            // Bit i of the prefix XOR is set from an opening quote up to its closing quote;
-            // a "" pair flips it twice and so changes nothing.
-            let mut x = q;
-            x ^= x << 1;
-            x ^= x << 2;
-            x ^= x << 4;
-            x ^= x << 8;
-            x ^= x << 16;
-            x ^= x << 32;
             let inside = x ^ self.carry;
             self.carry = ((inside as i64) >> 63) as u64;
-            self.bits = (c | n) & !inside;
+            self.bits = cn & !inside;
             self.q = q;
             self.next += 64;
         }
@@ -264,21 +290,48 @@ fn first_boundary(f: &[u8], from: usize, mut parity: u8) -> usize {
 }
 
 /// The quote parity of each STEP-byte chunk c0..c1.
-fn quote_parity(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
-    let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
+#[inline(always)]
+fn quote_parity_impl<const A: bool>(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
     (c0..c1)
         .map(|c| {
             let (a, b) = (c * STEP, ((c + 1) * STEP).min(f.len()));
             let (mut i, mut q) = (a, 0u32);
-            while i + 16 <= b {
-                let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
-                q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
-                i += 16;
+            if A {
+                // Only reached on a CPU that has AVX2 (see `native`).
+                unsafe {
+                    let kq = _mm256_set1_epi8(b'"' as i8);
+                    while i + 32 <= b {
+                        let v = _mm256_loadu_si256(f.as_ptr().add(i) as *const __m256i);
+                        q += (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kq)) as u32).count_ones();
+                        i += 32;
+                    }
+                }
+            } else {
+                let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
+                while i + 16 <= b {
+                    let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
+                    q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
+                    i += 16;
+                }
             }
             q += f[i..b].iter().filter(|&&x| x == b'"').count() as u32;
             (q & 1) as u8
         })
         .collect()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
+unsafe fn quote_parity_native(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
+    quote_parity_impl::<true>(f, c0, c1)
+}
+
+fn quote_parity(f: &[u8], c0: usize, c1: usize, nat: bool) -> Vec<u8> {
+    if nat {
+        unsafe { quote_parity_native(f, c0, c1) }
+    } else {
+        quote_parity_impl::<false>(f, c0, c1)
+    }
 }
 
 /// k line-aligned cuts of f[from..].
@@ -460,6 +513,7 @@ impl Names {
 
     /// Probe from slot s for a name with hash h: a candidate entry whose tag and
     /// length match (to be confirmed by the caller), or a fresh id if the name is new.
+    #[inline(always)]
     fn find(&self, noff: usize, nlen: usize, h: u64, mut s: usize) -> Hit {
         let want = OCC | (h & 0x3F) << 57 | (nlen as u64) << 32;
         loop {
@@ -484,6 +538,7 @@ impl Names {
 }
 
 /// Is the name of entry e the same bytes as the nlen bytes at noff?
+#[inline(always)]
 fn same(f: &[u8], e: u64, noff: usize, nlen: usize) -> bool {
     let eo = (e & 0xFFFF_FFFF) as usize;
     f[eo..eo + nlen] == f[noff..noff + nlen]
@@ -503,22 +558,23 @@ impl Bits {
     fn new(nco: usize) -> Self {
         Bits { w: zeroed_u64(nco * BW), sets: (0..nco).map(|_| Mutex::new(HashSet::new())).collect() }
     }
+    #[inline(always)]
     fn prefetch(&self, c: usize, id: u32) {
         if (id as usize) < BITCAP {
             prefetch(&self.w[c * BW + (id >> 6) as usize]);
         }
     }
-    fn mark(&self, c: usize, id: u32) {
+    #[inline(always)]
+    /// Marks the name for the country; true if it was not marked before, so the distinct
+    /// counts come out of the marking (the OR returns the old bit) with no pass over the bitsets.
+    fn mark(&self, c: usize, id: u32) -> bool {
         if (id as usize) < BITCAP {
             // No test first: most marks are first sightings, and a read would fetch the line twice.
-            self.w[c * BW + (id >> 6) as usize].fetch_or(1 << (id & 63), Relaxed);
+            let bit = 1u64 << (id & 63);
+            self.w[c * BW + (id >> 6) as usize].fetch_or(bit, Relaxed) & bit == 0
         } else {
-            self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+            self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).insert(id)
         }
-    }
-    fn count(&self, c: usize) -> u64 {
-        let n: u64 = self.w[c * BW..(c + 1) * BW].iter().map(|w| w.load(Relaxed).count_ones() as u64).sum();
-        n + self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).len() as u64
     }
 }
 
@@ -535,6 +591,7 @@ struct Rec {
 }
 
 /// A field's value length given its text length and its quote count.
+#[inline(always)]
 fn value_len(text: usize, q: u64) -> u32 {
     (text - if q > 0 { q as usize / 2 + 1 } else { 0 }) as u32
 }
@@ -542,7 +599,7 @@ fn value_len(text: usize, q: u64) -> u32 {
 /// One record in exactly the expected shape, or None (the scalar parser then decides).
 /// `qb` is the quote count before this record; the scan has consumed up to its LF.
 #[inline(always)]
-fn fast(f: &[u8], sc: &mut Scan, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
+fn fast<const A: bool>(f: &[u8], sc: &mut Scan<A>, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
     let ((c1, q1), (c2, q2), (c3, q3), (c4, q4), (e, q5)) = (sc.next(), sc.next(), sc.next(), sc.next(), sc.next());
     if e >= end || f.len() < p + 3 || (f[c1], f[c2], f[c3], f[c4], f[e]) != (b',', b',', b',', b',', b'\n') {
         return None;
@@ -602,6 +659,7 @@ fn fast(f: &[u8], sc: &mut Scan, p: usize, end: usize, qb: &mut u64) -> Option<(
 
 /// A field at pos: (raw start, raw length, value length). Quoted: the run up to the
 /// closing quote, `""` being one literal quote; unquoted: up to a comma, LF or CR.
+#[inline(always)]
 fn field(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
     let s = *pos;
     if s < b.len() && b[s] == b'"' {
@@ -629,6 +687,7 @@ fn field(b: &[u8], pos: &mut usize) -> (usize, usize, usize) {
     (s, i - s, i - s)
 }
 
+#[inline(always)]
 fn digits(b: &[u8], pos: &mut usize) -> u64 {
     let mut v = 0u64;
     while *pos < b.len() && b[*pos].is_ascii_digit() {
@@ -641,6 +700,7 @@ fn digits(b: &[u8], pos: &mut usize) -> u64 {
 /// The record at p, parsed by the literal rules of the format. The last record of the
 /// file may lack its terminator; any other record that does not end in CRLF or LF is
 /// not parsed (None), and the rest of its piece with it.
+#[inline(always)]
 fn slow(f: &[u8], p: usize, end: usize) -> Option<(Rec, usize)> {
     let b = &f[..end];
     let mut pos = p;
@@ -723,6 +783,7 @@ impl<'a> Pipe<'a> {
         Pipe { cx, aggs: vec![Agg::new(); nco], ring: vec![Pend::default(); 64], n: 0 }
     }
 
+    #[inline(always)]
     fn push(&mut self, r: &Rec) {
         self.advance(self.n);
         let cx = self.cx;
@@ -736,11 +797,12 @@ impl<'a> Pipe<'a> {
         self.n += 1;
     }
 
+    #[inline(always)]
     fn advance(&mut self, vn: u64) {
         let (cx, n) = (self.cx, self.n);
         if vn >= 3 * LAG && vn - 3 * LAG < n {
             let p = &self.ring[((vn - 3 * LAG) & 63) as usize];
-            cx.bits.mark(p.country as usize, p.nid);
+            self.aggs[p.country as usize].distinct += cx.bits.mark(p.country as usize, p.nid) as u64;
         }
         if vn >= 2 * LAG && vn - 2 * LAG < n {
             let p = &mut self.ring[((vn - 2 * LAG) & 63) as usize];
@@ -769,6 +831,7 @@ impl<'a> Pipe<'a> {
             let p = &mut ring[((vn - LAG) & 63) as usize];
             let rs = match cx.rarr.get(p.r.region as usize) {
                 Some(s) => s.load(Relaxed),
+                None if cx.big.is_empty() => 0,
                 None => cx.big.get(&p.r.region).copied().unwrap_or(0),
             };
             let c = cx.rank[rs as usize] as usize;
@@ -805,10 +868,13 @@ impl<'a> Pipe<'a> {
 }
 
 /// Parse every record that starts in [start, end), both being record boundaries.
-fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
+#[inline(always)]
+fn parse_piece_impl<const A: bool>(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
     let f = cx.f;
-    let (mut p, mut sc, mut qb) = (start, Scan::new(f, start), 0u64);
+    let (mut p, mut sc, mut qb) = (start, Scan::<A>::new(f, start), 0u64);
     while p < end {
+        // The mapped file's pages are scattered; reach into the next one ahead of the parse.
+        prefetch(f.as_ptr().wrapping_add(p + 2048));
         if pipe.n & 0xFFF == 0 && cx.names.over.load(Relaxed) {
             return;
         }
@@ -820,11 +886,37 @@ fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
             None => match slow(f, p, end) {
                 Some((r, np)) => {
                     pipe.push(&r);
-                    (p, sc, qb) = (np, Scan::new(f, np), 0);
+                    (p, sc, qb) = (np, Scan::<A>::new(f, np), 0);
                 }
                 None => return,
             },
         }
+    }
+}
+
+/// The same parse compiled for the CPU features the scoring box has (popcnt, BMI, PCLMUL, AVX2),
+/// chosen at run time; any other CPU runs the identical source built for the baseline target.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
+unsafe fn parse_piece_native(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
+    parse_piece_impl::<true>(cx, pipe, start, end)
+}
+
+fn native() -> bool {
+    is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("bmi1")
+        && is_x86_feature_detected!("bmi2")
+        && is_x86_feature_detected!("popcnt")
+        && is_x86_feature_detected!("lzcnt")
+        && is_x86_feature_detected!("pclmulqdq")
+        && is_x86_feature_detected!("sse4.2")
+}
+
+fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize, nat: bool) {
+    if nat {
+        unsafe { parse_piece_native(cx, pipe, start, end) }
+    } else {
+        parse_piece_impl::<false>(cx, pipe, start, end)
     }
 }
 
@@ -835,6 +927,7 @@ fn main() {
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
+    let nat = native();
     let rf = map(&format!("{data}/regions.csv"));
     let f = map(&format!("{data}/records.csv"));
 
@@ -852,7 +945,7 @@ fn main() {
     let per = nchunk.div_ceil(nt).max(1);
     let got = on_threads(nt, |t| {
         let r = regions_part(rf, rcut[t], rcut[t + 1], &rarr, &codes);
-        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk)))
+        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk), nat))
     });
     let mut ok = got.iter().all(|g| g.0.ok);
     let mut prev: Option<u64> = None;
@@ -887,7 +980,7 @@ fn main() {
     let mut acc = 0u8;
     let before: Vec<u8> = par.iter().map(|&p| { let b = acc; acc ^= p; b }).collect();
     let start = first_boundary(f, 0, 0);
-    let npieces = 4 * nt;
+    let npieces = 8 * nt;
     let mut cut = vec![f.len(); npieces + 1];
     cut[0] = start;
     for i in 1..npieces {
@@ -910,15 +1003,15 @@ fn main() {
                 if k >= npieces {
                     break;
                 }
-                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1]);
+                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1], nat);
             }
             pipe.finish()
         });
-        (parts, bits, names.over.load(Relaxed))
+        (parts, names.over.load(Relaxed))
     };
-    let (mut parts, mut bits, over) = run(f.len() >= u32::MAX as usize);
+    let (mut parts, over) = run(f.len() >= u32::MAX as usize);
     if over {
-        (parts, bits, _) = run(true);
+        parts = run(true).0;
     }
 
     // 4. Merge and write: countries in code order, then _UNMATCHED.
@@ -931,9 +1024,9 @@ fn main() {
         }
         if c < ncodes {
             let k = present[c].0;
-            line(&mut out, &[(k >> 16) as u8, (k >> 8) as u8, k as u8], &a, bits.count(c));
+            line(&mut out, &[(k >> 16) as u8, (k >> 8) as u8, k as u8], &a);
         } else {
-            line(&mut out, b"_UNMATCHED", &a, bits.count(c));
+            line(&mut out, b"_UNMATCHED", &a);
         }
     }
     if let Err(e) = std::fs::write(format!("{outd}/aggregates.txt"), out) {
