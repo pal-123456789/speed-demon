@@ -993,6 +993,17 @@ fn main() {
             .collect()
     });
 
+    // The records have done their job: every hour's rows and sizes were copied out
+    // of them inside the scope above, and phase 2 was the last reader. Freeing them
+    // HERE and not at the end of `main` is the whole point -- the output below is
+    // mapped and then written, and its pages are charged to the process, so holding
+    // the record store past this line would make the two peaks overlap.
+    //
+    // `memory.peak` is a high-water mark, not a live figure, so freeing it later
+    // would be free of charge and free of benefit. This is the last moment that
+    // works, which is exactly why the reference releases its chunks mid-phase.
+    drop(parts);
+
     // The rows and their sizes, and then an hour's byte offset: the running sum
     // IS the offset table, and `at[hours.len()]` is the file's length.
     let mut lines: Vec<Vec<Row>> = (0..hours.len()).map(|_| Vec::new()).collect();
