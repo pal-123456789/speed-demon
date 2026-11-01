@@ -1,4 +1,4 @@
-//! Speed Demon 2026 Ã¢â‚¬â€ Track B (Index).
+//! Speed Demon 2026 â€” Track B (Index).
 //!
 //! Strategy
 //! --------
@@ -21,12 +21,13 @@
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
 //! (including every byte >= 0x80) is a separator.
 //!
-//! `std` only Ã¢â‚¬â€ no crates, no Cargo.toml.
+//! `std` only â€” no crates, no Cargo.toml.
 
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::thread;
 
 const TRACK: &str = "B";
@@ -73,7 +74,7 @@ fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) ->
     pairs
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ paths Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn data_dir() -> PathBuf {
     env::var("SD_DATA_DIR")
@@ -97,7 +98,7 @@ fn output_path() -> PathBuf {
     out_dir().join(name)
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ tokenisation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ tokenisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const fn build_is_tok() -> [bool; 256] {
     let mut t = [false; 256];
@@ -174,7 +175,7 @@ fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
     }
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ term interning Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Hash a term with the CPU's CRC32 instruction.
 #[inline]
@@ -232,48 +233,29 @@ fn hash_bytes(b: &[u8]) -> u64 {
 }
 
 /// Byte-string interner: open-addressed table of term ids over a byte arena.
-///
-/// An entry is TWO words side by side: the metadata word, and the term's first
-/// eight bytes zero padded.  A probe therefore verifies a token out of the one
-/// 64-byte line it has already fetched -- a 16-byte pair starting at an even
-/// word index can never straddle a line -- instead of chasing the metadata's
-/// arena offset into a second, dependent random read.
+/// Each slot is `(hash tag << 32) | (term id + 1)`; 0 marks an empty slot, so
+/// a probe rejects a non-matching slot from one 64-bit load in the common case.
 struct TermTable {
     arena: Vec<u8>,
     offs: Vec<u32>,
     lens: Vec<u32>,
-    /// Two words per slot: `[metadata, first eight key bytes]`.
-    entries: Vec<u64>,
+    slots: Vec<u64>,
     mask: usize,
-    /// Set once `pack` has rewritten `entries` into the build layout.
+    /// Set once `pack` has rewritten `slots` into the build layout.
     packed: bool,
 }
 
-/// Build-layout metadata: `tag << 47 | len << 41 | (arena offset + 1) << 20 | id`.
+/// Build-layout slot: `tag << 47 | len << 41 | (arena offset + 1) << 20 | id`.
 ///
 /// The interning layout needs `offs` and `lens` out of two more 300 KB arrays
 /// on every candidate, which is two more random reads per token.  Folding them
-/// into the word the probe already has to fetch removes both.  `+ 1` keeps a
+/// into the word the probe already has to fetch removes both, so a hit costs
+/// one table word plus the key bytes it has to compare anyway.  `+ 1` keeps a
 /// used slot non-zero even when the tag is zero, which is what marks empty.
 const SLOT_ID: u64 = (1 << 20) - 1;
 const SLOT_OFF: u64 = ((1 << 21) - 1) << 20;
 const SLOT_LEN: u64 = 0x3f << 41;
 const SLOT_TAG: u64 = !SLOT_LEN & !SLOT_OFF & !SLOT_ID;
-
-/// The first eight bytes of a key, zero padded.  A token byte is never zero, so
-/// the padding marks where a short key ends and the compare is exact on its own
-/// for every key of eight bytes or less -- which is 80% of this corpus's tokens.
-#[inline]
-fn key8(b: &[u8]) -> u64 {
-    let n = b.len().min(8);
-    let mut w = 0u64;
-    let mut k = 0;
-    while k < n {
-        w |= (b[k] as u64) << (8 * k);
-        k += 1;
-    }
-    w
-}
 
 impl TermTable {
     fn new() -> Self {
@@ -281,11 +263,11 @@ impl TermTable {
             arena: Vec::new(),
             offs: Vec::new(),
             lens: Vec::new(),
-            entries: vec![0u64; 2 << 12],
+            slots: vec![0u64; 1 << 12],
             mask: (1 << 12) - 1,
             packed: false,
         };
-        t.entries.shrink_to_fit();
+        t.slots.shrink_to_fit();
         t
     }
 
@@ -306,7 +288,7 @@ impl TermTable {
         let tag = (h >> 32) as u32;
         let mut i = (h as usize) & self.mask;
         loop {
-            let e = self.entries[i << 1];
+            let e = self.slots[i];
             if e == 0 {
                 return i;
             }
@@ -326,7 +308,7 @@ impl TermTable {
     #[inline]
     fn get(&self, key: &[u8]) -> Option<u32> {
         let h = hash_bytes(key);
-        let e = self.entries[self.slot_for(key, h) << 1];
+        let e = self.slots[self.slot_for(key, h)];
         if e == 0 {
             None
         } else {
@@ -345,66 +327,48 @@ impl TermTable {
         if self.lens.iter().any(|&l| l > 63) {
             return false;
         }
-        for i in 0..=self.mask {
-            let e = self.entries[i << 1];
-            if e == 0 {
+        for e in self.slots.iter_mut() {
+            if *e == 0 {
                 continue;
             }
-            let t = (e as u32 - 1) as usize;
+            let t = (*e as u32 - 1) as usize;
             let o = self.offs[t] as usize;
             let l = self.lens[t] as usize;
-            let (h, k8) = {
-                let key = &self.arena[o..o + l];
-                (hash_bytes(key), key8(key))
-            };
-            self.entries[i << 1] =
-                (h & SLOT_TAG) | ((l as u64) << 41) | (((o as u64) + 1) << 20) | (t as u64);
-            self.entries[(i << 1) + 1] = k8;
+            let h = hash_bytes(&self.arena[o..o + l]);
+            *e = (h & SLOT_TAG) | ((l as u64) << 41) | (((o as u64) + 1) << 20) | (t as u64);
         }
         self.packed = true;
         true
     }
 
-    /// The metadata word and the key's first eight bytes are the same 16-byte
-    /// pair, so a probe that lands on a slot reads one line and verifies out of
-    /// it -- the arena is touched only by a key longer than eight bytes.
-    /// Probe with the key's hash already computed, so its line can be prefetched.
+    /// One random word, then the key bytes -- no `offs`/`lens` touch.
+    /// Probe with the key's hash already computed, so its slot can be prefetched.
     #[inline]
     fn probe_h(&self, key: &[u8], h: u64) -> Option<u32> {
         let tag = h & SLOT_TAG;
-        let mut i = ((h as usize) & self.mask) << 1;
-        let wrap = (self.mask << 1) | 1;
-        let want = key8(key);
+        let mut i = (h as usize) & self.mask;
         loop {
-            let e = self.entries[i];
+            let e = self.slots[i];
             if e == 0 {
                 return None;
             }
             if (e & SLOT_TAG) == tag {
                 let l = ((e & SLOT_LEN) >> 41) as usize;
                 if l == key.len() {
-                    if l <= 8 {
-                        // `want` is zero padded past the key's end and no token
-                        // byte is zero, so this is the whole comparison.
-                        if self.entries[i + 1] == want {
-                            return Some((e & SLOT_ID) as u32);
-                        }
-                    } else {
-                        let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
-                        if self.entries[i + 1] == want && self.arena[o + 8..o + l] == key[8..] {
-                            return Some((e & SLOT_ID) as u32);
-                        }
+                    let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
+                    if self.arena[o..o + l] == *key {
+                        return Some((e & SLOT_ID) as u32);
                     }
                 }
             }
-            i = (i + 2) & wrap;
+            i = (i + 1) & self.mask;
         }
     }
 
     fn intern(&mut self, key: &[u8]) -> u32 {
         let h = hash_bytes(key);
         let i = self.slot_for(key, h);
-        let e = self.entries[i << 1];
+        let e = self.slots[i];
         if e != 0 {
             return e as u32 - 1;
         }
@@ -412,39 +376,35 @@ impl TermTable {
         self.offs.push(self.arena.len() as u32);
         self.lens.push(key.len() as u32);
         self.arena.extend_from_slice(key);
-        self.entries[i << 1] = ((h >> 32) << 32) | (idx as u64 + 1);
-        if self.offs.len() * 3 >= (self.mask + 1) * 2 {
+        self.slots[i] = ((h >> 32) << 32) | (idx as u64 + 1);
+        if self.offs.len() * 3 >= self.slots.len() * 2 {
             self.grow();
         }
         idx
     }
 
     fn grow(&mut self) {
-        let cap = (self.mask + 1) * 2;
-        let old = std::mem::replace(&mut self.entries, vec![0u64; cap * 2]);
+        let cap = self.slots.len() * 2;
+        let old = std::mem::replace(&mut self.slots, vec![0u64; cap]);
         self.mask = cap - 1;
-        let wrap = (self.mask << 1) | 1;
-        let mut at = 0;
-        while at < old.len() {
-            let e = old[at];
-            if e != 0 {
-                let t = (e as u32 - 1) as usize;
-                let o = self.offs[t] as usize;
-                let l = self.lens[t] as usize;
-                let h = hash_bytes(&self.arena[o..o + l]);
-                let mut i = ((h as usize) & self.mask) << 1;
-                while self.entries[i] != 0 {
-                    i = (i + 2) & wrap;
-                }
-                self.entries[i] = e;
-                self.entries[i + 1] = old[at + 1];
+        for e in old {
+            if e == 0 {
+                continue;
             }
-            at += 2;
+            let t = (e as u32 - 1) as usize;
+            let o = self.offs[t] as usize;
+            let l = self.lens[t] as usize;
+            let h = hash_bytes(&self.arena[o..o + l]);
+            let mut i = (h as usize) & self.mask;
+            while self.slots[i] != 0 {
+                i = (i + 1) & self.mask;
+            }
+            self.slots[i] = e;
         }
     }
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ queries Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const OP_AND: u8 = 0;
 const OP_OR: u8 = 1;
@@ -522,7 +482,7 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
     }
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ corpus scan Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ corpus scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn parse_u32(b: &[u8]) -> u32 {
@@ -540,10 +500,17 @@ fn parse_u32(b: &[u8]) -> u32 {
 /// A pointer the workers share.  Each of them writes only its own segment of
 /// every term's stretch, so no two ever touch the same slot and no atomic or
 /// lock is needed.
-#[derive(Clone, Copy)]
 struct Raw<T>(*mut T);
 unsafe impl<T> Send for Raw<T> {}
 unsafe impl<T> Sync for Raw<T> {}
+/// A pointer is copyable whatever it points at, so `Raw` does not inherit the
+/// element type's `Copy` the way a derive would.
+impl<T> Clone for Raw<T> {
+    fn clone(&self) -> Self {
+        Raw(self.0)
+    }
+}
+impl<T> Copy for Raw<T> {}
 impl<T> Raw<T> {
     fn of(v: &mut [T]) -> Self {
         Raw(v.as_mut_ptr())
@@ -571,6 +538,14 @@ struct Postings {
     /// The postings: offsets from the owning worker's first document.
     at: Vec<u16>,
     nw: usize,
+    /// `bmi[t]` is term `t`'s number among the bitmaps, or `NONE` when the term
+    /// is a posting list instead.
+    bmi: Vec<u32>,
+    /// The bitmaps, one after another, `words` words each.
+    bits: Vec<u64>,
+    words: usize,
+    /// The exact document frequency of every bitmap term.
+    bdf: Vec<u32>,
 }
 
 /// Terms are filed by `id % nb`, so one worker fills `nb` separate streams and
@@ -628,11 +603,10 @@ impl Stream {
     }
 }
 
-/// One worker's share of the index before the layout: what it counted per term,
-/// the first document it saw, and its streams of units.
+/// One worker's share of the index before the layout: what it counted per term
+/// and its streams of units.
 struct Part {
     count: Vec<u16>,
-    first: u32,
     streams: Vec<Stream>,
 }
 
@@ -640,7 +614,6 @@ impl Part {
     fn empty(nterms: usize, nb: usize) -> Self {
         Part {
             count: vec![0u16; nterms],
-            first: 0,
             streams: (0..nb).map(|_| Stream::new()).collect(),
         }
     }
@@ -653,7 +626,7 @@ impl Part {
 /// every later posting of the same bucket -- and a widened layout is still exact,
 /// so the only failure mode left is a query set too large for any widening, which
 /// stops the run rather than answering it wrongly.
-fn bucket_count(nterms: usize) -> usize {
+fn bucket_count(nterms: usize) -> (usize, u32) {
     let mut nb = NBUCKETS;
     while nterms.saturating_sub(1) / nb >= (1 << (16 - GB)) {
         if nb >= MAX_BUCKETS {
@@ -661,7 +634,7 @@ fn bucket_count(nterms: usize) -> usize {
         }
         nb <<= 1;
     }
-    nb
+    (nb, nb.trailing_zeros())
 }
 
 impl Postings {
@@ -672,12 +645,27 @@ impl Postings {
             first: Vec::new(),
             at: Vec::new(),
             nw: 0,
+            bmi: vec![NONE; nterms],
+            bits: Vec::new(),
+            words: 0,
+            bdf: Vec::new(),
         }
+    }
+
+    /// Term `t`'s bitmap, or `None` when it is a posting list.
+    #[inline]
+    fn bits_of(&self, t: u32) -> Option<&[u64]> {
+        let bi = self.bmi[t as usize];
+        (bi != NONE).then(|| &self.bits[bi as usize * self.words..][..self.words])
     }
 
     /// How many documents hold term `t`, without decoding its postings.
     #[inline]
     fn len(&self, t: u32) -> usize {
+        let bi = self.bmi[t as usize];
+        if bi != NONE {
+            return self.bdf[bi as usize] as usize;
+        }
         (self.offs[t as usize + 1] - self.offs[t as usize]) as usize
     }
 
@@ -687,6 +675,16 @@ impl Postings {
     /// silently reordered would still evaluate to a plausible wrong answer.
     fn decode_into(&self, t: u32, out: &mut Vec<u32>) {
         out.clear();
+        if let Some(b) = self.bits_of(t) {
+            for (w, &x) in b.iter().enumerate() {
+                let mut m = x;
+                while m != 0 {
+                    out.push(w as u32 * 64 + m.trailing_zeros());
+                    m &= m - 1;
+                }
+            }
+            return;
+        }
         let mut at = self.offs[t as usize] as usize;
         for w in 0..self.nw {
             let n = self.seg[t as usize * self.nw + w] as usize;
@@ -702,6 +700,9 @@ impl Postings {
     /// candidates against common terms, and materialising a common term there
     /// costs a decode of millions of postings it never reads.
     fn has(&self, t: u32, doc: u32) -> bool {
+        if let Some(b) = self.bits_of(t) {
+            return b[(doc >> 6) as usize] >> (doc & 63) & 1 != 0;
+        }
         let w = match self.first.partition_point(|&f| f <= doc) {
             0 => return false,
             w => w - 1,
@@ -726,45 +727,26 @@ impl Postings {
 /// ones.
 const ST_DF: u32 = (1 << 20) - 1;
 
-/// Index one lowercased document: the first time a term occurs in it, append one
-/// unit to that term's bucket of this worker's streams.  The unit *is* the
-/// posting -- there is no term list, no per-document starts array, and no second
-/// pass over either, so nothing here has to be held until the join.
-#[inline]
-fn index_doc(
-    text: &[u8],
-    tt: &TermTable,
-    streams: &mut [Stream],
-    prev: &mut [u32],
-    nslot: &mut [u32],
-    gen: u32,
-    off: u32,
-    nb: usize,
-    nb_shift: u32,
-) {
-    let n = text.len();
-    let mut i = 0usize;
-    // A token's table slot is a random read, so each token's slot is prefetched
-    // and the token is looked up LAG tokens later; results are still taken in
-    // token order, so the per-document stamp logic is unchanged.
+/// A term number that names nothing: no bitmap, and no block in progress.
+const NONE: u32 = u32::MAX;
+
+/// Calls `on` with the id of each token of `text` that is a query term, in token
+/// order.  A token's table slot is a random read, so its slot is prefetched and
+/// the token is looked up `LAG` tokens later; results are still reported in token
+/// order, so callers that keep per-document state see the document's tokens once
+/// each and in order.
+#[inline(always)]
+fn each_term(text: &[u8], tt: &TermTable, mut on: impl FnMut(u32)) {
     const LAG: usize = 8;
+    let n = text.len();
     let mut ring = [(0u64, 0usize, 0usize); LAG];
     let mut cnt = 0usize;
-    let mut resolve = |found: Option<u32>| {
+    let mut hit = |found: Option<u32>| {
         if let Some(t) = found {
-            let e = &mut nslot[t as usize];
-            if *e >> 20 != gen {
-                *e = (gen << 20) | ((*e & ST_DF) + 1);
-                // `nb` is a power of two (see `bucket_count`), so the bucket and
-                // the term's index inside it are a mask and a shift rather than
-                // two divisions -- paid for every one of the 22.2 M postings.
-                let b = t as usize & (nb - 1);
-                let gap = off - prev[b];
-                prev[b] = off;
-                streams[b].put(t >> nb_shift, gap);
-            }
+            on(t);
         }
     };
+    let mut i = 0usize;
     while i < n {
         while i < n && !IS_TOK[text[i] as usize] {
             i += 1;
@@ -773,23 +755,20 @@ fn index_doc(
         i = scan_token(text, i);
         if i > s {
             if !tt.packed {
-                resolve(tt.get(&text[s..i]));
+                hit(tt.get(&text[s..i]));
                 continue;
             }
             let h = hash_bytes(&text[s..i]);
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                // SAFETY: the address is inside `entries`; a prefetch never faults.
+                // SAFETY: the address is inside `slots`; a prefetch never faults.
                 core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
-                    tt.entries
-                        .as_ptr()
-                        .add(((h as usize) & tt.mask) << 1)
-                        .cast(),
+                    tt.slots.as_ptr().add((h as usize) & tt.mask).cast(),
                 );
             }
             if cnt >= LAG {
                 let (ph, ps, pe) = ring[cnt % LAG];
-                resolve(tt.probe_h(&text[ps..pe], ph));
+                hit(tt.probe_h(&text[ps..pe], ph));
             }
             ring[cnt % LAG] = (h, s, i);
             cnt += 1;
@@ -797,8 +776,60 @@ fn index_doc(
     }
     for k in cnt.saturating_sub(LAG)..cnt {
         let (ph, ps, pe) = ring[k % LAG];
-        resolve(tt.probe_h(&text[ps..pe], ph));
+        hit(tt.probe_h(&text[ps..pe], ph));
     }
+}
+
+/// Index one lowercased document.  A term that is held as a bitmap collects its
+/// document's bit, which is idempotent, so it needs no stamp and no unit; a term
+/// that is a posting list appends one unit to that term's bucket of this worker's
+/// streams the first time it occurs in the document.  The unit *is* the posting --
+/// there is no term list, no per-document starts array, and no second pass over
+/// either, so nothing here has to be held until the join.
+#[inline]
+fn index_doc(
+    text: &[u8],
+    tt: &TermTable,
+    streams: &mut [Stream],
+    prev: &mut [u32],
+    nslot: &mut [u32],
+    bmi: &[u32],
+    pending: &mut [u64],
+    bit: u64,
+    gen: u32,
+    off: u32,
+    nb: usize,
+    nbsh: u32,
+) {
+    each_term(text, tt, |t| {
+        let bi = bmi[t as usize];
+        if bi != NONE {
+            pending[bi as usize] |= bit;
+            return;
+        }
+        let e = &mut nslot[t as usize];
+        if *e >> 20 != gen {
+            *e = (gen << 20) | ((*e & ST_DF) + 1);
+            let b = t as usize & (nb - 1);
+            let gap = off - prev[b];
+            prev[b] = off;
+            streams[b].put(t >> nbsh, gap);
+        }
+    });
+}
+
+/// Guess a term's document frequency from a sample: the documents of one byte
+/// range that hold it.  This only ever decides how a term is stored, never what
+/// it matches, so a sample that is wrong costs space or time and cannot change an
+/// answer.
+fn sample_doc(text: &[u8], tt: &TermTable, last: &mut [u32], df: &mut [u32], gen: u32) {
+    each_term(text, tt, |t| {
+        let e = &mut last[t as usize];
+        if *e != gen {
+            *e = gen;
+            df[t as usize] += 1;
+        }
+    });
 }
 
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
@@ -825,16 +856,22 @@ fn build_range(
     tt: &TermTable,
     nterms: usize,
     nb: usize,
-    nb_shift: u32,
+    nbsh: u32,
+    bmi: &[u32],
+    nbm: usize,
+    words: usize,
+    bmp: Raw<AtomicU64>,
+    first: u32,
     start: u64,
     end: u64,
 ) -> Part {
     let mut nslot: Vec<u32> = vec![0u32; nterms];
     let mut prev: Vec<u32> = vec![0u32; nb];
     let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
+    // One word per bitmap term, covering the 64 documents the worker is inside of.
+    let mut pending: Vec<u64> = vec![0u64; nbm];
+    let mut block: u32 = NONE;
     let mut gen: u32 = 0;
-    let mut first: u32 = 0;
-    let mut seen = false;
 
     let f = match File::open(path) {
         Ok(f) => f,
@@ -884,10 +921,6 @@ fn build_range(
             // borrowing an id that belongs to another worker's range.
             None => continue,
         };
-        if !seen {
-            first = id;
-            seen = true;
-        }
         // A posting is a 16-bit offset from this worker's first document, so a
         // worker's ids have to stay in one 65,535-wide window.  Truncating an
         // offset here would silently move a document, so this is a hard stop.
@@ -895,6 +928,18 @@ fn build_range(
             panic!("[track-{TRACK}] a worker's range spans more than 65,535 document ids");
         }
         let off = id - first;
+        // Each bitmap term collects a bit for this document; the bit is set once
+        // per token but OR is idempotent, so repeats within the document are
+        // free.  The gathered words are added to the shared bitmaps when the
+        // worker leaves the 64-document block they describe.
+        let w = id >> 6;
+        let bit = 1u64 << (id & 63);
+        if w != block {
+            if block != NONE {
+                flush(&mut pending, block as usize, words, bmp);
+            }
+            block = w;
+        }
         // A fresh generation per document is what makes the stamp test work
         // without ever storing a document id.  Twelve bits is 4095 documents,
         // so a longer range clears the stamp field -- keeping the counts --
@@ -908,17 +953,10 @@ fn build_range(
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_doc(
-            text,
-            tt,
-            &mut streams,
-            &mut prev,
-            &mut nslot,
-            gen,
-            off,
-            nb,
-            nb_shift,
-        );
+        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, bmi, &mut pending, bit, gen, off, nb, nbsh);
+    }
+    if block != NONE {
+        flush(&mut pending, block as usize, words, bmp);
     }
 
     // The low twenty bits of each slot are the term's df.  A worker's df cannot
@@ -932,11 +970,84 @@ fn build_range(
         }
         count[t] = c as u16;
     }
-    Part {
-        count,
-        first,
-        streams,
+    Part { count, streams }
+}
+
+/// Add a worker's gathered words to the shared bitmaps and clear them.  Every
+/// bit belongs to exactly one worker, but a block at a range boundary can be
+/// shared, so the shared word is written with one atomic OR.
+#[inline]
+fn flush(pending: &mut [u64], w: usize, words: usize, bmp: Raw<AtomicU64>) {
+    for (i, x) in pending.iter_mut().enumerate() {
+        if *x != 0 {
+            let x = std::mem::take(x);
+            unsafe {
+                // SAFETY: i < nbm and w < words, both enforced by the caller.
+                (*bmp.at(i * words + w)).fetch_or(x, Relaxed);
+            }
+        }
     }
+}
+
+/// Sample one byte range: the documents in its first 1/32 count towards each
+/// term's sampled df, and the range's first document id is reported because the
+/// full scan needs it before it runs (a bitmap covers the whole document-id
+/// range).  Both walks use the same rule, and the sample keeps reading -- without
+/// counting -- until it has seen that first TAB, so a range whose first lines are
+/// malformed still reports the id the full scan will use.
+fn sample_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> (u32, Vec<u32>) {
+    let (mut df, mut last) = (vec![0u32; nterms], vec![0u32; nterms]);
+    let (mut first, mut gen, mut seen) = (0u32, 0u32, false);
+    let stop_at = start + (end - start) / 32;
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (0, df),
+    };
+    let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut pos = start;
+    if start > 0 {
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
+        if r.seek(SeekFrom::Start(start)).is_err() {
+            return (0, df);
+        }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return (0, df),
+            Ok(k) => pos += k as u64,
+        }
+    }
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    loop {
+        line.clear();
+        let n = match r.read_until(b'\n', &mut line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 || pos >= end {
+            break;
+        }
+        let here = pos;
+        pos += n as u64;
+        let mut stop = n;
+        if line[stop - 1] == b'\n' {
+            stop -= 1;
+        }
+        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
+            Some(t) => (parse_u32(&line[..t]), t + 1),
+            None => continue,
+        };
+        if !seen {
+            first = id;
+            seen = true;
+        }
+        if here >= stop_at {
+            break;
+        }
+        gen += 1;
+        let text = &mut line[tstart..stop];
+        ascii_lower_in_place(text);
+        sample_doc(text, tt, &mut last, &mut df, gen);
+    }
+    (first, df)
 }
 
 /// Build the postings across every worker over disjoint byte ranges.
@@ -951,30 +1062,43 @@ fn build_range(
 /// each worker's run inside it is.  A term's stretch is worker 0's run, then worker
 /// 1's; the ranges ascend with the file, so the concatenation comes out ascending
 /// in document id with no sort and no dedupe.
-fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Postings> {
+fn build_index(
+    path: &Path,
+    tt: &TermTable,
+    nterms: usize,
+    cuts: &[u64],
+    firsts: &[u32],
+    bmi: &[u32],
+    nbm: usize,
+    words: usize,
+) -> io::Result<Postings> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
         return Ok(Postings::empty(nterms));
     }
 
-    let nb = bucket_count(nterms);
-    assert!(nb.is_power_of_two(), "[track-{TRACK}] bucket count must be a power of two");
-    let nb_shift = nb.trailing_zeros();
-    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
+    let (nb, nbsh) = bucket_count(nterms);
+    let nworkers = cuts.len() - 1;
+    // The bitmaps are shared by every worker.  They come from zero pages and are
+    // written only where a term occurs, and a word can be written by two workers
+    // only where their ranges meet inside one 64-document block.
+    let mut bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbm * words]) };
+    let bmp = Raw::of(&mut bits);
     let parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
         for i in 0..nworkers {
-            let (a, b) = (
-                size * i as u64 / nworkers as u64,
-                size * (i as u64 + 1) / nworkers as u64,
-            );
-            handles.push(s.spawn(move || build_range(path, tt, nterms, nb, nb_shift, a, b)));
+            let (start, end) = (cuts[i], cuts[i + 1]);
+            let first = firsts[i];
+            handles.push(s.spawn(move || {
+                build_range(path, tt, nterms, nb, nbsh, bmi, nbm, words, bmp, first, start, end)
+            }));
         }
         handles
             .into_iter()
             .filter_map(|h| h.join().ok())
             .collect()
     });
+    let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
     let nw = parts.len();
     if nw == 0 {
         return Ok(Postings::empty(nterms));
@@ -993,7 +1117,7 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
     }
     offs.push(acc);
     let mut at: Vec<u16> = vec![0u16; acc as usize];
-    let first: Vec<u32> = parts.iter().map(|p| p.first).collect();
+    let first: Vec<u32> = firsts[..nw].to_vec();
 
     // Every worker scatters its own streams into its own segment of every term.
     // `at` is the one shared structure of this phase, so `Raw` is the only way to
@@ -1010,12 +1134,21 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             }
         });
     }
+    // A bitmap's document frequency is its popcount; the bitmaps are complete
+    // once every worker has joined, and the list terms carry theirs in `offs`.
+    let bdf: Vec<u32> = (0..nbm)
+        .map(|i| bits[i * words..][..words].iter().map(|w| w.count_ones()).sum())
+        .collect();
     Ok(Postings {
         seg,
         offs,
         first,
         at,
         nw,
+        bmi: bmi.to_vec(),
+        bits,
+        words,
+        bdf,
     })
 }
 
@@ -1073,7 +1206,7 @@ fn scatter(
     }
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ set algebra on ascending id vectors Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// First index `>= from` whose value is `>= x`.
 #[inline]
@@ -1203,7 +1336,7 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     }
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ phrase verification Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ phrase verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Does `text` (already lowercased) contain `terms` at `terms.len()`
 /// consecutive token positions?
@@ -1368,7 +1501,7 @@ fn verify_phrases(
     Ok(())
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ output Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn push_u64(out: &mut Vec<u8>, mut v: u64) {
@@ -1404,66 +1537,6 @@ fn format_result(out: &mut Vec<u8>, r: &[u32]) {
     out.push(b'\n');
 }
 
-/// Terms in at least 1/32 of the document-id range are also held as bitmaps
-/// (about 350 terms, 15 MB), built once from their postings after the scan.  A
-/// BOOL query then ANDs, ORs and subtracts them a word at a time instead of
-/// decoding and merging hundreds of thousands of ids per use.
-struct Dense {
-    of: Vec<u32>,
-    bits: Vec<Vec<u64>>,
-}
-
-fn build_dense(postings: &Postings, nterms: usize) -> Dense {
-    // Every id is below the largest worker base plus 65,536 (the offset budget
-    // `build_range` enforces), whichever worker happens to be last.
-    let nbits = postings
-        .first
-        .iter()
-        .copied()
-        .max()
-        .map_or(0, |f| f as usize + 65536);
-    let mut of = vec![u32::MAX; nterms];
-    let mut list: Vec<u32> = Vec::new();
-    // A bound on the id range keeps a sparse-id corpus from allocating huge maps.
-    if nbits > 0 && nbits <= 1 << 24 {
-        for t in 0..nterms {
-            if postings.len(t as u32) * 32 >= nbits {
-                of[t] = list.len() as u32;
-                list.push(t as u32);
-            }
-        }
-    }
-    let nwords = nbits.div_ceil(64);
-    let per = list.len().div_ceil(NWORKERS).max(1);
-    let bits: Vec<Vec<u64>> = thread::scope(|s| {
-        let hs: Vec<_> = list
-            .chunks(per)
-            .map(|ts| {
-                s.spawn(move || {
-                    ts.iter()
-                        .map(|&t| {
-                            let mut b = vec![0u64; nwords];
-                            let mut at = postings.offs[t as usize] as usize;
-                            for w in 0..postings.nw {
-                                let n = postings.seg[t as usize * postings.nw + w] as usize;
-                                let base = postings.first[w];
-                                for &d in &postings.at[at..at + n] {
-                                    let id = (base + d as u32) as usize;
-                                    b[id >> 6] |= 1u64 << (id & 63);
-                                }
-                                at += n;
-                            }
-                            b
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-    });
-    Dense { of, bits }
-}
-
 /// One worker's reusable buffers for BOOL evaluation.
 struct Scratch {
     cur: Vec<u32>,
@@ -1480,11 +1553,8 @@ fn bit(b: &[u64], d: u32) -> bool {
 /// Left-to-right, no precedence: `a OR b AND c` is `(a OR b) AND c`.  The running
 /// set is a sorted id list (`sc.cur`) or, once a bitmap term starts the query or is
 /// OR-ed in, a bitmap (`sc.cb`); returns true when it is the bitmap.
-fn eval_bool(terms: &[u32], ops: &[u8], postings: &Postings, dn: &Dense, sc: &mut Scratch) -> bool {
-    let bm = |t: u32| -> Option<&[u64]> {
-        let k = dn.of[t as usize];
-        (k != u32::MAX).then(|| &dn.bits[k as usize][..])
-    };
+fn eval_bool(terms: &[u32], ops: &[u8], postings: &Postings, sc: &mut Scratch) -> bool {
+    let bm = |t: u32| postings.bits_of(t);
     let mut is_bits = match bm(terms[0]) {
         Some(b) => {
             sc.cb.clear();
@@ -1605,7 +1675,37 @@ fn format_bits(out: &mut Vec<u8>, b: &[u64]) {
     out.push(b'\n');
 }
 
-// Ã¢â€â‚¬Ã¢â€â‚¬ main Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// The terms held as bitmaps: those the sample says hold at least 1/32 of the
+/// document-id range, which is where one bit per document stops being larger than
+/// a 16-bit offset per posting -- and where a word-at-a-time set operation stops
+/// being slower than a merge.  The most frequent terms are taken first, so the
+/// total the bitmaps can occupy is bounded: a corpus where every term is dense
+/// falls back to lists instead of allocating a bitmap per term.
+fn classify(df: &[u32], ndocs: usize, words: usize) -> (Vec<u32>, usize) {
+    const BUDGET: usize = 24 << 20; // bytes of bitmap this layout will hold
+    let mut bmi = vec![NONE; df.len()];
+    if ndocs == 0 || words == 0 {
+        return (bmi, 0);
+    }
+    let mut cand: Vec<(u32, u32)> = Vec::new();
+    for (t, &d) in df.iter().enumerate() {
+        if d != 0 && d as u64 * 1024 >= ndocs as u64 {
+            cand.push((d, t as u32));
+        }
+    }
+    cand.sort_unstable_by(|a, b| b.cmp(a));
+    let mut nbm = 0;
+    for &(_, t) in &cand {
+        if (nbm + 1) * words * 8 > BUDGET {
+            break;
+        }
+        bmi[t as usize] = nbm as u32;
+        nbm += 1;
+    }
+    (bmi, nbm)
+}
 
 #[cfg(target_os = "linux")]
 extern "C" {
@@ -1661,7 +1761,47 @@ fn main() {
 
     let nterms = tt.len();
     tt.pack();
-    let postings = match build_index(&docs_path, &tt, nterms) {
+
+    // Split the corpus once: every phase that reads it -- the sample, the build
+    // and the phrase verification -- walks the same byte ranges, so a worker's
+    // documents are its own and the sample's counts are of the same documents.
+    let docs_size = fs::metadata(&docs_path).map(|m| m.len()).unwrap_or(0);
+    let nworkers = NWORKERS.min((docs_size as usize / (1 << 20)).max(1));
+    let cuts: Vec<u64> = (0..=nworkers)
+        .map(|i| docs_size * i as u64 / nworkers as u64)
+        .collect();
+
+    // Which terms are dense enough to hold as one bit per document.  The sample
+    // is a heuristic on purpose: it decides a representation, and both
+    // representations answer exactly, so a sample that misses cannot change an
+    // answer.  The same walk reports each range's first document id, which the
+    // bitmaps need before the build because a bitmap covers the whole id range.
+    let sampled: Vec<(u32, Vec<u32>)> = thread::scope(|s| {
+        let docs_path = &docs_path;
+        let tt = &tt;
+        let mut handles = Vec::with_capacity(nworkers);
+        for i in 0..nworkers {
+            let (start, end) = (cuts[i], cuts[i + 1]);
+            handles.push(s.spawn(move || sample_range(docs_path, tt, nterms, start, end)));
+        }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+    let (firsts, mut df): (Vec<u32>, Vec<u32>) =
+        sampled.into_iter().fold((Vec::new(), vec![0u32; nterms]), |(mut f, mut d), (i, s)| {
+            f.push(i);
+            d.iter_mut().zip(s).for_each(|(a, b)| *a += b);
+            (f, d)
+        });
+    let ndocs = firsts.iter().copied().max().map_or(0, |f| f as usize + 65536);
+    let words = ndocs.div_ceil(256) * 4;
+    let (bmi, nbm) = classify(&df, ndocs, words);
+    df.clear();
+    lap!("sample");
+
+    let postings = match build_index(&docs_path, &tt, nterms, &cuts, &firsts, &bmi, nbm, words) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
@@ -1710,7 +1850,7 @@ fn main() {
     };
     let mut w = BufWriter::with_capacity(1 << 20, file);
 
-    // â”€â”€ evaluate and format the answers across every worker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── evaluate and format the answers across every worker ────────────────
     //
     // Each query is independent and produces exactly one line, so splitting the
     // list changes no output byte: the chunks are concatenated in query order and
@@ -1723,12 +1863,9 @@ fn main() {
     // parallelises the *answers* and not the phrase scan.
     let nthreads = NWORKERS.min(queries.len().max(1));
     let chunk = queries.len().div_ceil(nthreads).max(1);
-    let dense = build_dense(&postings, nterms);
-    lap!("bitmaps");
     let parts: Vec<Vec<u8>> = thread::scope(|s| {
         let postings = &postings;
         let hits = &hits;
-        let dense = &dense;
         let mut handles = Vec::with_capacity(nthreads);
         for (base, part) in queries.chunks(chunk).enumerate() {
             let start = base * chunk;
@@ -1745,7 +1882,7 @@ fn main() {
                     let qi = start + k;
                     match q {
                         Query::Bool { terms, ops } => {
-                            if eval_bool(terms, ops, postings, dense, &mut sc) {
+                            if eval_bool(terms, ops, postings, &mut sc) {
                                 format_bits(&mut line, &sc.cb);
                             } else {
                                 format_result(&mut line, &sc.cur);
