@@ -43,13 +43,20 @@
 //!   recycles and parses lines straight out of it, so the file is copied once
 //!   and no per-line allocation happens. The map path skips even that copy.
 //!
+//! * **The output is the file.** An hour's text size is known from its rows
+//!   without formatting them, so every byte offset is known before anything is
+//!   written; the output is cut to length, mapped, and each thread formats its
+//!   hours straight into their own slice of it. There is no per-hour string, no
+//!   writer thread and no serial write to queue on the file's lock, and the only
+//!   copy of the text is the file's own page cache.
+//!
 //! * **Merge order cannot matter.** Percentiles are order statistics of a
 //!   group's latency multiset and counts are sums, so any merge order yields the
 //!   same bytes. Verified: reversing the merge order hashes identically.
 
 use std::cell::UnsafeCell;
 use std::env;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -519,6 +526,34 @@ fn map_file(_path: &str) -> Option<&'static [u8]> {
     None
 }
 
+/// The output file, mapped read-write, or `None`.
+///
+/// `MAP_SHARED` is the point: what the text phase writes IS the file's page
+/// cache, so there is no second copy to push through a `write`, no writer thread
+/// and no per-hour buffer. Every failure returns `None`, and the caller formats
+/// into one flat buffer and writes that instead.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+fn out_map(f: &File, len: u64) -> Option<*mut u8> {
+    use std::os::fd::AsRawFd;
+    if len == 0 || f.set_len(len).is_err() {
+        return None;
+    }
+    // PROT_READ|PROT_WRITE, MAP_SHARED.
+    // SAFETY: the fd is open for writing, the length is real, and nothing else
+    // maps this file.
+    let ret = unsafe { sys_mmap(0, len as usize, 3, 1, f.as_raw_fd(), 0) };
+    if ret < 0 {
+        None
+    } else {
+        Some(ret as *mut u8)
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+fn out_map(_f: &File, _len: u64) -> Option<*mut u8> {
+    None
+}
+
 /// Group the half-open byte slice `[start, end)` of `path` and return its rows
 /// already key-sorted.
 ///
@@ -697,29 +732,53 @@ fn pct(a: &mut [u32]) -> (u32, u32, u32) {
     (p50, p95, p99)
 }
 
-/// Append `v` in decimal.
-#[inline]
-fn push_u64(out: &mut Vec<u8>, mut v: u64) {
-    let (mut tmp, mut n) = ([0u8; 20], 20);
-    loop {
-        n -= 1;
-        tmp[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&tmp[n..]);
+/// One output row, before it is text.
+///
+/// Keeping the six numbers instead of the rendered line is what lets an hour's
+/// exact text size be known without formatting it. The size pass and the text
+/// pass then agree by construction, the offsets are all known before a byte is
+/// written, and the per-hour `Vec<u8>` (about 10 MB over the run) leaves the
+/// peak entirely.
+struct Row {
+    /// The endpoint's rank, so the name is one indexed load in the text pass.
+    e: u32,
+    n: u32,
+    p50: u32,
+    p95: u32,
+    p99: u32,
+    err: u32,
 }
 
-/// Append `v` in decimal at `out[at..]` and return the new offset.
+/// Decimal digits in `u32`.
 ///
-/// `write!` routes every integer through `core::fmt`, which is a formatting
-/// state machine per call. This track emits 126,908 rows of six integers, and
-/// that overhead was measured at roughly 450-550 cycles per row -- about a
-/// quarter of the whole run. Digits go into a stack buffer and come back out
-/// reversed; there is no allocation and no trait object anywhere.
+/// `log10(v)` is at most `bit_length(v)·log10(2)`, and 1233/4096 is log10(2) to
+/// about 0.0006, so one compare against a power of ten fixes the rounding. `| 1`
+/// is what keeps zero at one digit rather than none. Called twice per printed
+/// number -- once to size it and once to place it.
 #[inline]
+fn width(v: u32) -> usize {
+    const P10: [u32; 10] = [
+        1, 10, 100, 1000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000,
+    ];
+    let t = ((32 - (v | 1).leading_zeros()) as usize * 1233) >> 12;
+    t + ((v | 1) >= P10[t]) as usize
+}
+
+/// Write `v` in decimal at `dst[at..at + width(v)]`.
+///
+/// `write!` routes every integer through `core::fmt`, a formatting state machine
+/// per call; this track emits about 760k numbers. Digits are written backwards
+/// from their known end, so there is no buffer, no allocation and no loop that
+/// has to count first.
+#[inline]
+fn put_u64(dst: &mut [u8], at: usize, mut v: u32) {
+    let mut i = at + width(v);
+    while i > at {
+        i -= 1;
+        dst[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+}
 
 fn main() {
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
@@ -803,10 +862,11 @@ fn main() {
 
     // ── phase 2: one hour at a time, on every thread ────────────────────────
     // An hour's records (about 43k) are counted into endpoint groups, scattered
-    // into one latency array, selected and formatted by whichever thread claims
-    // the hour. No hour waits for another, and nothing is merged serially.
+    // into one latency array, selected and turned into rows by whichever thread
+    // claims the hour. Each row carries the exact text size of its hour with it,
+    // so every output offset is known before a byte is formatted.
     let next = AtomicUsize::new(0);
-    let done: Vec<Vec<(usize, Vec<u8>)>> = thread::scope(|s| {
+    let done: Vec<Vec<(usize, Vec<Row>, u64)>> = thread::scope(|s| {
         let hs: Vec<_> = (0..NTHREADS)
             .map(|_| {
                 s.spawn(|| {
@@ -859,25 +919,26 @@ fn main() {
                                 cur[e] += 1;
                             }
                         }
-                        let mut out: Vec<u8> = Vec::with_capacity(start[ne] as usize / 2 + 4096);
-                        let hb = &hours[h].1;
+                        let mut rows: Vec<Row> = Vec::new();
+                        let mut size = 0u64;
                         for e in 0..ne {
                             let (a, b) = (start[e] as usize, start[e + 1] as usize);
                             if a == b {
                                 continue;
                             }
-                            let n = (b - a) as u64;
+                            let n = (b - a) as u32;
                             let (p50, p95, p99) = pct(&mut lat[a..b]);
-                            out.extend_from_slice(hb);
-                            out.extend_from_slice(b":00:00Z ");
-                            out.extend_from_slice(names_by_rank[e]);
-                            for v in [n, p50 as u64, p95 as u64, p99 as u64, errs[e] as u64, errs[e] as u64 * 1_000_000 / n] {
-                                out.push(b' ');
-                                push_u64(&mut out, v);
+                            let err = errs[e];
+                            let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
+                            // 13 label bytes, ":00:00Z ", the name, six numbers
+                            // each after a space, and the newline.
+                            size += 22 + names_by_rank[e].len() as u64;
+                            for v in [n, p50, p95, p99, err, ppm] {
+                                size += 1 + width(v) as u64;
                             }
-                            out.push(b'\n');
+                            rows.push(Row { e: e as u32, n, p50, p95, p99, err });
                         }
-                        res.push((h, out));
+                        res.push((h, rows, size));
                     }
                     res
                 })
@@ -893,25 +954,119 @@ fn main() {
             })
             .collect()
     });
-    let mut by_hour: Vec<Vec<u8>> = vec![Vec::new(); hours.len()];
-    for (h, buf) in done.into_iter().flatten() {
-        by_hour[h] = buf;
-    }
 
-    // ── write exactly one file, in hour order ───────────────────────────────
-    let mut out_file = match File::create(&output) {
+    // The rows and their sizes, and then an hour's byte offset: the running sum
+    // IS the offset table, and `at[hours.len()]` is the file's length.
+    let mut lines: Vec<Vec<Row>> = (0..hours.len()).map(|_| Vec::new()).collect();
+    let mut at: Vec<u64> = vec![0; hours.len() + 1];
+    for (h, rows, size) in done.into_iter().flatten() {
+        lines[h] = rows;
+        at[h] = size;
+    }
+    let mut total = 0u64;
+    for h in 0..hours.len() {
+        let n = at[h];
+        at[h] = total;
+        total += n;
+    }
+    at[hours.len()] = total;
+
+    // ── the output, mapped: an hour's text goes straight into the file ──────
+    // One `set_len` and one mapping, so the file's pages ARE the only copy of
+    // the text. That is the per-hour `Vec<u8>` and the serial `write_all` both
+    // gone, and it is why the formatting below is written against a base pointer
+    // rather than a buffer: the fallback path is the same code with a plain
+    // allocation under it.
+    //
+    // Opened for reading as well as writing, which is not cosmetic: a shared
+    // write mapping over a file held O_WRONLY is refused with EACCES, and the
+    // refusal is silent -- the fallback below would quietly cost the change its
+    // whole point.
+    let mut out_file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&output)
+    {
         Ok(f) => f,
         Err(e) => {
             eprintln!("[track-a] cannot create {output}: {e}");
             exit(1);
         }
     };
-    for buf in &by_hour {
-        if let Err(e) = out_file.write_all(buf) {
+    let mut buf: Vec<u8> = Vec::new();
+    // The base is carried as a `usize`: an integer is `Send`, a raw pointer is
+    // not, and the threads only need an address they never free. Each writer
+    // owns the disjoint range the offset table gave it, which is the whole of the
+    // synchronisation this needs.
+    let base: usize = match out_map(&out_file, total) {
+        Some(p) => p as usize,
+        None => {
+            buf = vec![0u8; total as usize];
+            buf.as_mut_ptr() as usize
+        }
+    };
+
+    // ── phase 3: format every hour into its own slice of the output ─────────
+    let next_text = AtomicUsize::new(0);
+    thread::scope(|s| {
+        let hs: Vec<_> = (0..NTHREADS)
+            .map(|_| {
+                s.spawn(|| loop {
+                    let h = next_text.fetch_add(1, Ordering::Relaxed);
+                    if h >= hours.len() {
+                        break;
+                    }
+                    let (a, b) = (at[h] as usize, at[h + 1] as usize);
+                    // SAFETY: `at` gives every hour a disjoint range and this
+                    // thread is the only writer of the one it just claimed.
+                    let dst =
+                        unsafe { core::slice::from_raw_parts_mut((base + a) as *mut u8, b - a) };
+                    let label = &hours[h].1;
+                    let mut o = 0usize;
+                    for r in &lines[h] {
+                        dst[o..o + 13].copy_from_slice(label);
+                        dst[o + 13..o + 21].copy_from_slice(b":00:00Z ");
+                        o += 21;
+                        let name = names_by_rank[r.e as usize];
+                        dst[o..o + name.len()].copy_from_slice(name);
+                        o += name.len();
+                        let ppm = (r.err as u64 * 1_000_000 / r.n as u64) as u32;
+                        for v in [r.n, r.p50, r.p95, r.p99, r.err, ppm] {
+                            dst[o] = b' ';
+                            o += 1;
+                            put_u64(dst, o, v);
+                            o += width(v);
+                        }
+                        dst[o] = b'\n';
+                        o += 1;
+                    }
+                    // The size pass and this one share `width`, so this can only
+                    // fire if the two stop agreeing -- and an hour that wrote the
+                    // wrong number of bytes would misalign every hour after it.
+                    if o != b - a {
+                        eprintln!("[track-a] hour {h}: wrote {o} into {}", b - a);
+                        exit(1);
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            if h.join().is_err() {
+                eprintln!("[track-a] worker failed");
+                exit(1);
+            }
+        }
+    });
+
+    // Empty only on the mapped path, where the file already holds the bytes.
+    if !buf.is_empty() {
+        if let Err(e) = out_file.write_all(&buf) {
             eprintln!("[track-a] write error: {e}");
             exit(1);
         }
     }
-    // Skip teardown: the file is complete, and the kernel reclaims everything.
+    // Skip teardown: the mapping IS the file, and the kernel writes it back.
     exit(0);
 }
