@@ -489,6 +489,21 @@ struct CountryNames {
 }
 
 impl CountryNames {
+    /// Allocate this country's bitmap now, so its pages are faulted in by the
+    /// pre-pass instead of by twelve threads in the middle of the record loop.
+    ///
+    /// A first touch on a shared, twelve-thread-touched array costs two faults
+    /// (the shared zero page, then a private one for the write) and the faults
+    /// serialise on the kernel's page-table locks, so the parse threads are made
+    /// to queue on the kernel for work that is not theirs. One pass over the
+    /// array before the parse removes that; it does not add memory, because a
+    /// country that is ever marked allocates this anyway.
+    fn reserve(&self) {
+        let _ = self
+            .bits
+            .get_or_init(|| (0..BITWORDS).map(|_| AtomicU64::new(0)).collect());
+    }
+
     /// Record that this country saw the name with global id `id`.
     #[inline]
     fn mark(&self, id: u32) {
@@ -838,7 +853,8 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
     Ok(pts)
 }
 
-/// Parse `[start, end)` and return this range's aggregates, keyed by country slot.
+/// Parse `[start, end)` and return this range's aggregates, **indexed by the
+/// country slot itself**.
 ///
 /// `start` and `end` are both record boundaries, so the range holds whole records
 /// and no record is shared with a neighbour. The parser is the same one the
@@ -847,6 +863,11 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
 /// Every record's name is interned (a shared, exact id) and marked in that
 /// country's bitmap. The per-thread aggregate holds only scalars, so twelve
 /// threads never duplicate name storage.
+///
+/// The aggregate used to be a `FxMap<u32, Agg>` probed once per record -- three
+/// million hashes and probes for what is at most 241 live slots. It is now one
+/// 241-element array: the slot the join already produced is the index. It also
+/// makes the merge a fixed 241-element walk per thread instead of a map walk.
 ///
 /// The region join is `rarr[region]` for the ids the flat array covers and the
 /// exact hash map for the rest. `rarr` is 2 MB of `u16` and holds slot+1, with
@@ -862,19 +883,17 @@ fn parse_range(
     names: &Interner,
     distinct: &[CountryNames],
     unmatched_slot: u32,
-) -> (FxMap<u32, Agg>, Agg, bool) {
-    let mut groups: FxMap<u32, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
-    let mut unmatched = Agg::new();
-    let mut saw_unmatched = false;
+) -> Vec<Agg> {
+    let mut groups: Vec<Agg> = (0..=unmatched_slot as usize).map(|_| Agg::new()).collect();
     let mut name: Vec<u8> = Vec::with_capacity(64);
     let mut note: Vec<u8> = Vec::with_capacity(64);
 
     let mut file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return (groups, unmatched, saw_unmatched),
+        Err(_) => return groups,
     };
     if file.seek(SeekFrom::Start(start)).is_err() {
-        return (groups, unmatched, saw_unmatched);
+        return groups;
     }
 
     let total = (end - start) as usize;
@@ -974,27 +993,17 @@ fn parse_range(
             // digit, so the cast is only widening.
             let slot = if (region as u64) < rarr.len() as u64 {
                 match rarr[region as usize] {
-                    0 => {
-                        saw_unmatched = true;
-                        unmatched_slot
-                    }
+                    0 => unmatched_slot,
                     v => (v - 1) as u32,
                 }
             } else {
                 match big.get(&region) {
                     Some(&code) => code,
-                    None => {
-                        saw_unmatched = true;
-                        unmatched_slot
-                    }
+                    None => unmatched_slot,
                 }
             };
             distinct[slot as usize].mark(names.intern(&name));
-            let agg = if slot == unmatched_slot {
-                &mut unmatched
-            } else {
-                groups.entry(slot).or_insert_with(Agg::new)
-            };
+            let agg = &mut groups[slot as usize];
             agg.count += 1;
             agg.id_sum += id;
             agg.amount_sum += cents;
@@ -1013,7 +1022,7 @@ fn parse_range(
         }
     }
 
-    (groups, unmatched, saw_unmatched)
+    groups
 }
 
 fn main() {
@@ -1098,11 +1107,14 @@ fn main() {
 
     let names = Interner::new();
     let distinct: Vec<CountryNames> = (0..=codes.len()).map(|_| CountryNames::default()).collect();
+    let ncodes = distinct.len();
 
-    let mut parts: Vec<(FxMap<u32, Agg>, Agg, bool)> = Vec::with_capacity(pts.len());
+    let mut parts: Vec<Vec<Agg>> = Vec::with_capacity(pts.len());
+    let workers = pts.len().saturating_sub(1).max(1);
+    let per = ncodes.div_ceil(workers).max(1);
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(pts.len());
-        for w in pts.windows(2) {
+        for (wi, w) in pts.windows(2).enumerate() {
             let (a, b) = (w[0], w[1]);
             let path = records.as_str();
             let rarr = &rarr;
@@ -1110,6 +1122,18 @@ fn main() {
             let names = &names;
             let distinct = &distinct;
             handles.push(scope.spawn(move || {
+                // Fault this thread's share of the bitmaps in before it parses.
+                // They are 3.9 MB that every thread writes a random line of for
+                // all 3.32 M records; left to the record loop, each page is read
+                // first (the shared zero page) and faulted again for its first
+                // write, from up to twelve threads at once, all of it serialised
+                // on the kernel's page-table locks. One slice per thread touches
+                // each page once, and no page a mark would not touch anyway.
+                let c0 = (wi * per).min(ncodes);
+                let c1 = ((wi + 1) * per).min(ncodes);
+                for c in &distinct[c0..c1] {
+                    c.reserve();
+                }
                 parse_range(path, a, b, rarr, big, names, distinct, unmatched_slot)
             }));
         }
@@ -1121,29 +1145,27 @@ fn main() {
     });
 
     // ── merge, then one total order ─────────────────────────────────────────
-    let mut groups: FxMap<u32, Agg> = FxMap::with_capacity_and_hasher(256, FxBuild);
-    let mut unmatched = Agg::new();
-    let mut saw_unmatched = false;
-    for (g, un, saw) in parts {
-        if saw {
-            saw_unmatched = true;
-        }
-        merge(&mut unmatched, un);
-        for (k, a) in g {
-            merge(groups.entry(k).or_insert_with(Agg::new), a);
+    let mut groups: Vec<Agg> = (0..ncodes).map(|_| Agg::new()).collect();
+    for g in parts {
+        for (i, a) in g.into_iter().enumerate() {
+            merge(&mut groups[i], a);
         }
     }
 
-    let mut keys: Vec<u32> = groups.keys().copied().collect();
+    // Country slots are numbered in first-seen order, so the output's total order
+    // is the country code's, and a country with no records prints nothing.
+    let mut keys: Vec<u32> = (0..codes.len() as u32)
+        .filter(|&k| groups[k as usize].count > 0)
+        .collect();
     keys.sort_unstable_by(|a, b| codes[*a as usize].cmp(&codes[*b as usize]));
 
     let mut out: Vec<u8> = Vec::with_capacity(64 * 1024);
     for k in keys {
-        let a = &groups[&k];
+        let a = &groups[k as usize];
         line(&mut out, &codes[k as usize], a, distinct[k as usize].count());
     }
-    if saw_unmatched {
-        let a = &unmatched;
+    if groups[unmatched_slot as usize].count > 0 {
+        let a = &groups[unmatched_slot as usize];
         line(&mut out, b"_UNMATCHED", a, distinct[unmatched_slot as usize].count());
     }
 
