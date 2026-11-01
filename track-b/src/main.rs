@@ -4,12 +4,11 @@
 //! --------
 //! * Parse `queries.txt` first and intern every term it mentions: exactly the
 //!   terms the query set needs, nothing else is indexed.
-//! * Stream `docs.txt` once, tokenising each document and appending the term id
-//!   of every mentioned term to one flat, doc-ordered list.  The text itself is
-//!   never retained.  A per-worker counting sort then turns that list into the
-//!   final ascending-per-term postings: the token loop only ever appends, so it
-//!   never touches one of 75,747 separate `Vec` headers or grows one of 75,747
-//!   separate buffers at random.
+//! * Stream `docs.txt` once, tokenising each document and appending a 16-bit
+//!   unit to the mentioned term's bucket: the term's index inside that bucket
+//!   and the documents since the bucket's own last posting.  The unit *is* the
+//!   posting, so there is no term-id list, no counting sort and no second pass,
+//!   and the build's peak is the postings rather than twice their size.
 //! * BOOL: evaluate strictly left to right on ascending `u32` id vectors
 //!   (intersection / union / difference).  Galloping search is used whenever
 //!   one side is much smaller than the other.
@@ -47,23 +46,24 @@ const NWORKERS: usize = 12;
 fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) -> Vec<u64> {
     let mut pairs: Vec<u64> = Vec::new();
     let mut cand: Vec<u32> = Vec::new();
-    let mut nxt: Vec<u32> = Vec::new();
     let mut order: Vec<usize> = Vec::new();
     for qi in (t..queries.len()).step_by(nth) {
         if let Query::Phrase(terms) = &queries[qi] {
             order.clear();
             order.extend(0..terms.len());
-            order.sort_by_key(|&i| postings.get(terms[i]).len());
+            order.sort_by_key(|&i| postings.len(terms[i]));
             cand.clear();
             if let Some(&first) = order.first() {
-                cand.extend_from_slice(postings.get(terms[first]));
+                postings.decode_into(terms[first], &mut cand);
             }
+            // Filter the rarest term's candidates in place instead of decoding
+            // each other term: they are the common ones, and the filter order
+            // does not change the set.
             for &i in order.iter().skip(1) {
                 if cand.is_empty() {
                     break;
                 }
-                intersect_into(&cand, postings.get(terms[i]), &mut nxt);
-                std::mem::swap(&mut cand, &mut nxt);
+                cand.retain(|&d| postings.has(terms[i], d));
             }
             for &d in cand.iter() {
                 pairs.push(((d as u64) << 32) | qi as u64);
@@ -462,51 +462,210 @@ fn parse_u32(b: &[u8]) -> u32 {
     v
 }
 
-/// Flat postings: term `t` owns `arena[offs[t]..offs[t+1]]`, ascending doc ids.
-/// One arena and one offset array replace `nterms` separate `Vec`s.
+/// A pointer the workers share.  Each of them writes only its own segment of
+/// every term's stretch, so no two ever touch the same slot and no atomic or
+/// lock is needed.
+#[derive(Clone, Copy)]
+struct Raw<T>(*mut T);
+unsafe impl<T> Send for Raw<T> {}
+unsafe impl<T> Sync for Raw<T> {}
+impl<T> Raw<T> {
+    fn of(v: &mut [T]) -> Self {
+        Raw(v.as_mut_ptr())
+    }
+    /// The address of slot `i`, which the caller is responsible for.
+    #[inline(always)]
+    unsafe fn at(self, i: usize) -> *mut T {
+        self.0.add(i)
+    }
+}
+
+/// The postings, cut into one 16-bit segment per worker.  A posting is the
+/// distance from the first document that worker scanned, so a worker's whole
+/// budget is 65,535 documents and the arena is one quarter of what a global
+/// `u32` document id would cost.  The ranges ascend with the file, so a term's
+/// stretch -- worker 0's run, then worker 1's -- comes out ascending in
+/// document id with no sort and no dedupe.
 struct Postings {
-    arena: Vec<u32>,
+    /// Worker `w`'s run of term `t` is `seg[t * nw + w]` postings long.
+    seg: Vec<u16>,
+    /// `offs[t]..offs[t + 1]` is term `t`'s stretch of `at`.
     offs: Vec<u32>,
+    /// Every worker's first document -- the base of its 16-bit offsets.
+    first: Vec<u32>,
+    /// The postings: offsets from the owning worker's first document.
+    at: Vec<u16>,
+    nw: usize,
+}
+
+/// Terms are filed by `id % nb`, so one worker fills `nb` separate streams and
+/// the gap a unit has to encode is the distance since that bucket's own last
+/// posting rather than since the term's.
+const NBUCKETS: usize = 32;
+
+/// The ceiling `bucket_count` will widen to before it gives up: 2^16 buckets by
+/// 2^12 terms each is 268 million query terms, far past any query file.
+const MAX_BUCKETS: usize = 1 << 16;
+
+/// A unit is `local << GB | gap`: the term's index inside its bucket above the
+/// documents since that bucket's previous posting.  `GAP` in the gap field means
+/// the unit after it holds the whole gap, so no gap width corrupts a posting.
+const GB: u32 = 4;
+const GAP: u16 = (1 << GB) - 1;
+
+/// Units per chunk: 64 KiB, small enough to come off the heap instead of its own
+/// mapping and to be handed back one chunk at a time as the scatter drains a
+/// stream, and wide enough that only the last chunk of a stream is part empty.
+const CHUNK: usize = 1 << 15;
+
+/// One bucket's units from one worker.
+struct Stream {
+    chunks: Vec<Vec<u16>>,
+    len: usize,
+}
+
+impl Stream {
+    fn new() -> Self {
+        Stream {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, x: u16) {
+        if self.len == CHUNK || self.chunks.is_empty() {
+            self.chunks.push(vec![0u16; CHUNK]);
+            self.len = 0;
+        }
+        self.chunks.last_mut().unwrap()[self.len] = x;
+        self.len += 1;
+    }
+
+    /// One posting.  `gap` is the documents since this bucket's previous
+    /// posting; a gap the field cannot hold travels whole in the unit after it.
+    #[inline(always)]
+    fn put(&mut self, local: u32, gap: u32) {
+        self.push(((local << GB) as u16) | gap.min(GAP as u32) as u16);
+        if gap >= GAP as u32 {
+            self.push(gap as u16);
+        }
+    }
+}
+
+/// One worker's share of the index before the layout: what it counted per term,
+/// the first document it saw, and its streams of units.
+struct Part {
+    count: Vec<u16>,
+    first: u32,
+    streams: Vec<Stream>,
+}
+
+impl Part {
+    fn empty(nterms: usize, nb: usize) -> Self {
+        Part {
+            count: vec![0u16; nterms],
+            first: 0,
+            streams: (0..nb).map(|_| Stream::new()).collect(),
+        }
+    }
+}
+
+/// The widest bucket count a unit needs: the smallest power of two that keeps a
+/// term's index inside its bucket below the unit's high bits.  A holdout seed
+/// with a much larger query set therefore widens the buckets instead of
+/// overflowing a field, because a field that silently wrapped would corrupt
+/// every later posting of the same bucket -- and a widened layout is still exact,
+/// so the only failure mode left is a query set too large for any widening, which
+/// stops the run rather than answering it wrongly.
+fn bucket_count(nterms: usize) -> usize {
+    let mut nb = NBUCKETS;
+    while nterms.saturating_sub(1) / nb >= (1 << (16 - GB)) {
+        if nb >= MAX_BUCKETS {
+            panic!("[track-{TRACK}] more query terms than a bucket unit can index");
+        }
+        nb <<= 1;
+    }
+    nb
 }
 
 impl Postings {
     fn empty(nterms: usize) -> Self {
         Postings {
-            arena: Vec::new(),
+            seg: Vec::new(),
             offs: vec![0; nterms + 1],
+            first: Vec::new(),
+            at: Vec::new(),
+            nw: 0,
         }
     }
 
+    /// How many documents hold term `t`, without decoding its postings.
     #[inline]
-    fn get(&self, t: u32) -> &[u32] {
-        let a = self.offs[t as usize] as usize;
-        &self.arena[a..self.offs[t as usize + 1] as usize]
+    fn len(&self, t: u32) -> usize {
+        (self.offs[t as usize + 1] - self.offs[t as usize]) as usize
     }
-}
 
-/// One worker's slice of the index, before the merge.
-struct Part {
-    arena: Vec<u32>,
-    offs: Vec<u32>,
-}
-
-impl Part {
-    fn empty(nterms: usize) -> Self {
-        Part {
-            arena: Vec::new(),
-            offs: vec![0; nterms + 1],
+    /// Term `t`'s documents, ascending, appended to `out`.  Worker runs are
+    /// concatenated in worker order and every run ascends on its own, so the
+    /// result ascends: the four consumers all rely on that, and a decode that
+    /// silently reordered would still evaluate to a plausible wrong answer.
+    fn decode_into(&self, t: u32, out: &mut Vec<u32>) {
+        out.clear();
+        let mut at = self.offs[t as usize] as usize;
+        for w in 0..self.nw {
+            let n = self.seg[t as usize * self.nw + w] as usize;
+            let base = self.first[w];
+            out.extend(self.at[at..at + n].iter().map(|&d| base + d as u32));
+            at += n;
         }
+    }
+
+    /// Is `doc` in term `t`?  The runs ascend with the file and each is a plain
+    /// ascending `u16` array, so one binary search lands in the right worker and
+    /// answers without decoding anything.  The phrase path filters a rare term's
+    /// candidates against common terms, and materialising a common term there
+    /// costs a decode of millions of postings it never reads.
+    fn has(&self, t: u32, doc: u32) -> bool {
+        let w = match self.first.partition_point(|&f| f <= doc) {
+            0 => return false,
+            w => w - 1,
+        };
+        let off = doc - self.first[w];
+        if off > u16::MAX as u32 {
+            return false;
+        }
+        let mut at = self.offs[t as usize] as usize;
+        for u in 0..w {
+            at += self.seg[t as usize * self.nw + u] as usize;
+        }
+        let n = self.seg[t as usize * self.nw + w] as usize;
+        self.at[at..at + n].binary_search(&(off as u16)).is_ok()
     }
 }
 
 /// The stamp and the df share one 32-bit word: the high twelve bits are the
 /// document within this worker's range and the low twenty the running count.
-/// The stamp test and the count update are therefore one random read-modify-
-/// write into a 300 KB array rather than two 600 KB ones.
+/// One random read-modify-write both decides that the term is new in this
+/// document and counts the posting, into a 300 KB array rather than two 600 KB
+/// ones.
 const ST_DF: u32 = (1 << 20) - 1;
 
+/// Index one lowercased document: the first time a term occurs in it, append one
+/// unit to that term's bucket of this worker's streams.  The unit *is* the
+/// posting -- there is no term list, no per-document starts array, and no second
+/// pass over either, so nothing here has to be held until the join.
 #[inline]
-fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u32], gen: u32) {
+fn index_doc(
+    text: &[u8],
+    tt: &TermTable,
+    streams: &mut [Stream],
+    prev: &mut [u32],
+    nslot: &mut [u32],
+    gen: u32,
+    off: u32,
+    nb: usize,
+) {
     let n = text.len();
     let mut i = 0usize;
     while i < n {
@@ -526,7 +685,10 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u3
                 let e = &mut nslot[t as usize];
                 if *e >> 20 != gen {
                     *e = (gen << 20) | ((*e & ST_DF) + 1);
-                    terms.push(t);
+                    let b = t as usize % nb;
+                    let gap = off - prev[b];
+                    prev[b] = off;
+                    streams[b].put(t / nb as u32, gap);
                 }
             }
         }
@@ -534,7 +696,7 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u3
 }
 
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
-/// postings.
+/// share of the index.
 ///
 /// Splitting is trivial compared to Track C: `docs.txt` is `id TAB text LF` with
 /// no quoting and no embedded newlines, so a byte offset can be aligned to a line
@@ -548,22 +710,21 @@ fn index_text(text: &[u8], tt: &TermTable, terms: &mut Vec<u32>, nslot: &mut [u3
 /// left -- and the next worker drops it. `start == 0` is the only range that has
 /// nothing to drop.
 ///
-/// The pass is a counting sort over the doc-ordered term-id list. `starts` holds
-/// the entry index at which each document begins, so the scatter pass recovers
-/// the document id of every entry without storing one per entry: 89 MB of term
-/// ids instead of 178 MB of pairs.
-fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Part {
+/// One pass and one structure: a term's first occurrence in a document appends one
+/// 16-bit unit to that term's bucket, and that unit is the posting.  There is no
+/// term-id list to carry to the join and no counting sort to run over it, which is
+/// what this track's peak was made of.
+fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64, end: u64) -> Part {
     let mut nslot: Vec<u32> = vec![0u32; nterms];
+    let mut prev: Vec<u32> = vec![0u32; nb];
+    let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
     let mut gen: u32 = 0;
-    // The corpus yields roughly one posting per nine bytes, and the reserve is
-    // what keeps the doubling memcpy out of the token loop.
-    let mut terms: Vec<u32> = Vec::with_capacity(((end - start) / 8) as usize);
-    let mut starts: Vec<u32> = Vec::new();
-    let mut ids: Vec<u32> = Vec::new();
+    let mut first: u32 = 0;
+    let mut seen = false;
 
     let f = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return Part::empty(nterms),
+        Err(_) => return Part::empty(nterms, nb),
     };
     let mut r = BufReader::with_capacity(1 << 20, f);
     let mut pos = start;
@@ -575,10 +736,10 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         // then claims lines that belong to the next one.
         let mut junk: Vec<u8> = Vec::with_capacity(512);
         if r.seek(SeekFrom::Start(start)).is_err() {
-            return Part::empty(nterms);
+            return Part::empty(nterms, nb);
         }
         match r.read_until(b'\n', &mut junk) {
-            Ok(0) | Err(_) => return Part::empty(nterms),
+            Ok(0) | Err(_) => return Part::empty(nterms, nb),
             Ok(k) => pos += k as u64,
         }
     }
@@ -609,8 +770,17 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
             // borrowing an id that belongs to another worker's range.
             None => continue,
         };
-        starts.push(terms.len() as u32);
-        ids.push(id);
+        if !seen {
+            first = id;
+            seen = true;
+        }
+        // A posting is a 16-bit offset from this worker's first document, so a
+        // worker's ids have to stay in one 65,535-wide window.  Truncating an
+        // offset here would silently move a document, so this is a hard stop.
+        if id < first || id - first > u16::MAX as u32 {
+            panic!("[track-{TRACK}] a worker's range spans more than 65,535 document ids");
+        }
+        let off = id - first;
         // A fresh generation per document is what makes the stamp test work
         // without ever storing a document id.  Twelve bits is 4095 documents,
         // so a longer range clears the stamp field -- keeping the counts --
@@ -624,40 +794,25 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_text(text, tt, &mut terms, &mut nslot, gen);
+        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, gen, off, nb);
     }
-    starts.push(terms.len() as u32);
 
-    // The low twenty bits of each slot are the term's df; the prefix sum turns
-    // the counts into offsets in place.
-    let mut offs: Vec<u32> = nslot.iter().map(|e| e & ST_DF).collect();
-    offs.push(0);
-    let mut acc = 0u32;
-    for t in 0..nterms {
-        let c = offs[t];
-        offs[t] = acc;
-        acc += c;
-    }
-    offs[nterms] = acc;
-
-    // Second pass: walk the term list in document order and drop each id into
-    // its term's own run. Each run is filled in ascending document order because
-    // the list is, which is what makes the merge a plain concatenation.
-    let mut cur: Vec<u32> = offs.clone();
-    let mut arena: Vec<u32> = vec![0; acc as usize];
-    let mut i = 0usize;
-    for d in 0..ids.len() {
-        let doc = ids[d];
-        let hi = starts[d + 1] as usize;
-        while i < hi {
-            let t = terms[i] as usize;
-            arena[cur[t] as usize] = doc;
-            cur[t] += 1;
-            i += 1;
+    // The low twenty bits of each slot are the term's df.  A worker's df cannot
+    // exceed the documents it scanned, which the offset check above already
+    // bounds at 65,535.
+    let mut count: Vec<u16> = vec![0u16; nterms];
+    for (t, e) in nslot.iter().enumerate() {
+        let c = e & ST_DF;
+        if c > u16::MAX as u32 {
+            panic!("[track-{TRACK}] a worker's range holds more than 65,535 documents");
         }
+        count[t] = c as u16;
     }
-    drop(terms);
-    Part { arena, offs }
+    Part {
+        count,
+        first,
+        streams,
+    }
 }
 
 /// Build the postings across every worker over disjoint byte ranges.
@@ -667,15 +822,18 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64)
 /// 772 MB/s. That ratio is twelve, and it was twelve because we were using one
 /// core and they were using about twelve.
 ///
-/// Merging is a concatenation per term in worker order. Each worker's run is
-/// already ascending in document id and the ranges increase, so the concatenation
-/// comes out globally ascending with no sort and no dedupe.
+/// Nothing is merged: the workers' scans are already the index, and the layout
+/// only decides where each term's stretch of the shared arena starts and how long
+/// each worker's run inside it is.  A term's stretch is worker 0's run, then worker
+/// 1's; the ranges ascend with the file, so the concatenation comes out ascending
+/// in document id with no sort and no dedupe.
 fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Postings> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
         return Ok(Postings::empty(nterms));
     }
 
+    let nb = bucket_count(nterms);
     let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
     let parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
@@ -684,56 +842,109 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
                 size * i as u64 / nworkers as u64,
                 size * (i as u64 + 1) / nworkers as u64,
             );
-            handles.push(s.spawn(move || build_range(path, tt, nterms, a, b)));
+            handles.push(s.spawn(move || build_range(path, tt, nterms, nb, a, b)));
         }
         handles
             .into_iter()
             .filter_map(|h| h.join().ok())
             .collect()
     });
+    let nw = parts.len();
+    if nw == 0 {
+        return Ok(Postings::empty(nterms));
+    }
 
-    // Offsets first: a term's slot is the sum of its length in every worker.
-    // Then each thread fills the disjoint stretch of one zeroed arena that
-    // belongs to its range of terms, copying the workers' runs in worker order.
+    let mut seg: Vec<u16> = vec![0u16; nterms * nw];
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
     let mut acc = 0u32;
-    for ti in 0..nterms {
+    for t in 0..nterms {
         offs.push(acc);
-        for p in &parts {
-            acc += p.offs[ti + 1] - p.offs[ti];
+        for w in 0..nw {
+            let c = parts[w].count[t];
+            seg[t * nw + w] = c;
+            acc += c as u32;
         }
     }
     offs.push(acc);
-    let mut arena: Vec<u32> = vec![0u32; acc as usize];
+    let mut at: Vec<u16> = vec![0u16; acc as usize];
+    let first: Vec<u32> = parts.iter().map(|p| p.first).collect();
+
+    // Every worker scatters its own streams into its own segment of every term.
+    // `at` is the one shared structure of this phase, so `Raw` is the only way to
+    // name it from more than one thread; the aliasing it invites cannot happen
+    // because worker `w` writes exactly the `seg[t * nw + w]` slots of each term
+    // `t`, those runs are disjoint by construction, and every cursor starts inside
+    // its own run.
+    let dst = Raw::of(&mut at);
     {
-        let nthr = NWORKERS.min(nterms.max(1));
-        let bounds: Vec<usize> = (0..=nthr).map(|k| nterms * k / nthr).collect();
-        let mut rest: &mut [u32] = &mut arena[..];
-        let mut slices: Vec<&mut [u32]> = Vec::with_capacity(nthr);
-        for k in 0..nthr {
-            let len = (offs[bounds[k + 1]] - offs[bounds[k]]) as usize;
-            let (head, tail) = std::mem::take(&mut rest).split_at_mut(len);
-            slices.push(head);
-            rest = tail;
-        }
-        let (parts, offs, bounds) = (&parts, &offs, &bounds);
+        let (offs, seg) = (&offs[..], &seg[..]);
         thread::scope(|s| {
-            for (k, dst) in slices.into_iter().enumerate() {
-                s.spawn(move || {
-                    let base = offs[bounds[k]] as usize;
-                    for ti in bounds[k]..bounds[k + 1] {
-                        let mut at = offs[ti] as usize - base;
-                        for p in parts.iter() {
-                            let (x, y) = (p.offs[ti] as usize, p.offs[ti + 1] as usize);
-                            dst[at..at + (y - x)].copy_from_slice(&p.arena[x..y]);
-                            at += y - x;
-                        }
-                    }
-                });
+            for (t, part) in parts.into_iter().enumerate() {
+                s.spawn(move || scatter(t, part, offs, seg, dst, nb, nw));
             }
         });
     }
-    Ok(Postings { arena, offs })
+    Ok(Postings {
+        seg,
+        offs,
+        first,
+        at,
+        nw,
+    })
+}
+
+/// Write one worker's units into the arena.  A unit names the term's index in its
+/// bucket and the documents since that bucket's previous posting, so the walk is
+/// sequential in the stream and in the output, and each chunk goes back to the
+/// allocator as soon as it has been spent -- that is what keeps the peak near the
+/// arena instead of twice it.
+fn scatter(
+    t: usize,
+    part: Part,
+    offs: &[u32],
+    seg: &[u16],
+    dst: Raw<u16>,
+    nb: usize,
+    nw: usize,
+) {
+    let nterms = part.count.len();
+    let mut cursor: Vec<u32> = Vec::with_capacity(nterms / nb + 1);
+    for (b, mut stream) in part.streams.into_iter().enumerate() {
+        // Where this worker's run of each of the bucket's terms begins.
+        cursor.clear();
+        let mut id = b;
+        while id < nterms {
+            let mut c = offs[id];
+            for u in 0..t {
+                c += seg[id * nw + u] as u32;
+            }
+            cursor.push(c);
+            id += nb;
+        }
+        let chunks = std::mem::take(&mut stream.chunks);
+        let nchunks = chunks.len();
+        let mut doc = 0u32;
+        let mut term = u32::MAX;
+        for (k, chunk) in chunks.into_iter().enumerate() {
+            let n = if k + 1 == nchunks { stream.len } else { CHUNK };
+            for &x in &chunk[..n] {
+                if term == u32::MAX {
+                    term = (x >> GB) as u32;
+                    let gap = x & GAP;
+                    if gap == GAP {
+                        continue; // the whole gap follows in the next unit
+                    }
+                    doc += gap as u32;
+                } else {
+                    doc += x as u32;
+                }
+                let c = &mut cursor[term as usize];
+                unsafe { *dst.at(*c as usize) = doc as u16 };
+                *c += 1;
+                term = u32::MAX;
+            }
+        }
+    }
 }
 
 // â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1068,44 +1279,44 @@ fn format_result(out: &mut Vec<u8>, r: &[u32]) {
 }
 
 /// Left-to-right, no precedence: `a OR b AND c` is `(a OR b) AND c`.
-#[inline]
 fn eval_bool(
     terms: &[u32],
     ops: &[u8],
     postings: &Postings,
     cur: &mut Vec<u32>,
     nxt: &mut Vec<u32>,
+    opnd: &mut Vec<u32>,
 ) {
-    cur.clear();
-    cur.extend_from_slice(postings.get(terms[0]));
+    postings.decode_into(terms[0], cur);
     for (i, &op) in ops.iter().enumerate() {
-        let s = postings.get(terms[i + 1]);
+        let t = terms[i + 1];
         match op {
             OP_AND => {
                 if cur.is_empty() {
                     continue;
                 }
-                intersect_into(cur, s, nxt);
+                postings.decode_into(t, opnd);
+                intersect_into(cur, opnd, nxt);
             }
             OP_OR => {
-                if s.is_empty() {
+                if postings.len(t) == 0 {
                     continue;
                 }
-                union_into(cur, s, nxt);
+                postings.decode_into(t, opnd);
+                union_into(cur, opnd, nxt);
             }
             _ => {
-                if cur.is_empty() || s.is_empty() {
+                if cur.is_empty() || postings.len(t) == 0 {
                     continue;
                 }
-                difference_into(cur, s, nxt);
+                postings.decode_into(t, opnd);
+                difference_into(cur, opnd, nxt);
             }
         }
         std::mem::swap(cur, nxt);
-        if cur.is_empty() {
+        if cur.is_empty() && !ops[i + 1..].iter().any(|&o| o == OP_OR) {
             // Empty survives AND and NOT; only a later OR can fill it again.
-            if !ops[i + 1..].iter().any(|&o| o == OP_OR) {
-                break;
-            }
+            break;
         }
     }
 }
@@ -1210,13 +1421,14 @@ fn main() {
             handles.push(s.spawn(move || {
                 let mut cur: Vec<u32> = Vec::new();
                 let mut nxt: Vec<u32> = Vec::new();
+                let mut opnd: Vec<u32> = Vec::new();
                 let mut line: Vec<u8> = Vec::with_capacity(256);
                 let mut out: Vec<u8> = Vec::with_capacity(part.len() * 24 + 16);
                 for (k, q) in part.iter().enumerate() {
                     let qi = start + k;
                     let r: &[u32] = match q {
                         Query::Bool { terms, ops } => {
-                            eval_bool(terms, ops, postings, &mut cur, &mut nxt);
+                            eval_bool(terms, ops, postings, &mut cur, &mut nxt, &mut opnd);
                             &cur
                         }
                         Query::Phrase(_) => &hits[qi],

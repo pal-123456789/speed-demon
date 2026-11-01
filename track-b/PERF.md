@@ -55,6 +55,7 @@ the reference (final scoring 10x).
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 56.35 s | (pin from the Oct 28 spec) | 0 |
 | 1 | Real Index: authored inverted index with posting lists, boolean AND/OR/NOT evaluated left to right, and phrases resolved by a second sequential pass over the candidate document ids | `run-545c440faae8` | 3.9907 s | 126.3 MB | 34.20 |
+| 2 | Bucketed build: one scan appends a 16-bit unit -- term index in its bucket, and the documents since that bucket's last posting -- so the per-worker term list, the per-worker posting arenas, the counting sort and the merge are all gone | _(board read pending this push)_ | _(pending)_ | _(pending)_ | _(pending)_ |
 
 ---
 
@@ -104,6 +105,82 @@ numbers for what shipped are in table 1; what did not pay is in section 3.
 
 ---
 
+## 2c. Stage 2: the bucketed build, and the 89 MB of scratch it deletes
+
+**`KNOWN`: measured on this box with the runs interleaved A/B/A/B so a load drift
+hits both sides, seven rounds each, full corpus, byte-identical output on every
+run.** Wall clock here is unusable on its own -- the same binary measured between
+0.900 s and 10.519 s today -- so the CPU column is the one to read.
+
+```
+                          CPU s (median)   wall s (median)   peak working set MB
+before: term list + arena      6.859            1.090                181.6
+after:  units into buckets     6.859            1.046                 92.6
+```
+
+**Measured: the peak working set halves and the time does not move.** The board
+charges 209.7 MB for the shape above; the local proxy has read about 17% below the
+cgroup counter before, so no board number is claimed here.
+
+### What changed, and why it is a deletion rather than a tuning
+
+The build used to hold, per worker, a doc-ordered term-id list (about 89 MB across
+twelve workers) and then a posting arena (about 89 MB), and the merge held the
+workers' arenas *and* the merged one. Measured peak: 181.6 MB of working set to
+produce postings that are 44.5 MB of 16-bit offsets.
+
+A posting is now one `u16`: the term's index inside its 32-term bucket in the high
+bits, the documents since that bucket's previous posting in the low four, and one
+more unit carrying the whole gap when the gap does not fit in four bits. The token
+loop appends that unit where it stands, so there is no term list, no per-document
+starts array, no counting sort and no second pass -- the count is kept in the same
+32-bit slot the dedupe stamp already needed. A posting is a 16-bit offset from the
+worker's first document, which is exact because a worker's range spans far fewer
+than 65,535 document ids, and that is checked rather than assumed.
+
+### The field widths, because they are the wrong-answer risk on this track
+
+`local` has to fit the unit's high 12 bits. `bucket_count` widens the bucket count
+until it does and the layout widens with it, so a larger query set stays exact; a
+field that wrapped would retarget every later posting in its bucket and still
+answer, which is the class of defect that scores zero rather than losing points.
+The 65,535-id offset budget is checked per worker the same way, and both stop the
+run loudly instead of truncating.
+
+### The regression this stage produced, and the phase laps that found it
+
+The first version of this stage was faster on the build and far slower on the
+queries. The laps below are measured, interleaved, same corpus, full hash on each:
+
+```
+                       before    first version   after the fix
+build index            0.429 s   0.399 s         0.342 s
+phrase candidates      0.033 s   0.658 s         0.028 s
+phrase verify          0.084 s   0.107 s         0.078 s
+evaluate+format+write  0.222 s   0.309 s         0.294 s
+total                  0.788 s   1.515 s         0.764 s
+```
+
+The candidate phase had decoded **every** phrase term into a `u32` list before
+intersecting, including the common ones -- roughly 89 MB of writes to answer a
+question about the rarest term's list, which is the whole candidate set. It now
+filters the rarest term's candidates in place, testing each against the compressed
+postings with a binary search inside one worker's run: a gallop over the units with
+no decode at all. Measured: 0.658 s to 0.028 s, and the stage went from a 0.6 s
+loss to level.
+
+### Still open, and it is the next stage
+
+Measured: `evaluate+format+write` is 0.294 s against 0.222 s before, because
+`eval_bool` still materialises each operand it intersects -- the same decode cost
+the phrase path just had removed, paid on the 2,000 BOOL queries. The fix is either
+the same membership test for those operands, or better, a bitmap over the terms
+that hold most of the postings. The term list and one of the two arena copies are
+gone; the chunks the scatter has not yet drained are the only copy left, and the
+bitmap stage is what removes it.
+
+---
+
 ## 3. Experiments that failed, and were reverted
 
 This section is deliberately the longest part of the file. The organizers say
@@ -130,6 +207,7 @@ interesting part and judges are told to reward them."*
 | **Profile-guided build (PGO)** | _ | **measured: T 0.5444 -> 0.5606 s AND S 973 -> 995 lines** | **up 3% on T and 22 lines larger. B's hot path is a token probe over a 300 KB table that is already cache-resident, so there is little branch misprediction for a profile to fix. The same procedure WON on Track C: 0.1704 -> 0.1654 s.** |
 | **Three-byte term ids** | _ | **measured: M 215.3 -> 203.8 MB, T 0.5424 -> 0.6139 s** | **the memory win was real and in the predicted direction, but a three-byte read is unaligned -- three loads and two shifts, 22.24 M times in the scatter -- and cost 13% of the runtime for a 2.2% gain on the memory factor.** |
 | **Reserving `starts` and `ids`** | _ | **measured: worse on both axes** | **reserving capacity pre-touches pages that lazy growth never needs, and the document count is an estimate rather than a known total.** |
+| **Decoding every phrase term before intersecting it** | _ | **measured: phrase candidates 0.033 -> 0.658 s, reverted** | **the rarest term's list is the whole candidate set; the other terms only need a membership test. Decoding them wrote 89 MB of postings that were then read once and thrown away. A binary search inside one worker's run of the compressed units answers the same question with no decode, and that generalises to every set operation on this track.** |
 
 The last three were tried and reverted late in the campaign, after the PGO work above was
 already in place. Each looks correct from a byte count or a cache-resident-table argument,
@@ -167,6 +245,25 @@ on the strength of it. Reading the code back: that lap brackets the thread scope
 | `phrase verify` | one sequential positional scan over all 254 MB of `docs.txt` |
 | `write` | **BOOL evaluation, formatting, and the write -- all three** |
 
+**Stage 2 re-measured, same instrumentation, against the shape it replaced. Three
+interleaved rounds on the full corpus, medians:**
+
+```
+stage                  before     after
+parse queries          0.020 s    0.021 s
+build index            0.429 s    0.342 s
+phrase candidates      0.033 s    0.028 s
+phrase verify          0.084 s    0.078 s
+evaluate+format+write  0.222 s    0.294 s
+total                  0.788 s    0.764 s
+```
+
+The build lost a measured 0.087 s because it no longer writes a term list and a
+second arena, and `evaluate+format+write` gained a measured 0.072 s because a
+compressed posting has to be decoded before a `u32` intersect can read it. That
+trade is exactly where this track stands after stage 2, and it is why the next
+stage is aimed at the second half of it rather than at the build.
+
 **The measurement that did surprise me, and it stands:** I had been saying this track was
 roughly 57% build and 43% query. It is **49.7% build and 50.3% everything after it**. The
 phrase pass alone is 9.6%, and it is deliberately NOT parallelised -- twelve workers would read
@@ -194,10 +291,22 @@ track's wall time is spent after the index exists**, which is not where I had be
 
 ## 6. Memory
 
-Positions are where the memory goes. The build is streamed rather than
-materialised: postings are encoded block by block and written into a
-pre-sized arena, so the peak is the size of the final index rather than the
-size of the intermediate token list.
+**A correction, because the paragraph that used to stand here was wrong and stage 2
+is what measured it.** It said the build was streamed and the peak was the final
+index rather than the intermediate token list. In fact the build kept a
+doc-ordered term-id list per worker *and* a posting arena per worker, and the merge
+then held the workers' arenas and the merged one as well, so the peak was 181.6 MB
+of working set (219 MB on the board, measured on that same shape) for an index
+whose postings are 44.5 MB of 16-bit offsets. That paragraph described the intent,
+not the code.
+
+**Stage 2 removes the term list and one of the two arena copies.** The peak is now
+the shared posting array plus the bucket chunks the scatter has not drained yet:
+**92.6 MB of working set, measured with the runs interleaved against the previous
+shape** (181.6 MB before, same box, same corpus, same hashes). One copy remains on
+purpose -- a document's first occurrence of a term is buffered as a unit until the
+layout knows where that term's stretch begins -- and that is what the next stage,
+bitmaps over the terms holding most of the postings, is aimed at.
 
 Input is read with a buffered streaming reader rather than `mmap`, for the
 same reason as Track A: mapped pages are charged to cgroup `memory.peak`.
