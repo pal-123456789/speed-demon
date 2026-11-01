@@ -50,12 +50,11 @@ use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::hash::{BuildHasherDefault, Hasher};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::iter::Peekable;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::vec::IntoIter;
 
 /// 6 physical cores with SMT: 12 slices keep every hardware thread fed.
 const NTHREADS: usize = 12;
@@ -65,22 +64,12 @@ const NTHREADS: usize = 12;
 /// while 16 KiB loses to syscall overhead (0.308 s).
 const CHUNK: usize = 1 << 16;
 
-/// One group. `key` is `hour ordinal << 32 | endpoint id`: worker-local during
-/// the scan, global (sorted-byte) by the time two of them are compared. The
-/// percentiles are filled only after the merge and are zero until then.
-struct Group {
-    key: u64,
-    latencies: Vec<u32>,
-    errors: u32,
-    p50: u32,
-    p95: u32,
-    p99: u32,
-}
-
-/// One worker's result: its key-sorted groups, the endpoint bytes it interned
-/// (re-indexed into byte order), and every hour it saw with its raw 13 bytes.
+/// One worker's result. Nothing is aggregated in the scan: the worker keeps its
+/// raw per-hour record blocks and the second phase (below, in `main`) walks one
+/// HOUR at a time across all workers, so no merge is ever serial.
 struct Part {
-    groups: Vec<Group>,
+    recs: Vec<Vec<Rec>>,
+    big: Vec<(u32, u32, u32)>,
     names: Vec<Arc<[u8]>>,
     hours: Vec<(u32, [u8; 13])>,
 }
@@ -203,7 +192,6 @@ struct Sink {
     /// endpoint bytes -> endpoint id, in first-seen order.
     inter: HashMap<Arc<[u8]>, u32, BuildHasherDefault<Fx>>,
     names: Vec<Arc<[u8]>>,
-    groups: Vec<Group>,
     /// One record block per DISTINCT hour, indexed by that hour's rank in
     /// `hours`. Keying a block by hour rather than opening a new one at every
     /// hour change is what keeps the group count at the output's own size: the
@@ -297,64 +285,6 @@ impl Sink {
             self.big.push((self.hrank, key, latency));
         }
     }
-
-    /// Sort one hour's records and turn each run of equal keys into a group.
-    ///
-    /// The 5xx flag rides in the low bit of the sort key, so a group becomes at
-    /// most two adjacent runs -- the clean lines and the errors -- and the merge
-    /// adds them back together, because it folds every run of equal keys.
-    fn flush(&mut self, hrank: usize, recs: &mut Vec<Rec>) {
-        let hour = (self.hours[hrank].0 as u64) << 32;
-        let first = self.groups.len();
-        recs.sort_unstable_by_key(|r| r.packed & KEY_MASK);
-        let mut i = 0;
-        while i < recs.len() {
-            let key = recs[i].packed & KEY_MASK;
-            let mut j = i + 1;
-            while j < recs.len() && (recs[j].packed & KEY_MASK) == key {
-                j += 1;
-            }
-            let mut latencies = Vec::with_capacity(j - i);
-            latencies.extend(recs[i..j].iter().map(|r| r.packed >> KEY_BITS));
-            self.groups.push(Group {
-                key: hour | (key >> 1) as u64,
-                latencies,
-                errors: (key & 1) * (j - i) as u32,
-                p50: 0,
-                p95: 0,
-                p99: 0,
-            });
-            i = j;
-        }
-
-        // Fold in what a packed word could not hold. A key appearing only here has
-        // no group yet, so this may create one -- and because `push` appends, the
-        // new group lands out of key order. Re-sorting this hour's slice is what
-        // keeps the merge correct; the earlier code could rely on the block being
-        // sorted because every record was in it.
-        for idx in 0..self.big.len() {
-            let (h, key, lat) = self.big[idx];
-            if h as usize != hrank {
-                continue;
-            }
-            let gk = hour | (key >> 1) as u64;
-            match self.groups[first..].iter_mut().find(|g| g.key == gk) {
-                Some(g) => {
-                    g.latencies.push(lat);
-                    g.errors += key & 1;
-                }
-                None => self.groups.push(Group {
-                    key: gk,
-                    latencies: vec![lat],
-                    errors: key & 1,
-                    p50: 0,
-                    p95: 0,
-                    p99: 0,
-                }),
-            }
-        }
-        self.groups[first..].sort_unstable_by_key(|g| g.key);
-    }
 }
 
 /// Group the half-open byte slice `[start, end)` of `path` and return its rows
@@ -370,6 +300,7 @@ impl Sink {
 /// including the case where a line begins exactly on a cut. The one line that
 /// has no terminator at all — a file that does not end in `\n` — is picked up by
 /// the `<= end` rule at EOF, because `nl` can never find it.
+///
 /// Map the whole input read-only, or `None`.
 ///
 /// `std` has no mmap, so this is the raw syscall. **It exists because 238 MB in
@@ -429,13 +360,9 @@ fn scan(path: &str, start: u64, end: u64) -> Part {
 }
 
 fn scan_with(path: &str, start: u64, end: u64, mapped: Option<&[u8]>) -> Part {
-    // ~1 group per 1.6 kB of input: reserve it up front rather than paying nine
-    // table doublings per worker. Only a hint — growth is still automatic.
-    let est = ((end - start) / 1450) as usize;
     let mut s = Sink {
         inter: HashMap::with_capacity_and_hasher(2048, BuildHasherDefault::default()),
         names: Vec::with_capacity(2048),
-        groups: Vec::with_capacity(est),
         recs: Vec::new(),
         big: Vec::new(),
         hours: Vec::new(),
@@ -444,7 +371,8 @@ fn scan_with(path: &str, start: u64, end: u64, mapped: Option<&[u8]>) -> Part {
         hrank: 0,
     };
     let out = Part {
-        groups: Vec::new(),
+        recs: Vec::new(),
+        big: Vec::new(),
         names: Vec::new(),
         hours: Vec::new(),
     };
@@ -563,54 +491,41 @@ fn scan_with(path: &str, start: u64, end: u64, mapped: Option<&[u8]>) -> Part {
 }
 
 impl Sink {
-    /// Fold each hour's block into groups, renumber the endpoints into
-    /// sorted-byte order, and order the groups by the integer key. Both ordering
-    /// steps compose: the byte order an id stands for is exactly the order the
-    /// id itself now has.
-    ///
-    /// Shared by both input paths, so a mapped read and a buffered read produce
-    /// byte-identical output by construction rather than by review.
-    fn finish(mut self, mut out: Part) -> Part {
-        // Each block is taken out of the table and dropped as it is consumed, so
-        // the record buffers and the groups built from them are never all live.
-        for hi in 0..self.recs.len() {
-            let mut block = std::mem::take(&mut self.recs[hi]);
-            self.flush(hi, &mut block);
-        }
-
-        let mut order: Vec<u32> = (0..self.names.len() as u32).collect();
-        order.sort_unstable_by(|&a, &b| self.names[a as usize].cmp(&self.names[b as usize]));
-        let mut rank = vec![0u32; self.names.len()];
-        for (r, &id) in order.iter().enumerate() {
-            rank[id as usize] = r as u32;
-        }
-        for g in &mut self.groups {
-            g.key = (g.key & 0xffff_ffff_0000_0000)
-                | rank[(g.key & 0xffff_ffff) as usize] as u64;
-        }
-        self.groups.sort_unstable_by_key(|g| g.key);
-
-        out.groups = self.groups;
-        out.names = order.iter().map(|&i| self.names[i as usize].clone()).collect();
+    fn finish(self, mut out: Part) -> Part {
+        out.recs = self.recs;
+        out.big = self.big;
+        out.names = self.names;
         out.hours = self.hours;
         out
     }
 }
 
-/// Fill p50/p95/p99 by nearest rank: `ceil(p*n/100) == (p*n + 99)/100`. Each
-/// selection runs inside the prefix that still contains the wanted rank (after
-/// selecting rank r the first r+1 slots hold the r+1 smallest values), so the
-/// cheaper ranks do not re-partition the whole group.
-fn score(g: &mut Group) {
-    let n = g.latencies.len() as u64;
-    if n == 0 {
-        return;
+/// p50/p95/p99 by nearest rank, `ceil(p*n/100) == (p*n + 99)/100`. Each selection
+/// runs inside the prefix that still holds the wanted rank, pivot included, so n
+/// of 1 to 19 (where two ranks coincide) never selects in an empty slice.
+fn pct(a: &mut [u32]) -> (u32, u32, u32) {
+    let n = a.len() as u64;
+    let r = |p: u64| ((p * n + 99) / 100).max(1) as usize - 1;
+    let (t50, t95, t99) = (r(50), r(95), r(99));
+    let p99 = *a.select_nth_unstable(t99).1;
+    let p95 = *a[..t99 + 1].select_nth_unstable(t95).1;
+    let p50 = *a[..t95 + 1].select_nth_unstable(t50).1;
+    (p50, p95, p99)
+}
+
+/// Append `v` in decimal.
+#[inline]
+fn push_u64(out: &mut Vec<u8>, mut v: u64) {
+    let (mut tmp, mut n) = ([0u8; 20], 20);
+    loop {
+        n -= 1;
+        tmp[n] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
     }
-    let rank0 = |p: u64| -> usize { ((p * n + 99) / 100).max(1) as usize - 1 };
-    let (t50, t95, t99) = (rank0(50), rank0(95), rank0(99));
-    g.p99 = *g.latencies.select_nth_unstable(t99).1;
-    g.p95 = *g.latencies[..t99 + 1].select_nth_unstable(t95).1;
-    g.p50 = *g.latencies[..t95 + 1].select_nth_unstable(t50).1;
+    out.extend_from_slice(&tmp[n..]);
 }
 
 /// Append `v` in decimal at `out[at..]` and return the new offset.
@@ -621,24 +536,6 @@ fn score(g: &mut Group) {
 /// quarter of the whole run. Digits go into a stack buffer and come back out
 /// reversed; there is no allocation and no trait object anywhere.
 #[inline]
-fn put_u64(out: &mut [u8], mut at: usize, mut v: u64) -> usize {
-    let mut tmp = [0u8; 20];
-    let mut n = 0;
-    loop {
-        tmp[n] = b'0' + (v % 10) as u8;
-        v /= 10;
-        n += 1;
-        if v == 0 {
-            break;
-        }
-    }
-    while n > 0 {
-        n -= 1;
-        out[at] = tmp[n];
-        at += 1;
-    }
-    at
-}
 
 fn main() {
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
@@ -660,7 +557,7 @@ fn main() {
     // parse then walks the file in place instead of copying it through a buffer.
     // `None` on any failure and every worker falls back to buffered reads.
     let map = map_file(&input);
-    let mut parts: Vec<Part> = thread::scope(|s| {
+    let parts: Vec<Part> = thread::scope(|s| {
         let path = input.as_str();
         let mut handles = Vec::with_capacity(NTHREADS);
         for i in 0..NTHREADS {
@@ -682,152 +579,144 @@ fn main() {
     });
 
     // ── one global endpoint table and one global hour table ─────────────────
-    // Endpoint ids are re-derived in sorted-byte order; every worker's local
-    // order survives the remap, so the lists stay sorted and never need a
-    // second pass. The per-worker interners are dropped here, before the merge.
     let mut eps: Vec<Arc<[u8]>> = parts.iter().flat_map(|p| p.names.iter().cloned()).collect();
     eps.sort_unstable();
     eps.dedup();
-    let eidx: HashMap<&[u8], u32> = eps
-        .iter()
-        .enumerate()
-        .map(|(i, a)| (&a[..], i as u32))
-        .collect();
-    let mut hours: Vec<(u32, [u8; 13])> =
-        parts.iter().flat_map(|p| p.hours.iter().copied()).collect();
+    let eidx: HashMap<&[u8], u32> = eps.iter().enumerate().map(|(i, a)| (&a[..], i as u32)).collect();
+    let mut hours: Vec<(u32, [u8; 13])> = parts.iter().flat_map(|p| p.hours.iter().copied()).collect();
     hours.sort_unstable();
     hours.dedup();
-    for p in parts.iter_mut() {
-        let map: Vec<u32> = p.names.iter().map(|a| eidx[&a[..]]).collect();
-        for g in &mut p.groups {
-            g.key = (g.key & 0xffff_ffff_0000_0000) | map[(g.key & 0xffff_ffff) as usize] as u64;
-        }
-    }
-
-    // ── one single-level k-way merge over the twelve sorted lists ───────────
-    //
-    // The tree merge this replaces held TWO LEVELS of groups at once: it built a
-    // whole `next` vector while `parts` was still alive, so the transient was
-    // every group twice over. A single level keeps the twelve lists and one
-    // output vector, and each list is freed as it drains.
-    //
-    // With twelve lists the min-scan is twelve peeks per output row -- about 1.5 M
-    // comparisons over 126,908 rows, which is cheaper than the tree's n*log2(12)
-    // and, more to the point, holds far fewer groups at the peak.
-    let mut iters: Vec<Peekable<IntoIter<Group>>> = parts
-        .into_iter()
-        .map(|p| p.groups.into_iter().peekable())
+    // Per worker: local endpoint id -> global rank, and global hour -> local block.
+    let emap: Vec<Vec<u32>> = parts
+        .iter()
+        .map(|p| p.names.iter().map(|a| eidx[&a[..]]).collect())
         .collect();
-    // Reserved to the exact total: the k-way version first shipped with `Vec::new()`
-    // here, and the doubling reallocations were the whole memory regression. The
-    // tree merge it replaced reserved `a.len() + b.len()` at every level, so the
-    // k-way merge was the only one of the two paying reallocation transients -- and
-    // that cost 5.6 MB, a 12.7% increase, which cancelled its 3.9% time win exactly.
-    let mut rows: Vec<Group> = Vec::with_capacity(iters.iter().map(|it| it.len()).sum());
-    loop {
-        // The key is COPIED out of each peek, which ends the borrow immediately --
-        // `peek` takes `&mut self` and returns a reference tied to it, so holding
-        // two of them at once does not borrow-check.
-        let mut best: Option<usize> = None;
-        let mut best_key = u64::MAX;
-        for i in 0..iters.len() {
-            if let Some(k) = iters[i].peek().map(|x| x.key) {
-                if best.is_none() || k < best_key {
-                    best = Some(i);
-                    best_key = k;
+    let hloc: Vec<Vec<usize>> = parts
+        .iter()
+        .map(|p| {
+            hours
+                .iter()
+                .map(|h| p.hours.iter().position(|x| x.0 == h.0).unwrap_or(usize::MAX))
+                .collect()
+        })
+        .collect();
+
+    // ── phase 2: one hour at a time, on every thread ────────────────────────
+    // An hour's records (about 43k) are counted into endpoint groups, scattered
+    // into one latency array, selected and formatted by whichever thread claims
+    // the hour. No hour waits for another, and nothing is merged serially.
+    let ne = eps.len();
+    let next = AtomicUsize::new(0);
+    let done: Vec<Vec<(usize, Vec<u8>)>> = thread::scope(|s| {
+        let hs: Vec<_> = (0..NTHREADS)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut res = Vec::new();
+                    let (mut start, mut errs, mut cur) = (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne]);
+                    let mut lat: Vec<u32> = Vec::new();
+                    loop {
+                        let h = next.fetch_add(1, Ordering::Relaxed);
+                        if h >= hours.len() {
+                            break;
+                        }
+                        start.fill(0);
+                        errs.fill(0);
+                        for (w, p) in parts.iter().enumerate() {
+                            let lr = hloc[w][h];
+                            if lr == usize::MAX {
+                                continue;
+                            }
+                            for r in &p.recs[lr] {
+                                let key = r.packed & KEY_MASK;
+                                let e = emap[w][(key >> 1) as usize] as usize;
+                                start[e + 1] += 1;
+                                errs[e] += key & 1;
+                            }
+                            for &(hr, key, _) in &p.big {
+                                if hr as usize == lr {
+                                    let e = emap[w][(key >> 1) as usize] as usize;
+                                    start[e + 1] += 1;
+                                    errs[e] += key & 1;
+                                }
+                            }
+                        }
+                        for e in 0..ne {
+                            start[e + 1] += start[e];
+                        }
+                        lat.clear();
+                        lat.resize(start[ne] as usize, 0);
+                        cur.copy_from_slice(&start[..ne]);
+                        for (w, p) in parts.iter().enumerate() {
+                            let lr = hloc[w][h];
+                            if lr == usize::MAX {
+                                continue;
+                            }
+                            for r in &p.recs[lr] {
+                                let e = emap[w][((r.packed & KEY_MASK) >> 1) as usize] as usize;
+                                lat[cur[e] as usize] = r.packed >> KEY_BITS;
+                                cur[e] += 1;
+                            }
+                            for &(hr, key, l) in &p.big {
+                                if hr as usize == lr {
+                                    let e = emap[w][(key >> 1) as usize] as usize;
+                                    lat[cur[e] as usize] = l;
+                                    cur[e] += 1;
+                                }
+                            }
+                        }
+                        let mut out: Vec<u8> = Vec::with_capacity(start[ne] as usize / 2 + 4096);
+                        let hb = &hours[h].1;
+                        for e in 0..ne {
+                            let (a, b) = (start[e] as usize, start[e + 1] as usize);
+                            if a == b {
+                                continue;
+                            }
+                            let n = (b - a) as u64;
+                            let (p50, p95, p99) = pct(&mut lat[a..b]);
+                            out.extend_from_slice(hb);
+                            out.extend_from_slice(b":00:00Z ");
+                            out.extend_from_slice(&eps[e]);
+                            for v in [n, p50 as u64, p95 as u64, p99 as u64, errs[e] as u64, errs[e] as u64 * 1_000_000 / n] {
+                                out.push(b' ');
+                                push_u64(&mut out, v);
+                            }
+                            out.push(b'\n');
+                        }
+                        res.push((h, out));
+                    }
+                    res
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .map(|h| match h.join() {
+                Ok(r) => r,
+                Err(_) => {
+                    eprintln!("[track-a] worker failed");
+                    exit(1);
                 }
-            }
-        }
-        let Some(i) = best else { break };
-        let mut row = iters[i].next().unwrap();
-        // Equal keys across any of the lists are one group.
-        for it in iters.iter_mut() {
-            while matches!(it.peek(), Some(x) if x.key == row.key) {
-                let g = it.next().unwrap();
-                row.latencies.extend_from_slice(&g.latencies);
-                row.errors += g.errors;
-            }
-        }
-        rows.push(row);
+            })
+            .collect()
+    });
+    let mut by_hour: Vec<Vec<u8>> = vec![Vec::new(); hours.len()];
+    for (h, buf) in done.into_iter().flatten() {
+        by_hour[h] = buf;
     }
 
-    // ── percentiles, again over twelve threads ──────────────────────────────
-    let per = rows.len().div_ceil(NTHREADS).max(1);
-    thread::scope(|s| {
-        for chunk in rows.chunks_mut(per) {
-            s.spawn(move || {
-                for g in chunk.iter_mut() {
-                    score(g);
-                }
-            });
-        }
-    });
-
-    // ── write exactly one file, in key order ────────────────────────────────
-    let out_file = match File::create(&output) {
+    // ── write exactly one file, in hour order ───────────────────────────────
+    let mut out_file = match File::create(&output) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("[track-a] cannot create {output}: {e}");
             exit(1);
         }
     };
-    let mut w = BufWriter::with_capacity(1 << 20, out_file);
-    // Rows arrive in hour order, so the byte lookup happens once per hour.
-    let (mut cur, mut hb) = (u32::MAX, [0u8; 13]);
-    // One row is assembled here and written with a single call. 1024 bytes covers
-    // the longest endpoint in the catalogue (over 200) with room to spare; the
-    // guard below falls back to core::fmt rather than risk a slice panic on an
-    // endpoint the spec does not bound.
-    let mut row = [0u8; 1024];
-    for g in &rows {
-        let ho = (g.key >> 32) as u32;
-        if ho != cur {
-            cur = ho;
-            hb = hours[hours.binary_search_by_key(&ho, |x| x.0).unwrap()].1;
-        }
-        let (n, errors) = (g.latencies.len(), g.errors);
-        let ppm = errors as u64 * 1_000_000 / n as u64;
-        let ep = &eps[(g.key & 0xffff_ffff) as usize];
-        let r = if row.len() < ep.len() + 128 {
-            w.write_all(&hb)
-                .and_then(|_| w.write_all(b":00:00Z "))
-                .and_then(|_| w.write_all(ep))
-                .and_then(|_| write!(w, " {n} {} {} {} {errors} {ppm}\n", g.p50, g.p95, g.p99))
-        } else {
-            let (mut k, put) = (0usize, |k: usize, v: u64, row: &mut [u8; 1024]| put_u64(row, k, v));
-            row[..13].copy_from_slice(&hb);
-            k += 13;
-            row[k..k + 8].copy_from_slice(b":00:00Z ");
-            k += 8;
-            row[k..k + ep.len()].copy_from_slice(ep);
-            k += ep.len();
-            for v in [n as u64, g.p50 as u64, g.p95 as u64, g.p99 as u64, errors as u64, ppm] {
-                row[k] = b' ';
-                k = put(k + 1, v, &mut row);
-            }
-            row[k] = b'\n';
-            k += 1;
-            w.write_all(&row[..k])
-        };
-        if let Err(e) = r {
+    for buf in &by_hour {
+        if let Err(e) = out_file.write_all(buf) {
             eprintln!("[track-a] write error: {e}");
             exit(1);
         }
     }
-    if let Err(e) = w.flush() {
-        eprintln!("[track-a] flush error: {e}");
-        exit(1);
-    }
-    // Skip teardown. Everything left alive at this point -- 145,601 `Group`s and
-    // the 3.1 M latencies behind them, plus the twelve per-worker interners --
-    // is freed by Rust's drop glue on the way out of `main`, and every one of
-    // those frees happens AFTER the output is written. The process is about to
-    // exit and the kernel reclaims the whole address space at once, so running
-    // the destructors buys nothing and costs the allocator walk.
-    //
-    // This is only safe because `w.flush()` above has already succeeded: the
-    // output file is complete and closed before the exit. `exit` does not run
-    // destructors, so anything still buffered here would be lost -- which is why
-    // the flush is not skipped along with it.
+    // Skip teardown: the file is complete, and the kernel reclaims everything.
     exit(0);
 }
