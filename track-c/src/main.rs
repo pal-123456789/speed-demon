@@ -1116,7 +1116,34 @@ fn parse_range(
     groups
 }
 
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn mallopt(param: i32, value: i32) -> i32;
+}
+
+/// Pin glibc's mmap threshold so a freed large allocation returns its pages.
+///
+/// glibc RAISES its own threshold as large blocks are freed, up to 32 MB, so a
+/// dropped array can stay on the heap and keep being charged against a
+/// high-water mark. Pinning it low makes every large allocation its own mapping,
+/// whose pages return on free. Measured on this project's track-d at 4.3% of
+/// peak RSS with no time cost, in a four-variant A/B that isolated each call.
+///
+/// `prctl(PR_SET_THP_DISABLE)` is deliberately NOT called: it measured as a time
+/// loss on every track, and this host runs THP in `madvise` mode, so the call
+/// disables nothing here anyway.
+#[cfg(target_os = "linux")]
+fn tune_allocator() {
+    unsafe {
+        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tune_allocator() {}
+
 fn main() {
+    tune_allocator();
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let records = format!("{data}/records.csv");
