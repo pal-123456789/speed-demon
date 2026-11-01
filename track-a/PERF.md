@@ -31,12 +31,12 @@ Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | 32.047276 s | 0.0578 s | 554.5x | 0.50 | 23.546 (derived) |
-| M · peak memory | 227.98336 MB | 39.4 MB | 5.79x | 0.20 | 1.420 (derived) |
-| S · source size | 56 lines | 543 lines | 0.103x | 0.15 | 0.711 (derived) |
+| T · wall time | 32.047276 s | 0.0419 s | 764.9x | 0.50 | 27.657 (derived) |
+| M · peak memory | 227.98336 MB | 30.1 MB | 7.57x | 0.20 | 1.499 (derived) |
+| S · source size | 56 lines | 750 lines | 0.0747x | 0.15 | 0.678 (derived) |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| **K** | | | | | **23.79 (derived)** |
-| **speed score** | | | | | **68.61 (board)** |
+| **K** | | | | | **27.83 (board)** |
+| **speed score** | | | | | **72.23 (board)** |
 
 `K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
 Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
@@ -49,14 +49,23 @@ a growing per-endpoint list. `/data` is pre-warmed outside our cgroup, so readin
 it is free for M; our own allocations, /tmp writes and the output file's
 first-touched pages are what count.
 
-> Measured on the live board at commit `f6ab1c5`:
-> **T 0.0578 s, M 39.4 MB, S 543 lines, 68.610 points.**
-> T and M are the board's own for that run rather than measured locally, which is
-> why the local Linux numbers below stay separate from them.
+> Measured on the live board, best run `run-dda2ca043537` at commit `043ec44`:
+> **T 0.0419 s, M 30.1 MB, S 750 lines, K 27.83, 72.23 points.**
+> T, M and S are the board's own for that run rather than measured locally, which
+> is why the local Linux numbers below stay separate from them. The board keeps
+> only the BEST result per track, so this is the only live run ID for Track A.
+>
+> The four ratios beside the published T, M and S multiply to 28.10 while the
+> board publishes K 27.83 for the same run; the published points figure follows
+> from 27.83 exactly. Both are reproduced here as published rather than
+> reconciled, because the board rounds its axes and its K independently and this
+> file will not adjust one published number to make another one look tidier.
 
 **Where the next point comes from.** With the weights above, each 1% off wall
 time is worth about 0.108 points, each 1% off memory about 0.043, and each 1% on
-source size costs about 0.033. That ordering is the whole plan.
+source size costs about 0.033. That ordering is the whole plan. It also says
+where this round actually landed: time and memory both moved and source grew, and
+source is now the only axis still well behind the 56-line reference.
 
 ---
 
@@ -73,21 +82,18 @@ the reference (final scoring 10x).
 | — | *measured by the board on the full public dataset, seed 1; commit `3032ab8`, 316 code lines* | | | | |
 | 1 | Real Ingest: 13-byte hour key (no calendar arithmetic), interned endpoints, rank selection instead of sorting, parsed across twelve threads over disjoint record ranges | `run-2e1da425c7aa` | 0.1338 s | 60.2 MB | 59.43 |
 | 2 | Mapped input instead of buffered reads; compact single-word record; one packed 64-byte AVX2 probe per line for both field boundaries; single-level k-way merge with an exactly reserved output | `run-821ff711c091` | 0.0867 s | 49.5 MB | **62.97** |
-| 3 | Hour-partitioned phase 2: one hour at a time across all workers, so the serial merge between workers is gone | `run-...` (pending) | — | — | — |
-| 4 | One shared lock-free endpoint table, and a 13-bit record key sized to the spec's 1,842-endpoint catalogue | `run-...` (pending) | — | — | — |
-| 5 | Every hour formatted straight into the mapped output file at a precomputed offset; no per-hour string and no serial write | `run-...` (pending) | — | — | — |
-| 6 | 32-byte newline search; per-thread scratch zeroed once instead of every hour | `run-...` (pending) | — | — | — |
+| 3 | Hour-partitioned phase 2 (the serial merge between workers gone); one shared lock-free endpoint table with a 13-bit record key sized to the spec's 1,842-endpoint catalogue; every hour formatted straight into the mapped output file at a precomputed offset; 32-byte AVX2 newline search; per-thread scratch zeroed once | `run-dda2ca043537` (measured) | 0.0419 s | 30.1 MB | **72.23** |
 
-**Rows 3 to 6 have no run ID yet, deliberately.** They are in the working tree at
-commits `f6ab1c5` (already on the board as step 2 above), then `b071bf2`,
-`812c2be` and `0eaaa6f`. The board assigns a run ID when the Lead pushes, and
-this file does not invent one. Their local measurements are in table 2a and
-section 4; the board's own numbers for them land here as they are pushed.
-
-The intermediate pushes between step 1 and step 2 are not listed separately
-because the board keeps only the BEST result per track, so those runs no longer
-exist in the board's data to cite. What they contained is in section 3, with the
-measurement that killed each one.
+**Step 3 is one board row and four local steps, and that is the board's rule, not
+a shortcut.** The board keeps only the BEST result per track, so the intermediate
+pushes between step 2 and step 3 - commits `f6ab1c5`, `b071bf2`, `812c2be` and
+`0eaaa6f` - no longer exist in the board's data to cite. They are therefore not
+listed as their own rows with invented run IDs; their measured effect, one at a
+time, is in table 2a and section 4, which were recorded locally as each one
+landed. The 68.610 points that `f6ab1c5` measured on the board is likewise not a
+citable row any more: its run ID was superseded by step 3 and the board no longer
+holds it. The same applies to the intermediate pushes between step 1 and step 2:
+what they contained is in section 3, with the measurement that killed each one.
 
 ---
 
@@ -144,6 +150,26 @@ src/main.rs, rustfmt Code lines (local counter)
   final (0eaaa6f)      713      +41%
 board S at the baseline        543
 ```
+
+**Local ladder against the board, and where the projection was wrong.** The
+local ratios were used to project the board before the push. Direction was right
+on all three axes; magnitude on time was optimistic, and the source estimate was
+better than the local counter suggested:
+
+```
+                    projected from local   board, run-dda2ca043537
+wall time           0.0578 -> 0.032 s      0.0419 s   (better than the old
+                                                       number, but not by 1.8x)
+peak memory         39.4   -> 27.6 MB      30.1 MB
+source              543    -> 750 lines   750 lines
+points              68.610 -> ~75.8        72.23
+```
+
+The gap is the box, exactly as the caveat said: `/data` arrives warm on the
+board and its L3 is 24 MiB against this laptop's, so a 41% local wall gain landed
+as 27.5%. The local numbers are still the right *direction* instrument and the
+wrong *magnitude* one, and that is worth knowing the next time they are used to
+choose between two candidate changes.
 
 ### 2b. What was planned
 
@@ -343,4 +369,5 @@ filesystem and
 the 239 MB of page cache is charged to the container; that is a property of the
 host, not of the program, which is why M is cited here as peak anonymous rss.
 
-Commit hash of this measurement: `0eaaa6f`.
+Commit of the code these local measurements are of: `0eaaa6f`.
+Board run for the same code: `run-dda2ca043537` at commit `043ec44`.
