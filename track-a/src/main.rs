@@ -300,23 +300,56 @@ fn same(x: &[u8], s: &[u8]) -> bool {
     x == s
 }
 
-/// Index of the next `\n` in `b`, eight bytes at a time. This scans the whole
-/// 238 MB, so the byte-at-a-time loop it replaces was a real cost.
+/// Bit `i` of the result is set when byte `i` of the 32 at `p` is `c`.
+///
+/// SAFETY (inside): the caller guarantees 32 readable bytes from `p`. That is
+/// what the spare page after the input and the 64 bytes of slack in the read
+/// buffer are for -- without them this reads off the end of the last line.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn find32(p: *const u8, c: u8) -> u32 {
+    use core::arch::x86_64::{
+        _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8,
+    };
+    let v = _mm256_loadu_si256(p as *const _);
+    _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+unsafe fn find32(p: *const u8, c: u8) -> u32 {
+    let mut m = 0u32;
+    for i in 0..32 {
+        m |= ((*p.add(i) == c) as u32) << i;
+    }
+    m
+}
+
+/// Index of the next `\n` in `b`, 32 bytes at a time.
+///
+/// Every byte of the 238 MB goes through here, and the 8-byte SWAR loop this
+/// replaces took nine iterations for an average 77-byte line. A `\n` found in
+/// the slack past the end of `b` is not part of the input -- stale line data can
+/// sit there after a buffer carry -- so a hit at or past the end means "not in
+/// this slice".
 #[inline]
 fn nl(b: &[u8]) -> Option<usize> {
-    let mut i = 0;
-    while i + 8 <= b.len() {
-        let mut w = [0u8; 8];
-        w.copy_from_slice(&b[i..i + 8]);
-        let x = u64::from_le_bytes(w) ^ 0x0a0a_0a0a_0a0a_0a0a;
-        // Classic has-zero-byte; the set bit marks a `\n`.
-        let z = x.wrapping_sub(0x0101_0101_0101_0101) & !x & 0x8080_8080_8080_8080;
-        if z != 0 {
-            return Some(i + (z.trailing_zeros() >> 3) as usize);
-        }
-        i += 8;
+    if b.is_empty() {
+        return None;
     }
-    b[i..].iter().position(|&c| c == b'\n').map(|p| p + i)
+    let mut i = 0;
+    loop {
+        // SAFETY: 32 readable bytes from `b.as_ptr() + i`, see `find32`.
+        let m = unsafe { find32(b.as_ptr().add(i), b'\n') };
+        if m != 0 {
+            let p = i + m.trailing_zeros() as usize;
+            return if p < b.len() { Some(p) } else { None };
+        }
+        i += 32;
+        if i >= b.len() {
+            return None;
+        }
+    }
 }
 
 /// Index of the next space at or after `from`, or `None`.
@@ -900,8 +933,13 @@ fn main() {
                         for e in 0..ne {
                             start[e + 1] += start[e];
                         }
-                        lat.clear();
-                        lat.resize(start[ne] as usize, 0);
+                        // Grown, never re-zeroed. `resize` writes only the bytes
+                        // it adds, so the scratch is zeroed once up to its
+                        // high-water mark and reused after that, instead of
+                        // being cleared and re-zeroed for every hour.
+                        if lat.len() < start[ne] as usize {
+                            lat.resize(start[ne] as usize, 0);
+                        }
                         cur.copy_from_slice(&start[..ne]);
                         for (w, p) in parts.iter().enumerate() {
                             let lr = hloc[w][h];
