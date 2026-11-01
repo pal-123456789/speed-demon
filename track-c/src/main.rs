@@ -122,15 +122,6 @@ fn fold(v: u64, n: usize) -> u64 {
     (v * 10000 + (v >> 32)) & 0xFFFF_FFFF
 }
 
-/// Are the n (1 to 8) top bytes of w all ASCII digits?
-#[inline(always)]
-fn digits_ok(w: u64, n: usize) -> bool {
-    let keep = !0u64 << (8 * (8 - n));
-    let w = (w & keep) | (0x3030_3030_3030_3030 & !keep);
-    w & 0xF0F0_F0F0_F0F0_F0F0 == 0x3030_3030_3030_3030
-        && w.wrapping_add(0x0606_0606_0606_0606) & 0xF0F0_F0F0_F0F0_F0F0 == 0x3030_3030_3030_3030
-}
-
 /// A fast hash of a name. Only speed depends on it: every match is confirmed byte for byte.
 #[inline(always)]
 fn hash(b: &[u8]) -> u64 {
@@ -204,79 +195,6 @@ fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
 
 const STEP: usize = 1 << 18; // bytes per quote-parity chunk
 
-/// The commas and LFs outside quotes, in order, from a start offset onwards,
-/// each with the number of `"` bytes before it (counted from the start).
-/// The file must be mapped with a zero page after it (see `map`).
-struct Scan<'a, const A: bool> {
-    f: &'a [u8],
-    next: usize,
-    bits: u64,
-    carry: u64,
-    q: u64,
-    before: u64,
-}
-
-impl<'a, const A: bool> Scan<'a, A> {
-    #[inline(always)]
-    fn new(f: &'a [u8], p: usize) -> Self {
-        Scan { f, next: p, bits: 0, carry: 0, q: 0, before: 0 }
-    }
-
-    /// The next separator, or (file length, ..) once there is none.
-    #[inline(always)]
-    fn next(&mut self) -> (usize, u64) {
-        while self.bits == 0 {
-            if self.next >= self.f.len() {
-                return (self.f.len(), self.before + self.q.count_ones() as u64);
-            }
-            self.before += self.q.count_ones() as u64;
-            let (q, cn, x);
-            unsafe {
-                let p = self.f.as_ptr().add(self.next);
-                if A {
-                    // Only reached on a CPU that has AVX2 and PCLMULQDQ (see `native`).
-                    let (kq, kc, kn) = (_mm256_set1_epi8(b'"' as i8), _mm256_set1_epi8(b',' as i8), _mm256_set1_epi8(b'\n' as i8));
-                    let (v0, v1) = (_mm256_loadu_si256(p as *const __m256i), _mm256_loadu_si256(p.add(32) as *const __m256i));
-                    q = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, kq)) as u32 as u64) | (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, kq)) as u32 as u64) << 32;
-                    cn = (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v0, kc), _mm256_cmpeq_epi8(v0, kn))) as u32 as u64)
-                        | (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v1, kc), _mm256_cmpeq_epi8(v1, kn))) as u32 as u64) << 32;
-                    // Carry-less multiply by all ones is the prefix XOR of the quote bits.
-                    x = _mm_cvtsi128_si64(_mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), _mm_set1_epi8(-1))) as u64;
-                } else {
-                    let (mut qq, mut c, mut n) = (0u64, 0u64, 0u64);
-                    let (kq, kc, kn) = (_mm_set1_epi8(b'"' as i8), _mm_set1_epi8(b',' as i8), _mm_set1_epi8(b'\n' as i8));
-                    for k in 0..4 {
-                        let v = _mm_loadu_si128(p.add(16 * k) as *const __m128i);
-                        qq |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 as u64) << (16 * k);
-                        c |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kc)) as u32 as u64) << (16 * k);
-                        n |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kn)) as u32 as u64) << (16 * k);
-                    }
-                    q = qq;
-                    cn = c | n;
-                    // Bit i of the prefix XOR is set from an opening quote up to its closing quote;
-                    // a "" pair flips it twice and so changes nothing.
-                    let mut y = q;
-                    y ^= y << 1;
-                    y ^= y << 2;
-                    y ^= y << 4;
-                    y ^= y << 8;
-                    y ^= y << 16;
-                    y ^= y << 32;
-                    x = y;
-                }
-            }
-            let inside = x ^ self.carry;
-            self.carry = ((inside as i64) >> 63) as u64;
-            self.bits = cn & !inside;
-            self.q = q;
-            self.next += 64;
-        }
-        let i = self.bits.trailing_zeros();
-        self.bits &= self.bits - 1;
-        (self.next - 64 + i as usize, self.before + (self.q & ((1u64 << i) - 1)).count_ones() as u64)
-    }
-}
-
 /// Offset just past the first LF at even quote parity at or after `from`
 /// (`parity` = quotes in [0, from) mod 2), or the file length.
 fn first_boundary(f: &[u8], from: usize, mut parity: u8) -> usize {
@@ -291,48 +209,26 @@ fn first_boundary(f: &[u8], from: usize, mut parity: u8) -> usize {
 }
 
 /// The quote parity of each STEP-byte chunk c0..c1.
-#[inline(always)]
-fn quote_parity_impl<const A: bool>(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
+///
+/// This is the only vector code left in the track, and it is here because it earns its place:
+/// it runs over the whole file ONCE to produce the record-boundary cuts, before any parsing, and
+/// there is no scalar version to lose to. The parse's own AVX2/PCLMUL dispatch was removed along
+/// with the structural path it existed for.
+fn quote_parity(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
+    let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
     (c0..c1)
         .map(|c| {
             let (a, b) = (c * STEP, ((c + 1) * STEP).min(f.len()));
             let (mut i, mut q) = (a, 0u32);
-            if A {
-                // Only reached on a CPU that has AVX2 (see `native`).
-                unsafe {
-                    let kq = _mm256_set1_epi8(b'"' as i8);
-                    while i + 32 <= b {
-                        let v = _mm256_loadu_si256(f.as_ptr().add(i) as *const __m256i);
-                        q += (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kq)) as u32).count_ones();
-                        i += 32;
-                    }
-                }
-            } else {
-                let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
-                while i + 16 <= b {
-                    let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
-                    q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
-                    i += 16;
-                }
+            while i + 16 <= b {
+                let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
+                q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
+                i += 16;
             }
             q += f[i..b].iter().filter(|&&x| x == b'"').count() as u32;
             (q & 1) as u8
         })
         .collect()
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
-unsafe fn quote_parity_native(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
-    quote_parity_impl::<true>(f, c0, c1)
-}
-
-fn quote_parity(f: &[u8], c0: usize, c1: usize, nat: bool) -> Vec<u8> {
-    if nat {
-        unsafe { quote_parity_native(f, c0, c1) }
-    } else {
-        quote_parity_impl::<false>(f, c0, c1)
-    }
 }
 
 /// k line-aligned cuts of f[from..].
@@ -597,67 +493,6 @@ fn value_len(text: usize, q: u64) -> u32 {
     (text - if q > 0 { q as usize / 2 + 1 } else { 0 }) as u32
 }
 
-/// One record in exactly the expected shape, or None (the scalar parser then decides).
-/// `qb` is the quote count before this record; the scan has consumed up to its LF.
-#[inline(always)]
-fn fast<const A: bool>(f: &[u8], sc: &mut Scan<A>, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
-    let ((c1, q1), (c2, q2), (c3, q3), (c4, q4), (e, q5)) = (sc.next(), sc.next(), sc.next(), sc.next(), sc.next());
-    if e >= end || f.len() < p + 3 || (f[c1], f[c2], f[c3], f[c4], f[e]) != (b',', b',', b',', b',', b'\n') {
-        return None;
-    }
-    if q1 != *qb || q4 != q3 || q5 != q4 {
-        return None; // id, region and amount hold no quotes
-    }
-    let mut s = p;
-    if f[s] == 0xEF {
-        if f[s + 1] != 0xBB || f[s + 2] != 0xBF {
-            return None;
-        }
-        s += 3;
-    }
-    let (n1, n3) = (c1.wrapping_sub(s), c4 - c3 - 1);
-    if n1 == 0 || n1 > 8 || n3 == 0 || n3 > 8 || c1 < 8 {
-        return None;
-    }
-    let (w1, w3) = (load8(f, c1 - 8), load8(f, c4 - 8));
-    if !digits_ok(w1, n1) || !digits_ok(w3, n3) {
-        return None;
-    }
-    // amount: -?digits.dd with at most 7 digits; the eight bytes ending at its end, dot dropped, are one number
-    let a0 = c4 + 1;
-    let neg = f[a0] == b'-';
-    let ae = e - (f[e - 1] == b'\r') as usize;
-    let alen = ae.wrapping_sub(a0 + neg as usize);
-    if !(4..=8).contains(&alen) || f[ae - 3] != b'.' {
-        return None;
-    }
-    let w = load8(f, ae - 8);
-    let w = (w & 0xFF_FFFF_FFFF) << 8 | (w & 0xFFFF_0000_0000_0000);
-    if !digits_ok(w, alen - 1) {
-        return None;
-    }
-    let cents = fold(w, alen - 1) as i64;
-    // name and note: unquoted, or one quoted run with its two delimiting quotes
-    let (qn, qt) = (q2 - q1, q3 - q2);
-    let (nt, tt) = (c2 - c1 - 1, c3 - c2 - 1);
-    let quoted_ok = |from: usize, text: usize, q: u64| q == 0 || (q % 2 == 0 && text >= 2 && f[from] == b'"' && f[from + text - 1] == b'"');
-    if !quoted_ok(c1 + 1, nt, qn) || !quoted_ok(c2 + 1, tt, qt) {
-        return None;
-    }
-    *qb = q5;
-    let (noff, nlen) = if qn > 0 { (c1 + 2, nt - 2) } else { (c1 + 1, nt) };
-    let rec = Rec {
-        rid: fold(w1, n1),
-        region: fold(w3, n3),
-        cents: if neg { -cents } else { cents },
-        noff,
-        nlen: nlen as u32,
-        nbytes: value_len(nt, qn),
-        tbytes: value_len(tt, qt),
-    };
-    Some((rec, e + 1))
-}
-
 /// A field at pos: (raw start, raw length, value length). Quoted: the run up to the
 /// closing quote, `""` being one literal quote; unquoted: up to a comma, LF or CR.
 #[inline(always)]
@@ -869,55 +704,26 @@ impl<'a> Pipe<'a> {
 }
 
 /// Parse every record that starts in [start, end), both being record boundaries.
-#[inline(always)]
-fn parse_piece_impl<const A: bool>(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
+///
+/// The literal scalar parser is the only parser. A structural fast path was measured against it
+/// and lost: forcing every record through this path was marginally FASTER than letting the
+/// 64-byte scan try first, because a record here is about 61 bytes with short fields and the scan
+/// cost as much as it saved. So the scan, its prefix XOR and its dispatch are gone, and what
+/// remains is the parser that was already deciding every answer.
+fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
     let f = cx.f;
-    let (mut p, mut sc, mut qb) = (start, Scan::<A>::new(f, start), 0u64);
+    let mut p = start;
     while p < end {
-        // The mapped file's pages are scattered; reach into the next one ahead of the parse.
-        prefetch(f.as_ptr().wrapping_add(p + 2048));
         if pipe.n & 0xFFF == 0 && cx.names.over.load(Relaxed) {
             return;
         }
-        match fast(f, &mut sc, p, end, &mut qb) {
+        match slow(f, p, end) {
             Some((r, np)) => {
                 pipe.push(&r);
                 p = np;
             }
-            None => match slow(f, p, end) {
-                Some((r, np)) => {
-                    pipe.push(&r);
-                    (p, sc, qb) = (np, Scan::<A>::new(f, np), 0);
-                }
-                None => return,
-            },
+            None => return,
         }
-    }
-}
-
-/// The same parse compiled for the CPU features the scoring box has (popcnt, BMI, PCLMUL, AVX2),
-/// chosen at run time; any other CPU runs the identical source built for the baseline target.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
-unsafe fn parse_piece_native(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
-    parse_piece_impl::<true>(cx, pipe, start, end)
-}
-
-fn native() -> bool {
-    is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("bmi1")
-        && is_x86_feature_detected!("bmi2")
-        && is_x86_feature_detected!("popcnt")
-        && is_x86_feature_detected!("lzcnt")
-        && is_x86_feature_detected!("pclmulqdq")
-        && is_x86_feature_detected!("sse4.2")
-}
-
-fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize, nat: bool) {
-    if nat {
-        unsafe { parse_piece_native(cx, pipe, start, end) }
-    } else {
-        parse_piece_impl::<false>(cx, pipe, start, end)
     }
 }
 
@@ -928,8 +734,7 @@ fn main() {
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
-    let nat = native();
-    // Phase timing is off unless SD_TIME is set; the branch is once per phase.
+        // Phase timing is off unless SD_TIME is set; the branch is once per phase.
     let timing = std::env::var("SD_TIME").is_ok();
     let t0 = std::time::Instant::now();
     macro_rules! lap {
@@ -960,7 +765,7 @@ fn main() {
         let r = regions_part(rf, rcut[t], rcut[t + 1], &rarr, &codes);
         let ra = a.elapsed().as_secs_f64();
         let b = std::time::Instant::now();
-        let p = quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk), nat);
+        let p = quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk));
         (r, p, ra, b.elapsed().as_secs_f64())
     });
     let mut ok = got.iter().all(|g| g.0.ok);
@@ -1026,7 +831,7 @@ fn main() {
                 if k >= npieces {
                     break;
                 }
-                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1], nat);
+                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1]);
             }
             pipe.finish()
         });
