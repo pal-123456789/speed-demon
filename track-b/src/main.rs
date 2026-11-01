@@ -342,8 +342,14 @@ impl TermTable {
 
     /// One random word, then the key bytes -- no `offs`/`lens` touch.
     #[inline]
+    #[inline]
     fn probe(&self, key: &[u8]) -> Option<u32> {
-        let h = hash_bytes(key);
+        self.probe_h(key, hash_bytes(key))
+    }
+
+    /// `probe` with the key's hash already computed (so its slot can be prefetched).
+    #[inline]
+    fn probe_h(&self, key: &[u8], h: u64) -> Option<u32> {
         let tag = h & SLOT_TAG;
         let mut i = (h as usize) & self.mask;
         loop {
@@ -702,6 +708,24 @@ fn index_doc(
 ) {
     let n = text.len();
     let mut i = 0usize;
+    // A token's table slot is a random read, so each token's slot is prefetched
+    // and the token is looked up LAG tokens later; results are still taken in
+    // token order, so the per-document stamp logic is unchanged.
+    const LAG: usize = 8;
+    let mut ring = [(0u64, 0usize, 0usize); LAG];
+    let mut cnt = 0usize;
+    let mut resolve = |found: Option<u32>| {
+        if let Some(t) = found {
+            let e = &mut nslot[t as usize];
+            if *e >> 20 != gen {
+                *e = (gen << 20) | ((*e & ST_DF) + 1);
+                let b = t as usize % nb;
+                let gap = off - prev[b];
+                prev[b] = off;
+                streams[b].put(t / nb as u32, gap);
+            }
+        }
+    };
     while i < n {
         while i < n && !IS_TOK[text[i] as usize] {
             i += 1;
@@ -709,23 +733,29 @@ fn index_doc(
         let s = i;
         i = scan_token(text, i);
         if i > s {
-            let key = &text[s..i];
-            let found = if tt.packed {
-                tt.probe(key)
-            } else {
-                tt.get(key)
-            };
-            if let Some(t) = found {
-                let e = &mut nslot[t as usize];
-                if *e >> 20 != gen {
-                    *e = (gen << 20) | ((*e & ST_DF) + 1);
-                    let b = t as usize % nb;
-                    let gap = off - prev[b];
-                    prev[b] = off;
-                    streams[b].put(t / nb as u32, gap);
-                }
+            if !tt.packed {
+                resolve(tt.get(&text[s..i]));
+                continue;
             }
+            let h = hash_bytes(&text[s..i]);
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                // SAFETY: the address is inside `slots`; a prefetch never faults.
+                core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                    tt.slots.as_ptr().add((h as usize) & tt.mask).cast(),
+                );
+            }
+            if cnt >= LAG {
+                let (ph, ps, pe) = ring[cnt % LAG];
+                resolve(tt.probe_h(&text[ps..pe], ph));
+            }
+            ring[cnt % LAG] = (h, s, i);
+            cnt += 1;
         }
+    }
+    for k in cnt.saturating_sub(LAG)..cnt {
+        let (ph, ps, pe) = ring[k % LAG];
+        resolve(tt.probe_h(&text[ps..pe], ph));
     }
 }
 
@@ -1312,47 +1342,205 @@ fn format_result(out: &mut Vec<u8>, r: &[u32]) {
     out.push(b'\n');
 }
 
-/// Left-to-right, no precedence: `a OR b AND c` is `(a OR b) AND c`.
-fn eval_bool(
-    terms: &[u32],
-    ops: &[u8],
-    postings: &Postings,
-    cur: &mut Vec<u32>,
-    nxt: &mut Vec<u32>,
-    opnd: &mut Vec<u32>,
-) {
-    postings.decode_into(terms[0], cur);
+/// Terms in at least 1/32 of the document-id range are also held as bitmaps
+/// (about 350 terms, 15 MB), built once from their postings after the scan.  A
+/// BOOL query then ANDs, ORs and subtracts them a word at a time instead of
+/// decoding and merging hundreds of thousands of ids per use.
+struct Dense {
+    of: Vec<u32>,
+    bits: Vec<Vec<u64>>,
+}
+
+fn build_dense(postings: &Postings, nterms: usize) -> Dense {
+    // Every id is below the largest worker base plus 65,536 (the offset budget
+    // `build_range` enforces), whichever worker happens to be last.
+    let nbits = postings
+        .first
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |f| f as usize + 65536);
+    let mut of = vec![u32::MAX; nterms];
+    let mut list: Vec<u32> = Vec::new();
+    // A bound on the id range keeps a sparse-id corpus from allocating huge maps.
+    if nbits > 0 && nbits <= 1 << 24 {
+        for t in 0..nterms {
+            if postings.len(t as u32) * 32 >= nbits {
+                of[t] = list.len() as u32;
+                list.push(t as u32);
+            }
+        }
+    }
+    let nwords = nbits.div_ceil(64);
+    let per = list.len().div_ceil(NWORKERS).max(1);
+    let bits: Vec<Vec<u64>> = thread::scope(|s| {
+        let hs: Vec<_> = list
+            .chunks(per)
+            .map(|ts| {
+                s.spawn(move || {
+                    ts.iter()
+                        .map(|&t| {
+                            let mut b = vec![0u64; nwords];
+                            let mut at = postings.offs[t as usize] as usize;
+                            for w in 0..postings.nw {
+                                let n = postings.seg[t as usize * postings.nw + w] as usize;
+                                let base = postings.first[w];
+                                for &d in &postings.at[at..at + n] {
+                                    let id = (base + d as u32) as usize;
+                                    b[id >> 6] |= 1u64 << (id & 63);
+                                }
+                                at += n;
+                            }
+                            b
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    Dense { of, bits }
+}
+
+/// One worker's reusable buffers for BOOL evaluation.
+struct Scratch {
+    cur: Vec<u32>,
+    nxt: Vec<u32>,
+    opnd: Vec<u32>,
+    cb: Vec<u64>,
+}
+
+#[inline(always)]
+fn bit(b: &[u64], d: u32) -> bool {
+    b[(d >> 6) as usize] >> (d & 63) & 1 != 0
+}
+
+/// Left-to-right, no precedence: `a OR b AND c` is `(a OR b) AND c`.  The running
+/// set is a sorted id list (`sc.cur`) or, once a bitmap term starts the query or is
+/// OR-ed in, a bitmap (`sc.cb`); returns true when it is the bitmap.
+fn eval_bool(terms: &[u32], ops: &[u8], postings: &Postings, dn: &Dense, sc: &mut Scratch) -> bool {
+    let bm = |t: u32| -> Option<&[u64]> {
+        let k = dn.of[t as usize];
+        (k != u32::MAX).then(|| &dn.bits[k as usize][..])
+    };
+    let mut is_bits = match bm(terms[0]) {
+        Some(b) => {
+            sc.cb.clear();
+            sc.cb.extend_from_slice(b);
+            true
+        }
+        None => {
+            postings.decode_into(terms[0], &mut sc.cur);
+            false
+        }
+    };
     for (i, &op) in ops.iter().enumerate() {
         let t = terms[i + 1];
-        match op {
-            OP_AND => {
-                if cur.is_empty() {
+        let b = bm(t);
+        if is_bits {
+            match b {
+                Some(b) => {
+                    for (x, &y) in sc.cb.iter_mut().zip(b) {
+                        *x = match op {
+                            OP_AND => *x & y,
+                            OP_OR => *x | y,
+                            _ => *x & !y,
+                        };
+                    }
+                }
+                None => {
+                    postings.decode_into(t, &mut sc.opnd);
+                    match op {
+                        OP_AND => {
+                            let cb = &sc.cb;
+                            sc.opnd.retain(|&d| bit(cb, d));
+                            std::mem::swap(&mut sc.cur, &mut sc.opnd);
+                            is_bits = false;
+                        }
+                        OP_OR => sc.opnd.iter().for_each(|&d| sc.cb[(d >> 6) as usize] |= 1u64 << (d & 63)),
+                        _ => sc.opnd.iter().for_each(|&d| sc.cb[(d >> 6) as usize] &= !(1u64 << (d & 63))),
+                    }
+                }
+            }
+            continue;
+        }
+        match (b, op) {
+            (Some(b), OP_AND) => sc.cur.retain(|&d| bit(b, d)),
+            (Some(b), OP_OR) => {
+                sc.cb.clear();
+                sc.cb.extend_from_slice(b);
+                sc.cur.iter().for_each(|&d| sc.cb[(d >> 6) as usize] |= 1u64 << (d & 63));
+                is_bits = true;
+            }
+            (Some(b), _) => sc.cur.retain(|&d| !bit(b, d)),
+            (None, OP_AND) => {
+                if sc.cur.is_empty() {
                     continue;
                 }
-                postings.decode_into(t, opnd);
-                intersect_into(cur, opnd, nxt);
+                postings.decode_into(t, &mut sc.opnd);
+                intersect_into(&sc.cur, &sc.opnd, &mut sc.nxt);
+                std::mem::swap(&mut sc.cur, &mut sc.nxt);
             }
-            OP_OR => {
+            (None, OP_OR) => {
                 if postings.len(t) == 0 {
                     continue;
                 }
-                postings.decode_into(t, opnd);
-                union_into(cur, opnd, nxt);
+                postings.decode_into(t, &mut sc.opnd);
+                union_into(&sc.cur, &sc.opnd, &mut sc.nxt);
+                std::mem::swap(&mut sc.cur, &mut sc.nxt);
             }
-            _ => {
-                if cur.is_empty() || postings.len(t) == 0 {
+            (None, _) => {
+                if sc.cur.is_empty() || postings.len(t) == 0 {
                     continue;
                 }
-                postings.decode_into(t, opnd);
-                difference_into(cur, opnd, nxt);
+                postings.decode_into(t, &mut sc.opnd);
+                difference_into(&sc.cur, &sc.opnd, &mut sc.nxt);
+                std::mem::swap(&mut sc.cur, &mut sc.nxt);
             }
         }
-        std::mem::swap(cur, nxt);
-        if cur.is_empty() && !ops[i + 1..].iter().any(|&o| o == OP_OR) {
+        if !is_bits && sc.cur.is_empty() && !ops[i + 1..].iter().any(|&o| o == OP_OR) {
             // Empty survives AND and NOT; only a later OR can fill it again.
             break;
         }
     }
+    is_bits
+}
+
+/// `format_result` for a bitmap: count by popcount, and the sum of the set
+/// positions as, per word, popcount * (64 * word index) plus, for each of the six
+/// bits of a position, 2^k times the popcount of the positions that have it.
+fn format_bits(out: &mut Vec<u8>, b: &[u64]) {
+    const SEL: [u64; 6] = [
+        0xAAAA_AAAA_AAAA_AAAA,
+        0xCCCC_CCCC_CCCC_CCCC,
+        0xF0F0_F0F0_F0F0_F0F0,
+        0xFF00_FF00_FF00_FF00,
+        0xFFFF_0000_FFFF_0000,
+        0xFFFF_FFFF_0000_0000,
+    ];
+    let (mut count, mut sum, mut first) = (0u64, 0u64, [0u32; 10]);
+    let mut nfirst = 0;
+    for (w, &x) in b.iter().enumerate().filter(|(_, &x)| x != 0) {
+        let c = x.count_ones() as u64;
+        let within: u64 = (0..6).map(|k| ((x & SEL[k]).count_ones() as u64) << k).sum();
+        count += c;
+        sum += c * 64 * w as u64 + within;
+        let mut m = x;
+        while m != 0 && nfirst < 10 {
+            first[nfirst] = w as u32 * 64 + m.trailing_zeros();
+            nfirst += 1;
+            m &= m - 1;
+        }
+    }
+    out.clear();
+    push_u64(out, count);
+    out.push(b' ');
+    push_u64(out, sum);
+    for &v in &first[..nfirst] {
+        out.push(b' ');
+        push_u64(out, v as u64);
+    }
+    out.push(b'\n');
 }
 
 // â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1473,28 +1661,36 @@ fn main() {
     // parallelises the *answers* and not the phrase scan.
     let nthreads = NWORKERS.min(queries.len().max(1));
     let chunk = queries.len().div_ceil(nthreads).max(1);
+    let dense = build_dense(&postings, nterms);
+    lap!("bitmaps");
     let parts: Vec<Vec<u8>> = thread::scope(|s| {
         let postings = &postings;
         let hits = &hits;
+        let dense = &dense;
         let mut handles = Vec::with_capacity(nthreads);
         for (base, part) in queries.chunks(chunk).enumerate() {
             let start = base * chunk;
             handles.push(s.spawn(move || {
-                let mut cur: Vec<u32> = Vec::new();
-                let mut nxt: Vec<u32> = Vec::new();
-                let mut opnd: Vec<u32> = Vec::new();
+                let mut sc = Scratch {
+                    cur: Vec::new(),
+                    nxt: Vec::new(),
+                    opnd: Vec::new(),
+                    cb: Vec::new(),
+                };
                 let mut line: Vec<u8> = Vec::with_capacity(256);
                 let mut out: Vec<u8> = Vec::with_capacity(part.len() * 24 + 16);
                 for (k, q) in part.iter().enumerate() {
                     let qi = start + k;
-                    let r: &[u32] = match q {
+                    match q {
                         Query::Bool { terms, ops } => {
-                            eval_bool(terms, ops, postings, &mut cur, &mut nxt, &mut opnd);
-                            &cur
+                            if eval_bool(terms, ops, postings, dense, &mut sc) {
+                                format_bits(&mut line, &sc.cb);
+                            } else {
+                                format_result(&mut line, &sc.cur);
+                            }
                         }
-                        Query::Phrase(_) => &hits[qi],
-                    };
-                    format_result(&mut line, r);
+                        Query::Phrase(_) => format_result(&mut line, &hits[qi]),
+                    }
                     out.extend_from_slice(&line);
                 }
                 out
