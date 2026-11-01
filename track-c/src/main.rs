@@ -33,7 +33,6 @@ use std::sync::Mutex;
 extern "C" {
     fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
     fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
-    fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
 }
 
 /// A file descriptor for the mapping call. Only the Linux mapping uses it.
@@ -89,12 +88,10 @@ fn zeroed_u16(n: usize) -> Vec<AtomicU16> {
 fn populate<T>(v: &[T], t: usize, nt: usize) {
     let (base, bytes) = (v.as_ptr() as usize, std::mem::size_of_val(v));
     let (first, last) = ((base + 4095) / 4096, (base + bytes) / 4096);
-    if last > first {
-        let n = last - first;
-        let (a, b) = (first + n * t / nt, first + n * (t + 1) / nt);
-        if b > a {
-            unsafe { madvise((a * 4096) as *mut c_void, (b - a) * 4096, 23) }; // MADV_POPULATE_WRITE
-        }
+    let n = last.saturating_sub(first);
+    let (a, b) = (first + n * t / nt, first + n * (t + 1) / nt);
+    if b > a {
+        unsafe { madvise((a * 4096) as *mut c_void, (b - a) * 4096, 23) }; // MADV_POPULATE_WRITE
     }
 }
 
@@ -136,10 +133,10 @@ fn digits_ok(w: u64, n: usize) -> bool {
 fn hash(b: &[u8]) -> u64 {
     const M: u64 = 0x9E37_79B9_7F4A_7C15;
     const M2: u64 = 0x2545_F491_4F6C_DD1D;
+    let w4 = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64;
+    let w8 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
     let n = b.len();
     let h = if n >= 4 {
-        let w4 = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap()) as u64;
-        let w8 = |i: usize| u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
         let (a, c) = if n >= 8 { (w8(0), w8(n - 8)) } else { (w4(0), w4(n - 4)) };
         let mut h = (a ^ M).wrapping_mul(M) ^ (c ^ n as u64).wrapping_mul(M2);
         if n >= 16 {
@@ -154,7 +151,7 @@ fn hash(b: &[u8]) -> u64 {
 }
 
 /// One country's running aggregate (per thread, merged at the end).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Agg {
     count: u64,
     id_sum: i64,
@@ -168,12 +165,11 @@ struct Agg {
 
 impl Agg {
     fn new() -> Self {
-        Agg { count: 0, id_sum: 0, amount_sum: 0, amount_min: i64::MAX, amount_max: i64::MIN, name_bytes: 0, note_bytes: 0, distinct: 0 }
+        Agg { amount_min: i64::MAX, amount_max: i64::MIN, ..Default::default() }
     }
+    /// An `o` with `count == 0` needs no early return: its bounds are `i64::MAX`/`i64::MIN`,
+    /// so neither bound moves, and every other term adds zero.
     fn merge(&mut self, o: &Agg) {
-        if o.count == 0 {
-            return;
-        }
         self.count += o.count;
         self.id_sum += o.id_sum;
         self.amount_sum += o.amount_sum;
@@ -187,8 +183,8 @@ impl Agg {
 
 /// Exact cents as `-?int.dd`, never `-0.00`.
 fn money(cents: i64, out: &mut Vec<u8>) {
-    let a = cents.unsigned_abs();
-    out.extend_from_slice(format!("{}{}.{:02}", if cents < 0 { "-" } else { "" }, a / 100, a % 100).as_bytes());
+    let (a, sign) = (cents.unsigned_abs(), if cents < 0 { "-" } else { "" });
+    out.extend_from_slice(format!("{sign}{}.{:02}", a / 100, a % 100).as_bytes());
 }
 
 fn line(out: &mut Vec<u8>, key: &[u8], a: &Agg) {
@@ -207,7 +203,7 @@ const STEP: usize = 1 << 18; // bytes per quote-parity chunk
 /// The commas and LFs outside quotes, in order, from a start offset onwards,
 /// each with the number of `"` bytes before it (counted from the start).
 /// The file must be mapped with a zero page after it (see `map`).
-struct Scan<'a, const A: bool> {
+struct Scan<'a> {
     f: &'a [u8],
     next: usize,
     bits: u64,
@@ -216,7 +212,7 @@ struct Scan<'a, const A: bool> {
     before: u64,
 }
 
-impl<'a, const A: bool> Scan<'a, A> {
+impl<'a> Scan<'a> {
     #[inline(always)]
     fn new(f: &'a [u8], p: usize) -> Self {
         Scan { f, next: p, bits: 0, carry: 0, q: 0, before: 0 }
@@ -233,37 +229,18 @@ impl<'a, const A: bool> Scan<'a, A> {
             let (q, cn, x);
             unsafe {
                 let p = self.f.as_ptr().add(self.next);
-                if A {
-                    // Only reached on a CPU that has AVX2 and PCLMULQDQ (see `native`).
-                    let (kq, kc, kn) = (_mm256_set1_epi8(b'"' as i8), _mm256_set1_epi8(b',' as i8), _mm256_set1_epi8(b'\n' as i8));
-                    let (v0, v1) = (_mm256_loadu_si256(p as *const __m256i), _mm256_loadu_si256(p.add(32) as *const __m256i));
-                    q = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, kq)) as u32 as u64) | (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, kq)) as u32 as u64) << 32;
-                    cn = (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v0, kc), _mm256_cmpeq_epi8(v0, kn))) as u32 as u64)
-                        | (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v1, kc), _mm256_cmpeq_epi8(v1, kn))) as u32 as u64) << 32;
-                    // Carry-less multiply by all ones is the prefix XOR of the quote bits.
-                    x = _mm_cvtsi128_si64(_mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), _mm_set1_epi8(-1))) as u64;
-                } else {
-                    let (mut qq, mut c, mut n) = (0u64, 0u64, 0u64);
-                    let (kq, kc, kn) = (_mm_set1_epi8(b'"' as i8), _mm_set1_epi8(b',' as i8), _mm_set1_epi8(b'\n' as i8));
-                    for k in 0..4 {
-                        let v = _mm_loadu_si128(p.add(16 * k) as *const __m128i);
-                        qq |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 as u64) << (16 * k);
-                        c |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kc)) as u32 as u64) << (16 * k);
-                        n |= (_mm_movemask_epi8(_mm_cmpeq_epi8(v, kn)) as u32 as u64) << (16 * k);
-                    }
-                    q = qq;
-                    cn = c | n;
-                    // Bit i of the prefix XOR is set from an opening quote up to its closing quote;
-                    // a "" pair flips it twice and so changes nothing.
-                    let mut y = q;
-                    y ^= y << 1;
-                    y ^= y << 2;
-                    y ^= y << 4;
-                    y ^= y << 8;
-                    y ^= y << 16;
-                    y ^= y << 32;
-                    x = y;
-                }
+                let kq = _mm256_set1_epi8(b'"' as i8);
+                let kc = _mm256_set1_epi8(b',' as i8);
+                let kn = _mm256_set1_epi8(b'\n' as i8);
+                let v0 = _mm256_loadu_si256(p as *const __m256i);
+                let v1 = _mm256_loadu_si256(p.add(32) as *const __m256i);
+                q = (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v0, kq)) as u32 as u64)
+                    | (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, kq)) as u32 as u64) << 32;
+                cn = (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v0, kc), _mm256_cmpeq_epi8(v0, kn))) as u32 as u64)
+                    | (_mm256_movemask_epi8(_mm256_or_si256(_mm256_cmpeq_epi8(v1, kc), _mm256_cmpeq_epi8(v1, kn))) as u32 as u64) << 32;
+                // Carry-less multiply by all ones is the prefix XOR of the quote bits.
+                let ones = _mm_set1_epi8(-1);
+                x = _mm_cvtsi128_si64(_mm_clmulepi64_si128::<0>(_mm_cvtsi64_si128(q as i64), ones)) as u64;
             }
             let inside = x ^ self.carry;
             self.carry = ((inside as i64) >> 63) as u64;
@@ -273,7 +250,8 @@ impl<'a, const A: bool> Scan<'a, A> {
         }
         let i = self.bits.trailing_zeros();
         self.bits &= self.bits - 1;
-        (self.next - 64 + i as usize, self.before + (self.q & ((1u64 << i) - 1)).count_ones() as u64)
+        let before = self.before + (self.q & ((1u64 << i) - 1)).count_ones() as u64;
+        (self.next - 64 + i as usize, before)
     }
 }
 
@@ -290,49 +268,25 @@ fn first_boundary(f: &[u8], from: usize, mut parity: u8) -> usize {
     f.len()
 }
 
-/// The quote parity of each STEP-byte chunk c0..c1.
-#[inline(always)]
-fn quote_parity_impl<const A: bool>(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
+/// The quote parity of each STEP-byte chunk c0..c1. AVX2 is a feature of the build
+/// target (`build.sh` pins x86-64-v3), so no run-time check is needed here.
+fn quote_parity(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
     (c0..c1)
         .map(|c| {
             let (a, b) = (c * STEP, ((c + 1) * STEP).min(f.len()));
             let (mut i, mut q) = (a, 0u32);
-            if A {
-                // Only reached on a CPU that has AVX2 (see `native`).
-                unsafe {
-                    let kq = _mm256_set1_epi8(b'"' as i8);
-                    while i + 32 <= b {
-                        let v = _mm256_loadu_si256(f.as_ptr().add(i) as *const __m256i);
-                        q += (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kq)) as u32).count_ones();
-                        i += 32;
-                    }
-                }
-            } else {
-                let kq = unsafe { _mm_set1_epi8(b'"' as i8) };
-                while i + 16 <= b {
-                    let v = unsafe { _mm_loadu_si128(f.as_ptr().add(i) as *const __m128i) };
-                    q += unsafe { _mm_movemask_epi8(_mm_cmpeq_epi8(v, kq)) as u32 }.count_ones();
-                    i += 16;
+            unsafe {
+                let kq = _mm256_set1_epi8(b'"' as i8);
+                while i + 32 <= b {
+                    let v = _mm256_loadu_si256(f.as_ptr().add(i) as *const __m256i);
+                    q += (_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, kq)) as u32).count_ones();
+                    i += 32;
                 }
             }
             q += f[i..b].iter().filter(|&&x| x == b'"').count() as u32;
             (q & 1) as u8
         })
         .collect()
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
-unsafe fn quote_parity_native(f: &[u8], c0: usize, c1: usize) -> Vec<u8> {
-    quote_parity_impl::<true>(f, c0, c1)
-}
-
-fn quote_parity(f: &[u8], c0: usize, c1: usize, nat: bool) -> Vec<u8> {
-    if nat {
-        unsafe { quote_parity_native(f, c0, c1) }
-    } else {
-        quote_parity_impl::<false>(f, c0, c1)
-    }
 }
 
 /// k line-aligned cuts of f[from..].
@@ -366,11 +320,11 @@ struct CodeTab {
 
 impl CodeTab {
     fn new() -> Self {
-        CodeTab { t: (0..4096).map(|_| AtomicU32::new(0)).collect(), n: AtomicUsize::new(0) }
+        let (t, n) = ((0..4096).map(|_| AtomicU32::new(0)).collect(), AtomicUsize::new(0));
+        CodeTab { t, n }
     }
     fn intern(&self, code: u32) -> u16 {
-        let want = code | 1 << 24;
-        let mut s = (code.wrapping_mul(0x9E37_79B1) >> 20) as usize;
+        let (want, mut s) = (code | 1 << 24, (code.wrapping_mul(0x9E37_79B1) >> 20) as usize);
         loop {
             let e = self.t[s].load(Relaxed);
             if e == want {
@@ -393,6 +347,7 @@ impl CodeTab {
     }
 }
 
+#[derive(Default)]
 struct RegOut {
     ok: bool,
     first: u64,
@@ -403,14 +358,14 @@ struct RegOut {
 
 /// Parse the region lines in f[a..b) strictly: `digits , XXX` per line. Any other shape sets !ok.
 fn regions_part(f: &[u8], a: usize, b: usize, rarr: &[AtomicU16], codes: &CodeTab) -> RegOut {
-    let mut o = RegOut { ok: true, first: 0, last: 0, n: 0, over: Vec::new() };
+    let mut o = RegOut { ok: true, ..Default::default() };
     let mut p = a;
     while p < b && o.ok {
         let eol = f[p..b].iter().position(|&c| c == b'\n').map_or(b, |k| p + k);
-        let line = &f[p..eol];
-        let line = if line.last() == Some(&b'\r') { &line[..line.len() - 1] } else { line };
+        let line = f[p..eol].strip_suffix(b"\r").unwrap_or(&f[p..eol]);
         let nd = line.iter().take_while(|c| c.is_ascii_digit()).count();
-        if nd == 0 || nd > 18 || line.len() != nd + 4 || line[nd] != b',' || line[nd + 1..].iter().any(|&c| c == b',' || c == b'\r' || c == b'\n') {
+        let bad = line[nd.min(line.len())..].iter().any(|&c| c == b',' || c == b'\r' || c == b'\n');
+        if nd == 0 || nd > 18 || line.len() != nd + 4 || line[nd] != b',' || bad {
             o.ok = false;
             break;
         }
@@ -474,6 +429,7 @@ const LIMIT: u32 = 1 << 17; // names the packed table (and the bitsets) can hold
 const OCC: u64 = 1 << 63;
 const MMASK: u64 = OCC | 0x3F << 57 | 0xFF << 32;
 
+#[derive(Default)]
 struct Names {
     table: Vec<AtomicU64>,
     next: AtomicU32,
@@ -489,13 +445,7 @@ enum Hit {
 
 impl Names {
     fn new(slow: bool) -> Self {
-        Names {
-            table: zeroed_u64(1 << TB),
-            next: AtomicU32::new(0),
-            over: AtomicBool::new(false),
-            rare: Mutex::new(HashMap::new()),
-            slow,
-        }
+        Names { slow, table: zeroed_u64(1 << TB), ..Default::default() }
     }
 
     /// Exact intern of any name (long names, slow mode).
@@ -525,7 +475,8 @@ impl Names {
                     self.over.store(true, Relaxed);
                     return Hit::Id(0);
                 }
-                match self.table[s].compare_exchange(0, want | (id as u64) << 40 | noff as u64, Relaxed, Relaxed) {
+                let fresh = want | (id as u64) << 40 | noff as u64;
+                match self.table[s].compare_exchange(0, fresh, Relaxed, Relaxed) {
                     Ok(_) => return Hit::Id(id),
                     Err(c) => e = c, // another thread took the slot first
                 }
@@ -557,7 +508,9 @@ struct Bits {
 
 impl Bits {
     fn new(nco: usize) -> Self {
-        Bits { w: zeroed_u64(nco * BW), sets: (0..nco).map(|_| Mutex::new(HashSet::new())).collect() }
+        let sets = (0..nco).map(|_| Mutex::new(HashSet::new())).collect();
+        let w = zeroed_u64(nco * BW);
+        Bits { w, sets }
     }
     #[inline(always)]
     fn prefetch(&self, c: usize, id: u32) {
@@ -574,7 +527,8 @@ impl Bits {
             let bit = 1u64 << (id & 63);
             self.w[c * BW + (id >> 6) as usize].fetch_or(bit, Relaxed) & bit == 0
         } else {
-            self.sets[c].lock().unwrap_or_else(|e| e.into_inner()).insert(id)
+            let mut s = self.sets[c].lock().unwrap_or_else(|e| e.into_inner());
+            s.insert(id)
         }
     }
 }
@@ -600,7 +554,7 @@ fn value_len(text: usize, q: u64) -> u32 {
 /// One record in exactly the expected shape, or None (the scalar parser then decides).
 /// `qb` is the quote count before this record; the scan has consumed up to its LF.
 #[inline(always)]
-fn fast<const A: bool>(f: &[u8], sc: &mut Scan<A>, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
+fn fast(f: &[u8], sc: &mut Scan, p: usize, end: usize, qb: &mut u64) -> Option<(Rec, usize)> {
     let ((c1, q1), (c2, q2), (c3, q3), (c4, q4), (e, q5)) = (sc.next(), sc.next(), sc.next(), sc.next(), sc.next());
     if e >= end || f.len() < p + 3 || (f[c1], f[c2], f[c3], f[c4], f[e]) != (b',', b',', b',', b',', b'\n') {
         return None;
@@ -645,7 +599,8 @@ fn fast<const A: bool>(f: &[u8], sc: &mut Scan<A>, p: usize, end: usize, qb: &mu
         return None;
     }
     *qb = q5;
-    let (noff, nlen) = if qn > 0 { (c1 + 2, nt - 2) } else { (c1 + 1, nt) };
+    let q = (qn > 0) as usize; // quoted: the name starts after its opening quote, minus both quotes
+    let (noff, nlen) = (c1 + 1 + q, nt - 2 * q);
     let rec = Rec {
         rid: fold(w1, n1),
         region: fold(w3, n3),
@@ -781,7 +736,8 @@ struct Pipe<'a> {
 
 impl<'a> Pipe<'a> {
     fn new(cx: &'a Ctx<'a>, nco: usize) -> Self {
-        Pipe { cx, aggs: vec![Agg::new(); nco], ring: vec![Pend::default(); 64], n: 0 }
+        let (aggs, ring, n) = (vec![Agg::new(); nco], vec![Pend::default(); 64], 0);
+        Pipe { cx, aggs, ring, n }
     }
 
     #[inline(always)]
@@ -869,10 +825,13 @@ impl<'a> Pipe<'a> {
 }
 
 /// Parse every record that starts in [start, end), both being record boundaries.
-#[inline(always)]
-fn parse_piece_impl<const A: bool>(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
+/// This is where the AVX2 and PCLMULQDQ features the scanner needs are enabled:
+/// the scanner and `fast` are `#[inline(always)]`, so their bodies land here.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
+unsafe fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
     let f = cx.f;
-    let (mut p, mut sc, mut qb) = (start, Scan::<A>::new(f, start), 0u64);
+    let (mut p, mut sc, mut qb) = (start, Scan::new(f, start), 0u64);
     while p < end {
         // The mapped file's pages are scattered; reach into the next one ahead of the parse.
         prefetch(f.as_ptr().wrapping_add(p + 2048));
@@ -887,7 +846,7 @@ fn parse_piece_impl<const A: bool>(cx: &Ctx, pipe: &mut Pipe, start: usize, end:
             None => match slow(f, p, end) {
                 Some((r, np)) => {
                     pipe.push(&r);
-                    (p, sc, qb) = (np, Scan::<A>::new(f, np), 0);
+                    (p, sc, qb) = (np, Scan::new(f, np), 0);
                 }
                 None => return,
             },
@@ -895,40 +854,17 @@ fn parse_piece_impl<const A: bool>(cx: &Ctx, pipe: &mut Pipe, start: usize, end:
     }
 }
 
-/// The same parse compiled for the CPU features the scoring box has (popcnt, BMI, PCLMUL, AVX2),
-/// chosen at run time; any other CPU runs the identical source built for the baseline target.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,popcnt,lzcnt,pclmulqdq,sse4.2")]
-unsafe fn parse_piece_native(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize) {
-    parse_piece_impl::<true>(cx, pipe, start, end)
-}
-
-fn native() -> bool {
-    is_x86_feature_detected!("avx2")
-        && is_x86_feature_detected!("bmi1")
-        && is_x86_feature_detected!("bmi2")
-        && is_x86_feature_detected!("popcnt")
-        && is_x86_feature_detected!("lzcnt")
-        && is_x86_feature_detected!("pclmulqdq")
-        && is_x86_feature_detected!("sse4.2")
-}
-
-fn parse_piece(cx: &Ctx, pipe: &mut Pipe, start: usize, end: usize, nat: bool) {
-    if nat {
-        unsafe { parse_piece_native(cx, pipe, start, end) }
-    } else {
-        parse_piece_impl::<false>(cx, pipe, start, end)
-    }
-}
-
 fn main() {
-    // Plain pages: a table touched in part must not be charged as whole 2 MB pages.
-    #[cfg(target_os = "linux")]
-    unsafe { prctl(41, 1, 0, 0, 0) }; // PR_SET_THP_DISABLE
+    // `prctl(PR_SET_THP_DISABLE)` is deliberately NOT called here. This repository
+    // measured it on all four tracks, on the board, as a time loss with almost no
+    // memory gain: every dense table we map writes all of its pages, so a huge page
+    // and its 512 base pages cost the same, and turning huge pages off only gives up
+    // the TLB benefit. It was reverted repo-wide, and the SIMD rewrite re-introduced
+    // it by accident; this removes it again. (No `prctl` declaration above, on
+    // purpose: without one, nobody can quietly add the call back.)
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
-    let nat = native();
     let rf = map(&format!("{data}/regions.csv"));
     let f = map(&format!("{data}/records.csv"));
 
@@ -938,7 +874,8 @@ fn main() {
     let tail = rf.strip_suffix(b"\n").unwrap_or(rf);
     let tail = tail.strip_suffix(b"\r").unwrap_or(tail);
     let ls = tail.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
-    let hint = tail[ls..].iter().take_while(|c| c.is_ascii_digit()).take(8).fold(0usize, |v, &d| v * 10 + (d - b'0') as usize);
+    let d = tail[ls..].iter().take_while(|c| c.is_ascii_digit());
+    let hint = d.take(8).fold(0usize, |v, &c| v * 10 + (c - b'0') as usize);
     let rarr = zeroed_u16((hint + 1).min(1 << 23));
     let codes = CodeTab::new();
     let rcut = cuts(rf, rstart.min(rf.len()), nt);
@@ -946,7 +883,7 @@ fn main() {
     let per = nchunk.div_ceil(nt).max(1);
     let got = on_threads(nt, |t| {
         let r = regions_part(rf, rcut[t], rcut[t + 1], &rarr, &codes);
-        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk), nat))
+        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk)))
     });
     let mut ok = got.iter().all(|g| g.0.ok);
     let mut prev: Option<u64> = None;
@@ -966,9 +903,9 @@ fn main() {
         over = regions_exact(rf, &rarr, &codes);
     }
     let big: HashMap<u64, u16> = over.into_iter().collect();
-    let mut present: Vec<(u32, usize)> = (0..4096).filter_map(|s| match codes.t[s].load(Relaxed) {
-        0 => None,
-        e => Some((e & 0xFF_FFFF, s)),
+    let mut present: Vec<(u32, usize)> = (0..4096).filter_map(|s| {
+        let e = codes.t[s].load(Relaxed);
+        (e != 0).then_some((e & 0xFF_FFFF, s))
     }).collect();
     present.sort_unstable();
     let ncodes = present.len();
@@ -978,33 +915,37 @@ fn main() {
     }
 
     // 2. Piece boundaries: LFs at even quote parity, found from the chunk parities.
-    let mut acc = 0u8;
-    let before: Vec<u8> = par.iter().map(|&p| { let b = acc; acc ^= p; b }).collect();
+    let (mut acc, mut before) = (0u8, Vec::with_capacity(par.len()));
+    for &p in &par {
+        before.push(acc);
+        acc ^= p;
+    }
     let start = first_boundary(f, 0, 0);
     let npieces = 8 * nt;
     let mut cut = vec![f.len(); npieces + 1];
     cut[0] = start;
     for i in 1..npieces {
         let c = ((start + (f.len() - start) * i / npieces) / STEP).min(nchunk.saturating_sub(1));
-        cut[i] = cut[i - 1].max(first_boundary(f, c * STEP, before.get(c).copied().unwrap_or(0)));
+        let (at, q) = (c * STEP, before.get(c).copied().unwrap_or(0));
+        cut[i] = cut[i - 1].max(first_boundary(f, at, q));
     }
 
     // 3. Parse the pieces. A run that needs the exact name map is repeated with it.
     let nco = ncodes + 1;
     let run = |slow: bool| {
         let (names, bits) = (Names::new(slow), Bits::new(nco));
-        let cx = Ctx { f, rarr: &rarr, big: &big, rank: &rank, names: &names, bits: &bits };
+        let (rarr, big, rank) = (&rarr, &big, &rank);
+        let (names, bits) = (&names, &bits);
+        let cx = Ctx { f, rarr, big, rank, names, bits };
         let next = AtomicUsize::new(0);
         let parts = on_threads(nt, |t| {
             populate(&names.table, t, nt);
             populate(&bits.w, t, nt);
             let mut pipe = Pipe::new(&cx, nco);
-            loop {
-                let k = next.fetch_add(1, Relaxed);
-                if k >= npieces {
-                    break;
-                }
-                parse_piece(&cx, &mut pipe, cut[k], cut[k + 1], nat);
+            let mut k = next.fetch_add(1, Relaxed);
+            while k < npieces {
+                unsafe { parse_piece(&cx, &mut pipe, cut[k], cut[k + 1]) };
+                k = next.fetch_add(1, Relaxed);
             }
             pipe.finish()
         });

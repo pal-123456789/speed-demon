@@ -24,20 +24,16 @@
 //!   an integer *is* the required (hour ascending, endpoint ascending) order
 //!   and the phase never touches the strings.
 //!
-//! * **The group table is a flat `Vec`.** Groups are appended in discovery
-//!   order and sorted in place at the end of the slice, so nothing is mirrored
-//!   into a second array the way `map.into_iter().collect()` would.
+//! * **A worker's result is a block per hour.** Each worker keeps its own
+//!   blocks and phase 2 walks one HOUR at a time across all workers, so no
+//!   merge is ever serial and no hour waits for another. The traversal is a
+//!   method — `Part::each` — rather than a loop written at each call site, so
+//!   the counting pass, the scatter and the size pass cannot drift apart.
 //!
 //! * **Twelve byte ranges, twelve threads, no shared state beyond the table.**
 //!   The file is cut at `size*i/12` and each worker seeks to its slice. The
 //!   split is by byte, not by line, so the boundary rule is spelled out at
 //!   `scan_with`.
-//!
-//! * **The serial merge is gone.** Record blocks are per (worker, hour), and
-//!   the rank pass is a sort of the shared table, so there is no name union and
-//!   no renumbering pass between the parse and the percentiles. The row blocks
-//!   are produced by the twelve workers and consumed by whichever of the
-//!   twelve claims an hour, so an hour never waits for another.
 //!
 //! * **Streamed, never slurped.** A worker sees its slice through one buffer it
 //!   recycles and parses lines straight out of it, so the file is copied once
@@ -49,6 +45,10 @@
 //!   hours straight into their own slice of it. There is no per-hour string, no
 //!   writer thread and no serial write to queue on the file's lock, and the only
 //!   copy of the text is the file's own page cache.
+//!
+//! * **Every error path is one function.** `die` reports and leaves with a
+//!   non-zero status, so a failed syscall or an over-filled table cannot be
+//!   mistaken for a slow run and cannot be silently swallowed.
 //!
 //! * **Merge order cannot matter.** Percentiles are order statistics of a
 //!   group's latency multiset and counts are sums, so any merge order yields the
@@ -79,23 +79,6 @@ const SLACK: usize = 64;
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 const SPARE: usize = 4096;
 
-/// One line, in FOUR bytes: `packed = lat << KEY_BITS | key`, where `key` is the
-/// endpoint id with the 5xx flag in its low bit.
-///
-/// The two fields share one word because latency is microseconds and `key` is
-/// small, so the pair fits in 32 bits -- halving the record store from 24.8 MB to
-/// 12.4 MB, which is most of this track's peak. Sorting is by the low bits, so a
-/// group is still a contiguous run and the scan still never looks one up.
-///
-/// **A record that does not fit is NOT dropped and NOT truncated.** Neither the
-/// endpoint count nor the latency range is guaranteed by the spec, so both are
-/// checked at run time and anything too large goes to `Sink::wide` instead. That
-/// is what makes this exact for any input rather than only for seed 1 -- an
-/// unguarded shift here would silently corrupt the key.
-struct Rec {
-    packed: u32,
-}
-
 /// Bits 0..KEY_BITS of a packed record hold `key`; everything above holds `lat`.
 /// `key = (id << 1) | err`, so this is a mask over endpoint ids and the flag.
 ///
@@ -118,6 +101,20 @@ const SLOTS: usize = 1 << 12;
 /// to every one of its slots needs only 4096·125 = 512,000 bytes -- and the last
 /// name can still be read 64 bytes wide.
 const ARENA: usize = 1 << 19;
+
+/// The `(latency, key)` pairs a packed word cannot hold.
+type Wide = Vec<(u32, u32)>;
+/// One worker's hour: its ordinal, its own 13 timestamp bytes, its packed
+/// records, and the records that did not fit a packed word.
+type Block = (u32, [u8; 13], Vec<u32>, Wide);
+/// An output row before it is text: endpoint rank, count, p50, p95, p99, 5xx.
+type Row = (u32, u32, u32, u32, u32, u32);
+
+/// The program's one error path: report and leave with a non-zero status.
+fn die(msg: &str) -> ! {
+    eprintln!("[track-a] {msg}");
+    exit(1)
+}
 
 /// Endpoint names to ids, in one table every worker shares.
 ///
@@ -148,13 +145,7 @@ unsafe impl Sync for Names {}
 
 impl Names {
     fn new() -> Names {
-        Names {
-            slot: (0..SLOTS).map(|_| AtomicU64::new(0)).collect(),
-            used: AtomicUsize::new(0),
-            // Capacity, not length: the pages the arena never uses are never
-            // touched, and untouched pages are not charged to peak memory.
-            arena: UnsafeCell::new(Vec::with_capacity(ARENA + SLACK)),
-        }
+        Names { slot: (0..SLOTS).map(|_| AtomicU64::new(0)).collect(), used: AtomicUsize::new(0), arena: UnsafeCell::new(Vec::with_capacity(ARENA + SLACK)) }
     }
 
     /// Where the arena starts. The `Vec` is never grown, so this never moves.
@@ -170,12 +161,7 @@ impl Names {
     /// for exactly as long as the id is used.
     #[inline]
     fn at(&self, v: u64) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                self.base().add(v as u32 as usize),
-                (v >> 32) as usize,
-            )
-        }
+        unsafe { core::slice::from_raw_parts(self.base().add(v as u32 as usize), (v >> 32) as usize) }
     }
 
     /// The id of `s`, adding it to the arena and the table if it is new.
@@ -189,30 +175,19 @@ impl Names {
                 // slot that reads as free.
                 let at = self.used.fetch_add(s.len(), Ordering::Relaxed) + 1;
                 if at + s.len() > ARENA {
-                    eprintln!("[track-a] endpoint arena overflow");
-                    exit(1);
+                    die("endpoint arena overflow");
                 }
                 // SAFETY: `at` is this thread's own slice and the slot is still
                 // free, so nothing else can read those bytes yet.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(s.as_ptr(), self.base().add(at), s.len())
-                };
+                unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), self.base().add(at), s.len()) };
                 let packed = (s.len() as u64) << 32 | at as u64;
-                match self.slot[i].compare_exchange(
-                    0,
-                    packed,
-                    Ordering::Release,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => return i as u32,
-                    // Lost the race for the slot. The value the exchange handed
-                    // back is the winner's; if it is the same name this is done,
-                    // and if it is not, keep probing from the next slot.
-                    Err(won) => {
-                        if same(self.at(won), s) {
-                            return i as u32;
-                        }
-                    }
+                // A failed exchange hands back the winner's value; if that is
+                // the same name this line is done, and if it is not, keep
+                // probing from the next slot. The winner copied its name into
+                // the arena before publishing, so the compare is exact.
+                let won = self.slot[i].compare_exchange(0, packed, Ordering::Release, Ordering::Relaxed);
+                if won.is_ok() || same(self.at(won.unwrap_err()), s) {
+                    return i as u32;
                 }
             } else if same(self.at(v), s) {
                 return i as u32;
@@ -234,21 +209,15 @@ fn load8(s: &[u8]) -> u64 {
 /// A cheap key for a name: its length, its first eight bytes and its last eight.
 /// Past sixteen bytes the middle is not in the key at all, which costs an extra
 /// compare on a collision and never correctness, and it makes the cost constant
-/// on names that run to 125 bytes.
+/// on names that run to 125 bytes. A name shorter than eight bytes is masked to
+/// its length, and the mask is zero for a name of no bytes at all.
 #[inline]
 fn name_key(s: &[u8]) -> u64 {
     let n = s.len();
-    let head = if n >= 8 {
-        load8(s)
-    } else if n == 0 {
-        0
-    } else {
-        load8(s) & ((1u64 << (8 * n)) - 1)
-    };
+    let head = if n >= 8 { load8(s) } else { load8(s) & ((1u64 << (8 * n)) - 1) };
     let tail = if n >= 8 { load8(&s[n - 8..]) } else { head };
     let h = (n as u64).rotate_left(5) ^ head;
-    (h.wrapping_mul(0x517c_c1b7_2722_0a95).rotate_left(5) ^ tail)
-        .wrapping_mul(0x517c_c1b7_2722_0a95)
+    (h.wrapping_mul(0x517c_c1b7_2722_0a95).rotate_left(5) ^ tail).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
 /// Bit `i` of the result is set when byte `i` of the 32 at `a` equals byte `i`
@@ -261,11 +230,7 @@ fn name_key(s: &[u8]) -> u64 {
 #[inline]
 fn eq32(a: *const u8, b: *const u8) -> u32 {
     use core::arch::x86_64::{_mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8};
-    unsafe {
-        let x = _mm256_loadu_si256(a as *const _);
-        let y = _mm256_loadu_si256(b as *const _);
-        _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, y)) as u32
-    }
+    unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(a as *const _), _mm256_loadu_si256(b as *const _))) as u32 }
 }
 
 /// Byte-exact confirmation of a stored name against `s`.
@@ -286,14 +251,12 @@ fn same(x: &[u8], s: &[u8]) -> bool {
     }
     // SAFETY: see the doc comment; ARENA keeps 64 spare bytes and every input
     // name has 64 readable bytes behind it.
-    let m = unsafe {
-        eq32(x.as_ptr(), s.as_ptr()) as u64
-            | ((eq32(x.as_ptr().add(32), s.as_ptr().add(32)) as u64) << 32)
-    };
+    let m = unsafe { eq32(x.as_ptr(), s.as_ptr()) as u64 | ((eq32(x.as_ptr().add(32), s.as_ptr().add(32)) as u64) << 32) };
     let keep = u64::MAX >> (64 - n);
     (m & keep) == keep
 }
 
+/// A portable build has no wide loads: compare the slices.
 #[cfg(not(target_arch = "x86_64"))]
 #[inline]
 fn same(x: &[u8], s: &[u8]) -> bool {
@@ -308,11 +271,8 @@ fn same(x: &[u8], s: &[u8]) -> bool {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 unsafe fn find32(p: *const u8, c: u8) -> u32 {
-    use core::arch::x86_64::{
-        _mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8,
-    };
-    let v = _mm256_loadu_si256(p as *const _);
-    _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(c as i8))) as u32
+    use core::arch::x86_64::{_mm256_cmpeq_epi8, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_set1_epi8};
+    _mm256_movemask_epi8(_mm256_cmpeq_epi8(_mm256_loadu_si256(p as *const _), _mm256_set1_epi8(c as i8))) as u32
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -325,7 +285,7 @@ unsafe fn find32(p: *const u8, c: u8) -> u32 {
     m
 }
 
-/// Index of the next `\n` in `b`, 32 bytes at a time.
+/// Index of the next `\n` in `b`, 32 bytes at a time, or `None`.
 ///
 /// Every byte of the 238 MB goes through here, and the 8-byte SWAR loop this
 /// replaces took nine iterations for an average 77-byte line. A `\n` found in
@@ -334,43 +294,27 @@ unsafe fn find32(p: *const u8, c: u8) -> u32 {
 /// this slice".
 #[inline]
 fn nl(b: &[u8]) -> Option<usize> {
-    if b.is_empty() {
-        return None;
-    }
     let mut i = 0;
-    loop {
+    while i < b.len() {
         // SAFETY: 32 readable bytes from `b.as_ptr() + i`, see `find32`.
         let m = unsafe { find32(b.as_ptr().add(i), b'\n') };
         if m != 0 {
             let p = i + m.trailing_zeros() as usize;
-            return if p < b.len() { Some(p) } else { None };
+            return (p < b.len()).then_some(p);
         }
         i += 32;
-        if i >= b.len() {
-            return None;
-        }
     }
-}
-
-/// Index of the next space at or after `from`, or `None`.
-#[inline]
-fn next_space(buf: &[u8], from: usize) -> Option<usize> {
-    buf[from..].iter().position(|&c| c == b' ').map(|p| p + from)
+    None
 }
 
 /// Checked decimal parse. The spec guarantees the grammar, so a malformed field
 /// cannot occur; returning 0 rather than panicking keeps a surprise from
-/// becoming a non-zero exit.
+/// becoming a non-zero exit. It is written as a `take_while`/`fold` pair because
+/// rustc emits the same six-instruction loop either way -- checked on this
+/// toolchain with `--emit asm` -- and the iterator says where it stops.
 #[inline]
-fn parse_u32(buf: &[u8]) -> u32 {
-    let mut v: u32 = 0;
-    for &b in buf {
-        if !b.is_ascii_digit() {
-            break;
-        }
-        v = v.wrapping_mul(10).wrapping_add((b - b'0') as u32);
-    }
-    v
+fn parse_u32(b: &[u8]) -> u32 {
+    b.iter().take_while(|c| c.is_ascii_digit()).fold(0u32, |v, &c| v.wrapping_mul(10).wrapping_add((c - b'0') as u32))
 }
 
 /// `YYYY-MM-DDTHH` as one monotone integer. Each field keeps its own radix, so
@@ -386,45 +330,28 @@ fn hour_ord(h: &[u8]) -> u32 {
     ((y * 100 + mo) * 100 + dy) * 24 + hh
 }
 
-/// One worker's result. Nothing is aggregated in the scan: the worker keeps its
-/// raw per-hour record blocks and phase 2 (below, in `main`) walks one HOUR at a
-/// time across all workers, so no merge is ever serial.
+/// One worker's whole result plus the little state its line parser carries.
+///
+/// `blocks` holds one entry per DISTINCT hour the worker saw. Keying a block by
+/// hour rather than opening a new one at every hour change is what keeps the
+/// group count at the output's own size: the generator interleaves eight shards,
+/// so the corpus has 1054 hour runs but only 72 distinct hours, and one block
+/// per run would multiply the groups by the number of runs.
 struct Part {
-    recs: Vec<Vec<Rec>>,
-    /// Records a packed word cannot hold: `(latency, key)`, one list per hour
-    /// rank. A per-hour list rather than one list tagged with its hour, because
-    /// this holds about 2.6% of the corpus and scanning all of it once per hour
-    /// would be 69M comparisons over the run.
-    wide: Vec<Vec<(u32, u32)>>,
-    hours: Vec<(u32, [u8; 13])>,
-}
-
-/// The per-worker scan state, in one struct so the line parser can be a method.
-struct Sink<'a> {
-    /// The one endpoint table, shared by every worker.
-    names: &'a Names,
-    /// One record block per DISTINCT hour, indexed by that hour's rank in
-    /// `hours`. Keying a block by hour rather than opening a new one at every
-    /// hour change is what keeps the group count at the output's own size: the
-    /// generator interleaves eight shards, so the corpus has 1054 hour runs but
-    /// only 72 distinct hours, and one block per run would multiply the groups
-    /// by the number of runs.
-    recs: Vec<Vec<Rec>>,
-    wide: Vec<Vec<(u32, u32)>>,
-    /// Distinct hours, each with the 13 bytes it was parsed from.
-    hours: Vec<(u32, [u8; 13])>,
+    blocks: Vec<Block>,
+    /// The 13 bytes of the hour the last line was in.
     hour: [u8; 13],
+    /// Its ordinal, and its rank in `blocks`: which block is open.
     ord: u32,
-    /// Rank of the current hour in `hours`: which block is open.
     hrank: u32,
 }
 
-impl Sink<'_> {
-    /// Fold one line into the group table. The hot path allocates nothing but
-    /// the latency push: the key, the endpoint lookup and the hour ordinal all
-    /// reuse state earlier lines already built.
+impl Part {
+    /// Fold one line into this worker's blocks. The hot path allocates nothing
+    /// but the record push: the key, the endpoint lookup and the hour ordinal
+    /// all reuse state earlier lines already built.
     #[inline]
-    fn take(&mut self, line: &[u8]) {
+    fn take(&mut self, names: &Names, line: &[u8]) {
         if line.len() < 32 {
             return;
         }
@@ -435,55 +362,55 @@ impl Sink<'_> {
         // Reading the line from the right therefore never walks the endpoint --
         // the longest one in the catalogue is over 200 bytes -- it walks the
         // four-to-ten latency digits instead.
-        let s1 = match next_space(line, 28) {
-            Some(i) => i,
-            None => return,
-        };
-        let s2 = match line.iter().rposition(|&c| c == b' ') {
-            Some(i) if i > s1 + 4 => i - 4,
-            _ => return,
-        };
-
+        let Some(s1) = line[28..].iter().position(|&c| c == b' ').map(|p| p + 28) else { return };
+        let Some(s2) = line.iter().rposition(|&c| c == b' ').filter(|&i| i > s1 + 4).map(|i| i - 4) else { return };
         // `status` is always exactly three digits, so 5xx is decided entirely by
-        // its first digit. That replaces a three-digit parse -- two subtractions,
-        // two multiplies, two adds and a range test -- with one byte compare, on
-        // every one of 3.1 M lines. It is exactly equivalent: 500..=599 is
-        // precisely the statuses whose leading digit is '5'.
+        // its first digit: 500..=599 is precisely the statuses whose leading
+        // digit is '5'. That replaces a three-digit parse on every one of 3.1M
+        // lines with one byte compare.
         let err = (line[s2 + 1] == b'5') as u32;
         let latency = parse_u32(&line[s2 + 5..]);
-
         // The hour is part of the key, so it is only re-parsed where a run of
         // identical hours ends -- and that is also where the block it belongs
         // to stops growing.
         if self.hour[..] != line[..13] {
             self.hour.copy_from_slice(&line[..13]);
             self.ord = hour_ord(&self.hour);
-            let mut hi = 0;
-            while hi < self.hours.len() && self.hours[hi].0 != self.ord {
-                hi += 1;
+            self.hrank = self.blocks.iter().position(|b| b.0 == self.ord).unwrap_or(usize::MAX) as u32;
+            if self.hrank == u32::MAX {
+                self.hrank = self.blocks.len() as u32;
+                self.blocks.push((self.ord, self.hour, Vec::new(), Vec::new()));
             }
-            if hi == self.hours.len() {
-                self.hours.push((self.ord, self.hour));
-                self.recs.push(Vec::new());
-                self.wide.push(Vec::new());
-            }
-            self.hrank = hi as u32;
         }
-
         // One shared table: the id is the slot, so there is no per-worker name
         // list to merge and no id to renumber before the names mean anything.
-        let id = self.names.id(&line[s1 + 1..s2]);
-
-        // The whole group lookup, replaced by one sequential append. The hour
-        // is not in the record: it is the block the record lands in.
-        let key = (id << 1) | err;
-        let h = self.hrank as usize;
+        let key = (names.id(&line[s1 + 1..s2]) << 1) | err;
+        // A record that does not fit is NOT dropped and NOT truncated. Neither
+        // the endpoint count nor the latency range is guaranteed by the spec, so
+        // both are checked at run time and anything too large goes to the side
+        // list. That is what makes this exact for any input rather than only for
+        // seed 1 -- an unguarded shift here would silently corrupt the key.
+        let b = &mut self.blocks[self.hrank as usize];
         if latency < LAT_MAX {
-            self.recs[h].push(Rec {
-                packed: (latency << KEY_BITS) | key,
-            });
+            b.2.push(latency << KEY_BITS | key)
         } else {
-            self.wide[h].push((latency, key));
+            b.3.push((latency, key))
+        }
+    }
+
+    /// Calls `f(rank, key, latency)` for every record of the hour whose block
+    /// has local rank `lr` here, packed records first and then the side list.
+    /// `usize::MAX` means this worker never saw the hour at all.
+    #[inline]
+    fn each(&self, lr: usize, rank: &[u32], mut f: impl FnMut(u32, u32, u32)) {
+        if lr == usize::MAX {
+            return;
+        }
+        for &p in &self.blocks[lr].2 {
+            f(rank[((p & KEY_MASK) >> 1) as usize], p & KEY_MASK, p >> KEY_BITS);
+        }
+        for &(l, key) in &self.blocks[lr].3 {
+            f(rank[(key >> 1) as usize], key, l);
         }
     }
 }
@@ -495,19 +422,7 @@ impl Sink<'_> {
 #[inline]
 unsafe fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: i32, off: usize) -> isize {
     let ret: isize;
-    core::arch::asm!(
-        "syscall",
-        inlateout("rax") 9isize => ret,
-        in("rdi") addr,
-        in("rsi") len,
-        in("rdx") prot,
-        in("r10") flags,
-        in("r8") fd,
-        in("r9") off,
-        lateout("rcx") _,
-        lateout("r11") _,
-        options(nostack, preserves_flags)
-    );
+    core::arch::asm!("syscall", inlateout("rax") 9isize => ret, in("rdi") addr, in("rsi") len, in("rdx") prot, in("r10") flags, in("r8") fd, in("r9") off, lateout("rcx") _, lateout("r11") _, options(nostack, preserves_flags));
     ret
 }
 
@@ -536,7 +451,7 @@ fn map_file(path: &str) -> Option<&'static [u8]> {
     if len == 0 {
         return None;
     }
-    let total = len + SPARE;
+    let (total, fd) = (len + SPARE, f.as_raw_fd());
     // SAFETY: the syscalls are the documented ABI and both lengths are real.
     unsafe {
         // PROT_READ, MAP_PRIVATE|MAP_ANONYMOUS: a zeroed region one page larger
@@ -547,7 +462,7 @@ fn map_file(path: &str) -> Option<&'static [u8]> {
         }
         // MAP_FIXED over the front. A failure would leave the anonymous zeros in
         // place, which would parse as an empty file, so treat it as no map.
-        if sys_mmap(base as usize, len, 1, 2 | 0x10, f.as_raw_fd(), 0) < 0 {
+        if sys_mmap(base as usize, len, 1, 2 | 0x10, fd, 0) < 0 {
             return None;
         }
         Some(core::slice::from_raw_parts(base as *const u8, total))
@@ -575,11 +490,7 @@ fn out_map(f: &File, len: u64) -> Option<*mut u8> {
     // SAFETY: the fd is open for writing, the length is real, and nothing else
     // maps this file.
     let ret = unsafe { sys_mmap(0, len as usize, 3, 1, f.as_raw_fd(), 0) };
-    if ret < 0 {
-        None
-    } else {
-        Some(ret as *mut u8)
-    }
+    (ret >= 0).then_some(ret as *mut u8)
 }
 
 #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
@@ -587,8 +498,21 @@ fn out_map(_f: &File, _len: u64) -> Option<*mut u8> {
     None
 }
 
-/// Group the half-open byte slice `[start, end)` of `path` and return its rows
-/// already key-sorted.
+/// Run `f` on `NTHREADS` workers and collect their results in worker order.
+///
+/// One pool for all three phases: the phase-1 slices are disjoint byte ranges,
+/// and phases 2 and 3 hand out one hour at a time from an atomic counter, so no
+/// worker owns anything another one needs. A worker that panics cannot do so in
+/// the scored build (`panic = "abort"`), and is reported here if it ever does.
+fn par<T: Send>(f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    thread::scope(|s| {
+        let f = &f;
+        let hs: Vec<_> = (0..NTHREADS).map(|i| s.spawn(move || f(i))).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or_else(|_| die("worker failed"))).collect()
+    })
+}
+
+/// Group the half-open byte slice `[start, end)` of `path` and return its parts.
 ///
 /// Split by byte, so the two ends of the slice need opposite treatment. The
 /// worker at `start > 0` does not own the line that straddles `start`: it drops
@@ -603,64 +527,31 @@ fn out_map(_f: &File, _len: u64) -> Option<*mut u8> {
 ///
 /// `len` is the file's own length, which is NOT `mapped.len()`: the mapping runs
 /// one page past the file so the fixed windows stay readable.
-fn scan_with(
-    path: &str,
-    start: u64,
-    end: u64,
-    mapped: Option<&[u8]>,
-    len: u64,
-    names: &Names,
-) -> Part {
-    let mut s = Sink {
-        names,
-        recs: Vec::new(),
-        wide: Vec::new(),
-        hours: Vec::new(),
-        hour: [0xff; 13],
-        ord: 0,
-        hrank: 0,
-    };
-    let out = Part {
-        recs: Vec::new(),
-        wide: Vec::new(),
-        hours: Vec::new(),
-    };
+fn scan_with(path: &str, start: u64, end: u64, mapped: Option<&[u8]>, len: u64, names: &Names) -> Part {
+    let mut s = Part { blocks: Vec::new(), hour: [0xff; 13], ord: 0, hrank: 0 };
     if start >= end {
-        return out;
+        return s;
     }
 
     // Mapped path: walk the page cache in place. No buffer, no refill, no copy.
-    //
-    // The line rules are the read loop's, restated rather than shared: a worker
-    // at start > 0 drops the line straddling start, it owns every line whose
-    // FIRST byte is <= end, and it stops before a line that begins after it. The
-    // next worker drops that straddling line, so the two rules meet exactly --
-    // dropping on the left and <= on the right is a partition, no line counted
-    // twice and none lost.
     if let Some(m) = mapped {
-        let size = len as usize;
-        let mut i = start as usize;
-        let mut skip = i > 0;
+        let (size, mut i, mut skip) = (len as usize, start as usize, start > 0);
         while i < size {
-            let from = i;
-            let k = match nl(&m[i..size]) {
-                Some(k) => k,
-                None => break,
-            };
+            let Some(k) = nl(&m[i..size]) else { break };
+            let at = i as u64;
+            i += k + 1;
             // `at` is the line's FIRST byte, which is what the ownership rule is
             // stated over. Using the newline's position instead shifts the test
             // by the line's length and silently gives the straddling line to the
             // wrong worker -- wrong output, not slow output, and the Docker hash
             // is what caught it.
-            let at = from as u64;
-            i += k + 1;
-            if skip {
-                skip = false; // tail of a line another worker owns
-            } else if at > end {
-                return s.finish(out);
-            } else {
-                s.take(&m[from..from + k]);
+            if !skip && at > end {
+                return s;
             }
+            if !skip {
+                s.take(names, &m[at as usize..at as usize + k]);
+            }
+            skip = false;
         }
         // A file that does not end in `\n` leaves its last line unterminated:
         // `nl` cannot see it and no later worker would own it. It is taken under
@@ -669,69 +560,48 @@ fn scan_with(
         // at `end` truncates a straddling line, which is what the first version
         // of this did and the Docker hash caught.
         if !skip && i < size && (i as u64) <= end {
-            s.take(&m[i..size]);
+            s.take(names, &m[i..size]);
         }
-        return s.finish(out);
-    }
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[track-a] cannot open {path}: {e}");
-            exit(1);
-        }
-    };
-    if let Err(e) = file.seek(SeekFrom::Start(start)) {
-        eprintln!("[track-a] seek failed: {e}");
-        exit(1);
+        return s;
     }
 
+    let mut file = File::open(path).unwrap_or_else(|e| die(&format!("cannot open {path}: {e}")));
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        die("seek failed");
+    }
     // `have` is the valid bytes at the front of buf and `cap` is where a read
     // may stop; buf[cap..] stays zero so a name's 64-byte window is readable.
-    let mut buf = vec![0u8; CHUNK + SLACK];
-    let mut cap = CHUNK;
-    let mut have = 0usize; // valid bytes at the front of buf
-    let mut pos = start; // absolute offset of buf[0]
-    let mut skip = start > 0; // still inside the previous worker's last line
-
+    let (mut buf, mut cap, mut have, mut pos, mut skip) = (vec![0u8; CHUNK + SLACK], CHUNK, 0usize, start, start > 0);
     'outer: loop {
         if have == cap {
-            buf.resize(cap + CHUNK, 0); // pathological line, never in practice
+            buf.resize(cap + CHUNK, 0);
             cap += CHUNK;
+        } // a pathological line
+        let n = file.read(&mut buf[have..cap]).unwrap_or_else(|e| die(&format!("read error: {e}")));
+        if n == 0 {
+            // EOF. A file that does not end in `\n` leaves its last line
+            // unterminated in the buffer: the loop above cannot see it and no
+            // later worker will either (it would drop it as residue). It is
+            // taken here under the same rule the loop uses — own it when it
+            // starts at or before `end`, and only if the first-line skip has
+            // already happened.
+            if !skip && have > 0 && pos <= end {
+                s.take(names, &buf[..have]);
+            }
+            break;
         }
-        let n = match file.read(&mut buf[have..cap]) {
-            Ok(0) => {
-                // EOF. A file that does not end in `\n` leaves its last line
-                // unterminated in the buffer: the loop above cannot see it and
-                // no later worker will either (it would drop it as residue). It
-                // is taken here under the same rule the loop uses — own it when
-                // it starts at or before `end`, and only if the first-line skip
-                // has already happened.
-                if !skip && have > 0 && pos <= end {
-                    s.take(&buf[..have]);
-                }
-                break;
-            }
-            Ok(n) => n,
-            Err(e) => {
-                eprintln!("[track-a] read error: {e}");
-                exit(1);
-            }
-        };
         have += n;
-
         let mut cur = 0usize;
         while let Some(i) = nl(&buf[cur..have]) {
-            let from = cur;
-            let at = pos + cur as u64;
+            let (from, at) = (cur, pos + cur as u64);
             cur += i + 1;
-            if skip {
-                skip = false; // tail of a line another worker owns
-                continue;
-            }
-            if at > end {
+            if !skip && at > end {
                 break 'outer;
             }
-            s.take(&buf[from..from + i]);
+            if !skip {
+                s.take(names, &buf[from..from + i]);
+            }
+            skip = false;
         }
         // Carry the unterminated tail to the front of the buffer; it is a
         // handful of bytes, and buf[0] stays aligned with a line start.
@@ -739,17 +609,7 @@ fn scan_with(
         pos += cur as u64;
         have -= cur;
     }
-
-    s.finish(out)
-}
-
-impl Sink<'_> {
-    fn finish(self, mut out: Part) -> Part {
-        out.recs = self.recs;
-        out.wide = self.wide;
-        out.hours = self.hours;
-        out
-    }
+    s
 }
 
 /// p50/p95/p99 by nearest rank, `ceil(p*n/100) == (p*n + 99)/100`. Each selection
@@ -765,34 +625,15 @@ fn pct(a: &mut [u32]) -> (u32, u32, u32) {
     (p50, p95, p99)
 }
 
-/// One output row, before it is text.
-///
-/// Keeping the six numbers instead of the rendered line is what lets an hour's
-/// exact text size be known without formatting it. The size pass and the text
-/// pass then agree by construction, the offsets are all known before a byte is
-/// written, and the per-hour `Vec<u8>` (about 10 MB over the run) leaves the
-/// peak entirely.
-struct Row {
-    /// The endpoint's rank, so the name is one indexed load in the text pass.
-    e: u32,
-    n: u32,
-    p50: u32,
-    p95: u32,
-    p99: u32,
-    err: u32,
-}
-
 /// Decimal digits in `u32`.
 ///
 /// `log10(v)` is at most `bit_length(v)·log10(2)`, and 1233/4096 is log10(2) to
 /// about 0.0006, so one compare against a power of ten fixes the rounding. `| 1`
 /// is what keeps zero at one digit rather than none. Called twice per printed
 /// number -- once to size it and once to place it.
+const P10: [u32; 10] = [1, 10, 100, 1000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000];
 #[inline]
 fn width(v: u32) -> usize {
-    const P10: [u32; 10] = [
-        1, 10, 100, 1000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000, 1_000_000_000,
-    ];
     let t = ((32 - (v | 1).leading_zeros()) as usize * 1233) >> 12;
     t + ((v | 1) >= P10[t]) as usize
 }
@@ -813,6 +654,17 @@ fn put_u64(dst: &mut [u8], at: usize, mut v: u32) {
     }
 }
 
+/// Write " " and `v` at `dst[at..]` and return the offset just past it. The
+/// numbers of a row are emitted by this one call, and the size pass adds up the
+/// same `1 + width(v)`.
+#[inline]
+fn num(dst: &mut [u8], at: usize, v: u32) -> usize {
+    let w = width(v);
+    dst[at] = b' ';
+    put_u64(dst, at + 1, v);
+    at + 1 + w
+}
+
 #[cfg(target_os = "linux")]
 extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
@@ -831,9 +683,7 @@ extern "C" {
 /// disables nothing here anyway.
 #[cfg(target_os = "linux")]
 fn tune_allocator() {
-    unsafe {
-        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
-    }
+    unsafe { mallopt(-3, 1 << 16) };
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -843,82 +693,35 @@ fn main() {
     tune_allocator();
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
-    let input = format!("{data}/requests.log");
-    let output = format!("{outd}/summary.txt");
+    let (input, output) = (format!("{data}/requests.log"), format!("{outd}/summary.txt"));
+    let size = File::open(&input).map(|f| f.metadata().map(|m| m.len()).unwrap_or(0)).unwrap_or_else(|e| die(&format!("cannot open {input}: {e}")));
 
-    let size = match File::open(&input) {
-        Ok(f) => f.metadata().map(|m| m.len()).unwrap_or(0),
-        Err(e) => {
-            eprintln!("[track-a] cannot open {input}: {e}");
-            exit(1);
-        }
-    };
-
-    // ── twelve slices, one sorted row list each ─────────────────────────────
+    // ── twelve slices, one block list each ──────────────────────────────────
     // Mapped once and shared: read-only MAP_PRIVATE file pages stay in the page
     // cache and are not charged to the process, so this costs no memory, and the
     // parse then walks the file in place instead of copying it through a buffer.
     // `None` on any failure and every worker falls back to buffered reads.
     let names = Names::new();
     let map = map_file(&input);
-    let parts: Vec<Part> = thread::scope(|s| {
-        let path = input.as_str();
-        let names = &names;
-        let mut handles = Vec::with_capacity(NTHREADS);
-        for i in 0..NTHREADS {
-            let (n, k) = (size, NTHREADS as u64);
-            let (a, b) = (n * i as u64 / k, n * (i as u64 + 1) / k);
-            let m = map;
-            handles.push(s.spawn(move || scan_with(path, a, b, m, size, names)));
-        }
-        handles
-            .into_iter()
-            .map(|h| match h.join() {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!("[track-a] worker failed");
-                    exit(1);
-                }
-            })
-            .collect()
-    });
+    let parts: Vec<Part> = par(|i| scan_with(&input, size * i as u64 / NTHREADS as u64, size * (i as u64 + 1) / NTHREADS as u64, map, size, &names));
 
     // ── one global endpoint ranking, and nothing to merge ───────────────────
     // The slot ids are dense enough for the record, so the only global step is
     // the byte order the output needs: sort the table's names once and turn each
     // slot into its rank. There is no per-worker table to union.
-    let mut order: Vec<(u64, u32)> = Vec::with_capacity(SLOTS);
-    for i in 0..SLOTS {
-        let v = names.slot[i].load(Ordering::Relaxed);
-        if v != 0 {
-            order.push((v, i as u32));
-        }
-    }
+    let mut order: Vec<(u64, u32)> = (0..SLOTS).map(|i| (names.slot[i].load(Ordering::Relaxed), i as u32)).filter(|&(v, _)| v != 0).collect();
     order.sort_unstable_by(|a, b| names.at(a.0).cmp(names.at(b.0)));
     let mut rank = vec![0u32; SLOTS];
-    let mut names_by_rank: Vec<&[u8]> = Vec::with_capacity(order.len());
-    for &(v, slot) in &order {
-        rank[slot as usize] = names_by_rank.len() as u32;
-        names_by_rank.push(names.at(v));
-    }
+    order.iter().enumerate().for_each(|(r, &(_, slot))| rank[slot as usize] = r as u32);
+    let names_by_rank: Vec<&[u8]> = order.iter().map(|&(v, _)| names.at(v)).collect();
     let ne = names_by_rank.len();
+    drop(order);
 
     // Global hour table: distinct hours, and each worker's local rank for it.
-    let mut hours: Vec<(u32, [u8; 13])> = parts
-        .iter()
-        .flat_map(|p| p.hours.iter().copied())
-        .collect();
+    let mut hours: Vec<(u32, [u8; 13])> = parts.iter().flat_map(|p| p.blocks.iter().map(|b| (b.0, b.1))).collect();
     hours.sort_unstable();
     hours.dedup();
-    let hloc: Vec<Vec<usize>> = parts
-        .iter()
-        .map(|p| {
-            hours
-                .iter()
-                .map(|h| p.hours.iter().position(|x| x.0 == h.0).unwrap_or(usize::MAX))
-                .collect()
-        })
-        .collect();
+    let hloc: Vec<Vec<usize>> = parts.iter().map(|p| hours.iter().map(|h| p.blocks.iter().position(|b| b.0 == h.0).unwrap_or(usize::MAX)).collect()).collect();
 
     // ── phase 2: one hour at a time, on every thread ────────────────────────
     // An hour's records (about 43k) are counted into endpoint groups, scattered
@@ -926,125 +729,72 @@ fn main() {
     // claims the hour. Each row carries the exact text size of its hour with it,
     // so every output offset is known before a byte is formatted.
     let next = AtomicUsize::new(0);
-    let done: Vec<Vec<(usize, Vec<Row>, u64)>> = thread::scope(|s| {
-        let hs: Vec<_> = (0..NTHREADS)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut res = Vec::new();
-                    let (mut start, mut errs, mut cur) =
-                        (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne]);
-                    let mut lat: Vec<u32> = Vec::new();
-                    loop {
-                        let h = next.fetch_add(1, Ordering::Relaxed);
-                        if h >= hours.len() {
-                            break;
-                        }
-                        start.fill(0);
-                        errs.fill(0);
-                        for (w, p) in parts.iter().enumerate() {
-                            let lr = hloc[w][h];
-                            if lr == usize::MAX {
-                                continue;
-                            }
-                            for r in &p.recs[lr] {
-                                let e = rank[((r.packed & KEY_MASK) >> 1) as usize] as usize;
-                                start[e + 1] += 1;
-                                errs[e] += r.packed & 1;
-                            }
-                            for &(_, key) in &p.wide[lr] {
-                                let e = rank[(key >> 1) as usize] as usize;
-                                start[e + 1] += 1;
-                                errs[e] += key & 1;
-                            }
-                        }
-                        for e in 0..ne {
-                            start[e + 1] += start[e];
-                        }
-                        // Grown, never re-zeroed. `resize` writes only the bytes
-                        // it adds, so the scratch is zeroed once up to its
-                        // high-water mark and reused after that, instead of
-                        // being cleared and re-zeroed for every hour.
-                        if lat.len() < start[ne] as usize {
-                            lat.resize(start[ne] as usize, 0);
-                        }
-                        cur.copy_from_slice(&start[..ne]);
-                        for (w, p) in parts.iter().enumerate() {
-                            let lr = hloc[w][h];
-                            if lr == usize::MAX {
-                                continue;
-                            }
-                            for r in &p.recs[lr] {
-                                let e = rank[((r.packed & KEY_MASK) >> 1) as usize] as usize;
-                                lat[cur[e] as usize] = r.packed >> KEY_BITS;
-                                cur[e] += 1;
-                            }
-                            for &(l, key) in &p.wide[lr] {
-                                let e = rank[(key >> 1) as usize] as usize;
-                                lat[cur[e] as usize] = l;
-                                cur[e] += 1;
-                            }
-                        }
-                        let mut rows: Vec<Row> = Vec::new();
-                        let mut size = 0u64;
-                        for e in 0..ne {
-                            let (a, b) = (start[e] as usize, start[e + 1] as usize);
-                            if a == b {
-                                continue;
-                            }
-                            let n = (b - a) as u32;
-                            let (p50, p95, p99) = pct(&mut lat[a..b]);
-                            let err = errs[e];
-                            let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
-                            // 13 label bytes, ":00:00Z ", the name, six numbers
-                            // each after a space, and the newline.
-                            size += 22 + names_by_rank[e].len() as u64;
-                            for v in [n, p50, p95, p99, err, ppm] {
-                                size += 1 + width(v) as u64;
-                            }
-                            rows.push(Row { e: e as u32, n, p50, p95, p99, err });
-                        }
-                        res.push((h, rows, size));
-                    }
-                    res
-                })
-            })
-            .collect();
-        hs.into_iter()
-            .map(|h| match h.join() {
-                Ok(r) => r,
-                Err(_) => {
-                    eprintln!("[track-a] worker failed");
-                    exit(1);
-                }
-            })
-            .collect()
+    let done: Vec<Vec<(usize, Vec<Row>, u64)>> = par(|_| {
+        let (mut start, mut errs, mut cur) = (vec![0u32; ne + 1], vec![0u32; ne], vec![0u32; ne]);
+        let mut lat: Vec<u32> = Vec::new();
+        let mut res: Vec<(usize, Vec<Row>, u64)> = Vec::new();
+        loop {
+            let h = next.fetch_add(1, Ordering::Relaxed);
+            if h >= hours.len() {
+                break;
+            }
+            start.fill(0);
+            errs.fill(0);
+            // Counting sort of the hour's latencies by endpoint rank: count into
+            // start[e + 1] and the errors separately, prefix, then place each
+            // latency at its group's cursor.
+            for (w, p) in parts.iter().enumerate() {
+                p.each(hloc[w][h], &rank, |e, key, _| {
+                    start[e as usize + 1] += 1;
+                    errs[e as usize] += key & 1;
+                });
+            }
+            (1..=ne).for_each(|e| start[e] += start[e - 1]);
+            // Grown, never re-zeroed past its high-water mark: `resize` writes
+            // only the bytes it adds, so the scratch is zeroed once and then
+            // reused instead of being cleared for every hour.
+            lat.resize(lat.len().max(start[ne] as usize), 0);
+            cur.copy_from_slice(&start[..ne]);
+            for (w, p) in parts.iter().enumerate() {
+                p.each(hloc[w][h], &rank, |e, _, l| {
+                    (lat[cur[e as usize] as usize], cur[e as usize]) = (l, cur[e as usize] + 1);
+                });
+            }
+            let (mut rows, mut size) = (Vec::new(), 0u64);
+            for e in (0..ne).filter(|&e| start[e] != start[e + 1]) {
+                let (a, b, n) = (start[e] as usize, start[e + 1] as usize, start[e + 1] - start[e]);
+                // Nearest rank p is index ceil(p * n / 100) - 1.
+                let (p50, p95, p99) = pct(&mut lat[a..b]);
+                let err = errs[e];
+                let ppm = (err as u64 * 1_000_000 / n as u64) as u32;
+                // 13 label bytes, ":00:00Z ", the name, six numbers each after
+                // a space, and the newline.
+                size += 22 + names_by_rank[e].len() as u64 + [n, p50, p95, p99, err, ppm].iter().map(|&v| 1 + width(v) as u64).sum::<u64>();
+                rows.push((e as u32, n, p50, p95, p99, err));
+            }
+            res.push((h, rows, size));
+        }
+        res
     });
-
-    // The records have done their job: every hour's rows and sizes were copied out
-    // of them inside the scope above, and phase 2 was the last reader. Freeing them
-    // HERE and not at the end of `main` is the whole point -- the output below is
-    // mapped and then written, and its pages are charged to the process, so holding
-    // the record store past this line would make the two peaks overlap.
-    //
-    // `memory.peak` is a high-water mark, not a live figure, so freeing it later
-    // would be free of charge and free of benefit. This is the last moment that
-    // works, which is exactly why the reference releases its chunks mid-phase.
+    // The records have done their job: every hour's rows and sizes were copied
+    // out of them inside the scope above, and phase 2 was the last reader.
+    // Freeing them HERE and not at the end of `main` is the whole point -- the
+    // output below is mapped and then written, and its pages are charged to the
+    // process, so holding the record store past this line would make the two
+    // peaks overlap. `memory.peak` is a high-water mark, not a live figure, so
+    // freeing it later would be free of charge and free of benefit.
     drop(parts);
+    drop(rank);
 
     // The rows and their sizes, and then an hour's byte offset: the running sum
     // IS the offset table, and `at[hours.len()]` is the file's length.
-    let mut lines: Vec<Vec<Row>> = (0..hours.len()).map(|_| Vec::new()).collect();
+    let mut lines: Vec<Vec<Row>> = vec![Vec::new(); hours.len()];
     let mut at: Vec<u64> = vec![0; hours.len() + 1];
     for (h, rows, size) in done.into_iter().flatten() {
-        lines[h] = rows;
-        at[h] = size;
+        (lines[h], at[h]) = (rows, size);
     }
     let mut total = 0u64;
-    for h in 0..hours.len() {
-        let n = at[h];
-        at[h] = total;
-        total += n;
-    }
+    (0..hours.len()).for_each(|h| (at[h], total) = (total, total + at[h]));
     at[hours.len()] = total;
 
     // ── the output, mapped: an hour's text goes straight into the file ──────
@@ -1058,90 +808,55 @@ fn main() {
     // write mapping over a file held O_WRONLY is refused with EACCES, and the
     // refusal is silent -- the fallback below would quietly cost the change its
     // whole point.
-    let mut out_file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&output)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[track-a] cannot create {output}: {e}");
-            exit(1);
-        }
-    };
+    let mut out_file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&output).unwrap_or_else(|e| die(&format!("cannot create {output}: {e}")));
     let mut buf: Vec<u8> = Vec::new();
     // The base is carried as a `usize`: an integer is `Send`, a raw pointer is
     // not, and the threads only need an address they never free. Each writer
     // owns the disjoint range the offset table gave it, which is the whole of the
-    // synchronisation this needs.
-    let base: usize = match out_map(&out_file, total) {
-        Some(p) => p as usize,
-        None => {
-            buf = vec![0u8; total as usize];
-            buf.as_mut_ptr() as usize
-        }
-    };
+    // synchronisation this needs. The fallback allocation is made first if the
+    // mapping is refused, and its pointer is the default of the choice below;
+    // an empty `Vec`'s pointer is never dereferenced, because the mapped path is
+    // the one that took that branch.
+    let map_out = out_map(&out_file, total);
+    if map_out.is_none() {
+        buf = vec![0u8; total as usize];
+    }
+    let base: usize = map_out.map_or(buf.as_mut_ptr() as usize, |p| p as usize);
 
     // ── phase 3: format every hour into its own slice of the output ─────────
     let next_text = AtomicUsize::new(0);
-    thread::scope(|s| {
-        let hs: Vec<_> = (0..NTHREADS)
-            .map(|_| {
-                s.spawn(|| loop {
-                    let h = next_text.fetch_add(1, Ordering::Relaxed);
-                    if h >= hours.len() {
-                        break;
-                    }
-                    let (a, b) = (at[h] as usize, at[h + 1] as usize);
-                    // SAFETY: `at` gives every hour a disjoint range and this
-                    // thread is the only writer of the one it just claimed.
-                    let dst =
-                        unsafe { core::slice::from_raw_parts_mut((base + a) as *mut u8, b - a) };
-                    let label = &hours[h].1;
-                    let mut o = 0usize;
-                    for r in &lines[h] {
-                        dst[o..o + 13].copy_from_slice(label);
-                        dst[o + 13..o + 21].copy_from_slice(b":00:00Z ");
-                        o += 21;
-                        let name = names_by_rank[r.e as usize];
-                        dst[o..o + name.len()].copy_from_slice(name);
-                        o += name.len();
-                        let ppm = (r.err as u64 * 1_000_000 / r.n as u64) as u32;
-                        for v in [r.n, r.p50, r.p95, r.p99, r.err, ppm] {
-                            dst[o] = b' ';
-                            o += 1;
-                            put_u64(dst, o, v);
-                            o += width(v);
-                        }
-                        dst[o] = b'\n';
-                        o += 1;
-                    }
-                    // The size pass and this one share `width`, so this can only
-                    // fire if the two stop agreeing -- and an hour that wrote the
-                    // wrong number of bytes would misalign every hour after it.
-                    if o != b - a {
-                        eprintln!("[track-a] hour {h}: wrote {o} into {}", b - a);
-                        exit(1);
-                    }
-                })
-            })
-            .collect();
-        for h in hs {
-            if h.join().is_err() {
-                eprintln!("[track-a] worker failed");
-                exit(1);
-            }
+    par(|_| loop {
+        let h = next_text.fetch_add(1, Ordering::Relaxed);
+        if h >= hours.len() {
+            break;
+        }
+        let (a, b) = (at[h] as usize, at[h + 1] as usize);
+        // SAFETY: `at` gives every hour a disjoint range and this thread is the
+        // only writer of the one it just claimed.
+        let dst = unsafe { core::slice::from_raw_parts_mut((base + a) as *mut u8, b - a) };
+        let mut o = 0usize;
+        for (e, n, p50, p95, p99, err) in lines[h].iter().copied() {
+            dst[o..o + 13].copy_from_slice(&hours[h].1);
+            dst[o + 13..o + 21].copy_from_slice(b":00:00Z ");
+            o += 21;
+            let name = names_by_rank[e as usize];
+            dst[o..o + name.len()].copy_from_slice(name);
+            o += name.len();
+            [n, p50, p95, p99, err, (err as u64 * 1_000_000 / n as u64) as u32].iter().for_each(|&v| o = num(dst, o, v));
+            dst[o] = b'\n';
+            o += 1;
+        }
+        // The size pass and this one share `width`, so this can only fire if the
+        // two stop agreeing -- and an hour that wrote the wrong number of bytes
+        // would misalign every hour after it.
+        if o != b - a {
+            die(&format!("hour {h}: wrote {o} into {}", b - a));
         }
     });
 
     // Empty only on the mapped path, where the file already holds the bytes.
     if !buf.is_empty() {
-        if let Err(e) = out_file.write_all(&buf) {
-            eprintln!("[track-a] write error: {e}");
-            exit(1);
-        }
+        out_file.write_all(&buf).unwrap_or_else(|e| die(&format!("write error: {e}")));
     }
     // Skip teardown: the mapping IS the file, and the kernel writes it back.
     exit(0);
