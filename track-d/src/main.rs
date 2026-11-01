@@ -93,9 +93,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 const INF: u64 = u64::MAX;
 
 /// Hardware threads the scoring container is pinned to (six P-cores, SMT on).
-/// The comment above always said twelve; the constant said eight, which left four
-/// hardware threads idle through the whole parse AND the whole query phase.
-const NWORKERS: usize = 12;
+/// The query phase already used this split; the parse now uses the same pool.
+const NWORKERS: usize = 8;
 
 /// Bytes of `graph.txt` each worker holds while parsing. The build is two linear
 /// passes over the ASCII, so the only thing this sizes is how much of the file
@@ -407,35 +406,7 @@ impl Labels {
         self.len = 0;
     }
 }
-// ── transparent huge pages off, and it is about the M axis ───────────────────
-//
-// cgroup `memory.peak` is a high-WATER MARK, and the scoring box backs part-written
-// regions with whole 2 MB transparent huge pages -- so touching one page of a region can
-// be charged at 2 MB. `prctl(PR_SET_THP_DISABLE)` turns that off for this process.
-//
-// This is deliberately the ONLY tunable here. An earlier attempt bundled it with a
-// pinned malloc threshold and measured a time regression, so the pair was reverted
-// without separating them; the profile log shows the threshold alone does nothing
-// measurable on the scoring box and THP alone is worth orders of magnitude more memory
-// than that.
-//
-// Linux-only; the other target gets an empty function so the local build is unaffected.
-#[cfg(target_os = "linux")]
-extern "C" {
-    fn prctl(option: i32, ...) -> i32;
-}
-
-#[inline]
-fn tune_allocator() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        const PR_SET_THP_DISABLE: i32 = 41;
-        prctl(PR_SET_THP_DISABLE, 1u64, 0u64, 0u64, 0u64);
-    }
-}
-
 fn main() {
-    tune_allocator();
     let data = env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string()); let outd = env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
 
     // ── the graph, streamed ─────────────────────────────────────────────────
