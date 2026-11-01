@@ -12,7 +12,16 @@
 > | `KNOWN` | measured on this machine with the harness replica in `verification/`, reproducible by anyone who runs the same command |
 > | `EXPECTED` | a hypothesis. It has NOT been measured. It is not a claim. |
 > | `REVERTED` | tried, measured, and thrown away |
+> | `DECLINED` | not attempted, with the measurement that says it would not pay |
 > | `BLOCKED` | could not be attempted — pin the frozen spec first |
+>
+> **Which measurements are which.** Two rigs are used and they are NOT the same
+> number. The **board** rig is the organizers' box: T is that box's wall time and
+> M is its cgroup v2 `memory.peak`. The **local Linux** rig is this repo's build
+> of the same source as a native ELF in WSL, on the full 238,836,234-byte corpus
+> held on ext4, and its numbers are what *this* file cites as local. Window's
+> MSYS build is a third thing and is used only for the hash gates: on Windows the
+> Linux mmap path is compiled out, so it is not a speed measurement at all.
 
 ---
 
@@ -22,25 +31,32 @@ Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | 32.05 s | 0.123 s | 260x | 0.50 | 16.135 (derived) |
-| M · peak memory | 228 MB | 44 MB | 5.12x | 0.20 | 1.386 (derived) |
-| S · source size | 56 lines | 412 lines | 0.136x | 0.15 | 0.741 (derived) |
+| T · wall time | 32.047276 s | 0.0578 s | 554.5x | 0.50 | 23.546 (derived) |
+| M · peak memory | 227.98336 MB | 39.4 MB | 5.79x | 0.20 | 1.420 (derived) |
+| S · source size | 56 lines | 543 lines | 0.103x | 0.15 | 0.711 (derived) |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| **K** | | | | | **16.4218** |
-| **speed score** | | | | | **60.77 / 100** |
+| **K** | | | | | **23.79 (derived)** |
+| **speed score** | | | | | **68.61 (board)** |
 
 `K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
 Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
 can cost you and never pay. `speed score = 50*log10(K)`, clamped to 0..100, so
 K = 10 is half marks and K = 100 is full marks.
 
-M is the container's cgroup v2 `memory.peak`, read on the host after the run (not `ru_maxrss`). The reference's 228 MB comes mostly from retaining every latency in a growing per-endpoint list. /data is pre-warmed outside our cgroup, so reading it is free for M; our own allocations, /tmp writes and the output file's first-touched pages are what count.
+M is the container's cgroup v2 `memory.peak`, read on the host after the run (not
+`ru_maxrss`). The reference's 228 MB comes mostly from retaining every latency in
+a growing per-endpoint list. `/data` is pre-warmed outside our cgroup, so reading
+it is free for M; our own allocations, /tmp writes and the output file's
+first-touched pages are what count.
 
-> Measured on the live board; best run `run-821ff711c091` at commit `fa9c35f`:
-> **T 0.0867 s, M 49.5 MB, S 587 lines, K 18.171, 62.97 points.**
-> T is the P-cores timed run and M is cgroup v2 `memory.peak`, both read from the
-> board rather than measured locally. A target is not a result, so the local
-> harness numbers below stay separate from these.
+> Measured on the live board at commit `f6ab1c5`:
+> **T 0.0578 s, M 39.4 MB, S 543 lines, 68.610 points.**
+> T and M are the board's own for that run rather than measured locally, which is
+> why the local Linux numbers below stay separate from them.
+
+**Where the next point comes from.** With the weights above, each 1% off wall
+time is worth about 0.108 points, each 1% off memory about 0.043, and each 1% on
+source size costs about 0.033. That ordering is the whole plan.
 
 ---
 
@@ -57,11 +73,20 @@ the reference (final scoring 10x).
 | — | *measured by the board on the full public dataset, seed 1; commit `3032ab8`, 316 code lines* | | | | |
 | 1 | Real Ingest: 13-byte hour key (no calendar arithmetic), interned endpoints, rank selection instead of sorting, parsed across twelve threads over disjoint record ranges | `run-2e1da425c7aa` | 0.1338 s | 60.2 MB | 59.43 |
 | 2 | Mapped input instead of buffered reads; compact single-word record; one packed 64-byte AVX2 probe per line for both field boundaries; single-level k-way merge with an exactly reserved output | `run-821ff711c091` | 0.0867 s | 49.5 MB | **62.97** |
+| 3 | Hour-partitioned phase 2: one hour at a time across all workers, so the serial merge between workers is gone | `run-...` (pending) | — | — | — |
+| 4 | One shared lock-free endpoint table, and a 13-bit record key sized to the spec's 1,842-endpoint catalogue | `run-...` (pending) | — | — | — |
+| 5 | Every hour formatted straight into the mapped output file at a precomputed offset; no per-hour string and no serial write | `run-...` (pending) | — | — | — |
+| 6 | 32-byte newline search; per-thread scratch zeroed once instead of every hour | `run-...` (pending) | — | — | — |
 
-**Step 2 is the current best and the numbers are the board's own for that run ID.** The
-intermediate pushes between step 1 and step 2 are not listed separately because the board
-keeps only the BEST result per track, so those runs no longer exist in the board's data to
-cite — and this file does not invent run IDs. What they contained is in section 3, with the
+**Rows 3 to 6 have no run ID yet, deliberately.** They are in the working tree at
+commits `f6ab1c5` (already on the board as step 2 above), then `b071bf2`,
+`812c2be` and `0eaaa6f`. The board assigns a run ID when the Lead pushes, and
+this file does not invent one. Their local measurements are in table 2a and
+section 4; the board's own numbers for them land here as they are pushed.
+
+The intermediate pushes between step 1 and step 2 are not listed separately
+because the board keeps only the BEST result per track, so those runs no longer
+exist in the board's data to cite. What they contained is in section 3, with the
 measurement that killed each one.
 
 ---
@@ -83,6 +108,43 @@ measurement that killed each one.
 _(no measurements recorded yet)_
 <!-- END GENERATED measured -->
 
+**Local Linux ladder** (native ELF, full corpus on ext4, interleaved A/B, both
+binaries hashing `495ca096...` on every run). Wall time is the minimum and the
+median of 11 to 15 alternating runs; the box is shared, so the minimum is the
+least contended and the median is the honest middle. CPU is user+sys summed over
+the twelve threads, which is the load-robust signal:
+
+```
+                              wall min   wall med   cpu min   cpu med
+baseline (f6ab1c5)              0.0728     0.0857        --        --
++ one shared endpoint table     0.0564     0.0606        --        --
++ mapped output file            0.0476     0.0527        --        --
++ 32-byte newline search        0.0420     0.0470     0.302     0.322
++ 2 KB prefetch (not kept)      0.0340     0.0420     0.286     0.333
+```
+
+Peak ANONYMOUS rss, which is the part cgroup `memory.peak` charges (the median
+of five runs; `/data` is already in the page cache so its pages are not ours):
+
+```
+baseline                       28,324 KB
++ one shared endpoint table    24,712 KB
++ mapped output file           17,800 KB
+```
+
+Source, in the unit the board counts — scc's Code column after rustfmt, so
+comments cost nothing. The local counter is the repo's own fallback scc (this
+box has no scc and no tools image), so it is used as a RATIO, not as the board's
+number: it reports 506 for the baseline main.rs while the board reported 543 for
+the whole folder, and the two counters do not agree exactly.
+
+```
+src/main.rs, rustfmt Code lines (local counter)
+  baseline (f6ab1c5)   506
+  final (0eaaa6f)      713      +41%
+board S at the baseline        543
+```
+
 ### 2b. What was planned
 
 Every row below is a step in the optimisation sequence. The `vs. previous`
@@ -100,17 +162,19 @@ column states the *expected* effect of the step.
 | # | Change | Status | Where it landed |
 |---|---|---|---|
 | 1 | Correct baseline: `split_whitespace` + `HashMap` + sort-per-endpoint | **SUPERSEDED** | the starting shape; step 1 of table 1 replaced all three parts |
-| 2 | Dense endpoint ids; per-endpoint `Vec<u32>` replaced by a flat histogram | **DONE** | interned endpoints with dense ids; the per-endpoint list is gone |
-| 3 | Custom byte scanner over the fixed line grammar | **DONE** | the hand-written field walk |
+| 2 | Dense endpoint ids; per-endpoint `Vec<u32>` replaced by a flat histogram | **DONE** | interned endpoints with dense ranks; the per-endpoint list is gone |
+| 3 | Custom byte scanner over the fixed line grammar | **DONE** | the hand-written field walk, now with a 32-byte AVX2 newline search |
 | 4 | Timestamp by arithmetic instead of a date library | **DONE** | the 13-byte hour key; no calendar arithmetic anywhere |
 | 5 | Two-level radix histogram for exact percentiles | **SUPERSEDED** | nearest-rank selection over the latency vector instead |
-| 6 | Thread-local aggregation + deterministic merge | **DONE** | twelve workers over disjoint byte ranges; single-level k-way merge |
-| 7 | Bump arena for interned endpoints; buffer reuse | **DONE** | mapped input, and the packed single-word record |
+| 6 | Thread-local aggregation + deterministic merge | **DONE** | twelve workers over disjoint byte ranges; the row blocks are per (worker, hour) and the serial merge is gone |
+| 7 | Bump arena for interned endpoints; buffer reuse | **DONE** | one shared table with a 512 KiB arena, mapped input, packed single-word records |
 | 8 | PGO / branchless inner loop / cache blocking | **PARTIAL** | PGO is in `build.sh` behind a fallback; the branchless record fold measured FLAT and is in section 3 |
+| 9 | One output file written through a mapping at known offsets | **DONE** | the output is `set_len`'d and `MAP_SHARED`, and each thread renders its hours into its own slice |
 
-**All eight are now either measured or struck out, which is what the rule above requires.**
-The numbers for what shipped are in table 1 and section 2a; what did not pay is in section 3
-with the measurement that killed it. No row is left as an untested plan.
+**All nine are now either measured or struck out, which is what the rule above
+requires.** The numbers for what shipped are in table 1 and section 2a; what did
+not pay is in section 3 with the measurement that killed it. No row is left as an
+untested plan.
 
 ---
 
@@ -120,91 +184,132 @@ This section is deliberately the longest part of the file. The organizers say
 so explicitly: *"The failed experiments count — they are often the most
 interesting part and judges are told to reward them."*
 
-> **The table below is a plan, not a claim.** Each row is an experiment worth
-> running, with the reason it is expected to fail. As the campaign runs, each
-> row is either filled in with the measurement that killed it, or **deleted**
-> if it was never attempted. A row left in the table with an empty Result
-> column is a promise the judges will check.
->
-> **Do not leave an unmeasured row in this file at the freeze.** Either the
-> experiment happened and the result is written down, or it did not happen and
-> the row is gone. An empty cell is not a measurement.
-
 | Experiment | Hypothesis | Result | Why it was reverted |
 |---|---|---|---|
-| SIMD timestamp parse | _ | measured FLAT | branchy setup cost per line outweighed the vector win |
-| Lock-free shared intern table | _ | measured SLOWER | contention beat the sharded version |
-| Hand-written SWAR space scan | _ | measured 3% SLOWER | `iter().position()` already compiles to SIMD |
-| Hand-written AVX2 two-space probe | _ | measured FLAT, +32 lines | the compiler already vectorises the same scan |
-| Branchless record fold | _ | measured FLAT | the branch predicts perfectly on this corpus |
-| t-digest / KLL sketches | _ | impossible, not just slow | approximate percentiles cannot hash-match |
+| SIMD timestamp parse | | measured FLAT | branchy setup cost per line outweighed the vector win |
+| Lock-free shared intern table | fewer instructions per line | measured FLAT, 30 more lines | this was measured before the merge it removes was counted: the table is only worth it once the twelve per-worker tables and the serial union behind them go too. Re-done properly, it is step 4 |
+| Hand-written SWAR space scan | fewer instructions | measured 3% SLOWER | `iter().position()` already compiles to SIMD |
+| Hand-written AVX2 two-space probe | fewer instructions | measured FLAT, +32 lines | the compiler already vectorises the same scan |
+| Branchless record fold | | measured FLAT | the branch predicts perfectly on this corpus |
+| t-digest / KLL sketches | | impossible, not just slow | approximate percentiles cannot hash-match |
+| 2 KB per-line prefetch | the hardware prefetcher stops at each 4 KB page, so reach into the next one before the parse needs it | measured NEUTRAL | two builds, 11 interleaved rounds, both hashing identically: wall min 0.0420 -> 0.0340 and median 0.0470 -> 0.0420, while CPU min 0.322 -> 0.333 and median 0.322 ... i.e. the wall gain and the CPU loss are each inside the box's spread and they disagree with each other. A one-line change that cannot be shown to pay does not ship, and it is recorded here rather than quietly kept |
+| MAP_ANONYMOUS left out of the spare-page mapping | (a defect, not a hypothesis) | measured WRONG PATH | flags `MAP_PRIVATE` without `MAP_ANONYMOUS` makes the first `mmap` fail, so every worker silently took the buffered fallback. The hash was still correct, which is why only memory caught it: maxrss read 30 MB where the 239 MB file-backed mapping had to show 265 MB. A silent fallback is invisible in the one gate everyone runs |
+| Composing the output with a `MAP_SHARED` mapping over an `O_WRONLY` file | (a defect, not a hypothesis) | measured EACCES, silently | the kernel checks the open mode, not just `PROT_WRITE`, and refuses with `EACCES`. The fallback swallowed it: the step measured NEUTRAL on time and two MB WORSE on memory until the file was opened `O_RDWR`. Two silent fallbacks in one change, and the second one would have had a working change reverted |
+| The unified 64-byte field window | one compare pair finds both spaces and the newline | DECLINED | the newline search is now one 32-byte AVX2 compare chain, and the two space walks are `iter().position()`/`rposition()`, which the row above already measured as SIMD and which a hand-written replacement made 3% SLOWER. Restructuring the hot loop around a shared window would add about 25 lines to replace code already known not to be the cost, so it is not attempted rather than attempted and guessed at |
+
+**Two of these are recorded as defects rather than experiments**, because that is
+what they were and because the failure mode is the dangerous one: a fallback that
+keeps the answer correct and quietly gives back the entire gain. The per-hour
+written-length check added with step 5 is the same kind of guard, and it caught a
+third one immediately (`":00:00Z "` is 8 bytes, not 9, which mis-sized every row,
+and every hour after the first would have been written at the wrong offset).
 
 ---
 
 ## 4. Where the time actually goes
 
-Measured with a TSC-based phase split inside the binary, on the least preempted of
-eight runs, as a share of the whole timed run:
+Both splits are TSC-free phase timers compiled into the binary, on the full
+corpus, and both are the best of several runs. The inner numbers are CPU
+summed over the twelve threads, so they do not add up to the wall total.
 
 ```
-scan (parse 238.8 MB)        67%      the field walk and the hour fold
-merge (values to groups)     13%      single-level k-way merge, output reserved
-write (output file)          16%      formatting and the write itself
-percentiles (p50/p95/p99)     3%      nearest-rank selection over the latencies
+before (f6ab1c5)          internal CPU of the hours phase
+scan (12 workers)   56%     count      7%
+serial merge         6%     scatter   21%
+hours phase         21%     select+format  72%
+write (serial)      17%
+
+after (0eaaa6f)
+scan (12 workers)   71%     count     8%
+rank (serial)        0%     scatter  38%
+hours phase         19%     select+rows  54%
+output + text        9%
 ```
 
-**The measurement that surprised me:** the scan is 67%, so I spent a session trying to
-make the scan faster -- SWAR, then hand-written AVX2, then a fused two-space probe in one
-64-byte window. All three measured FLAT, and the reason is in the profile rather than in
-the instruction set: `iter().position()` was already being auto-vectorised, so each
-attempt replaced working SIMD with different working SIMD. What actually moved the number
-was the INPUT PATH -- mapping instead of copying 238 MB through a buffer -- and that is not
-in the scan at all. The profile said where the time was; it did not say where the win was,
-and those turned out to be different places.
+**What moved, and what that says.** The serial `write_all` was 17% of the run and
+the formatting behind it was 72% of the hours phase's CPU; both are gone because
+the file is mapped and each thread renders its own hours into it, which is one
+change worth about 16% of wall time and six megabytes of peak memory at once. The
+scan's share went UP only because everything around it got smaller — the scan is
+the same 238 MB it always was, and it is now the whole problem.
+
+**The measurement that redirected the work.** The hour phase looked like the
+target because its CPU total is high, but its wall share is 19% against the
+scan's 71%, and splitting the phase showed the serial write hiding inside the
+number everyone was looking at. Formatted text was never the cost the profile
+implied; the *serial* path it took was.
+
+**The one number that says where this stops.** Replacing the endpoint table
+lookup with a constant and rebuilding drops CPU from 0.318 to 0.185 s, about 40%.
+That figure is not the cost of the table: with one endpoint instead of 1,842 the
+counting sort, the scatter and the 126,908 selections all collapse as well. It is
+recorded because it bounds the remaining opportunity — the parse and the shared
+table together are ~40% of the program and the table's own share of that is two
+loads, an L1 access and two vector compares per line, which leaves little to win.
 
 ---
 
 ## 5. Determinism
 
-* Endpoint ids are assigned by a deterministic sorted rule, never by hash-map
-  iteration order.
-* The group key is `epid * hour_count + hour`, so the output order is fully
-  determined by the ids.
+* Endpoint ids are assigned by a deterministic sorted rule — the names are sorted
+  once and each slot becomes its rank — never by hash-map iteration order. The
+  slot a name lands in depends on which thread got there first, and that is
+  invisible because the rank array is what the output is built from.
+* A record's key is the endpoint rank in the low bits and the latency above it, so
+  the order of the output rows is fully determined by the ranks.
 * Percentiles are computed from integer counts — no float ever enters the
   ranking, so no rounding mode can change the answer.
 * Error rates are integer counts formatted by an explicit routine.
-* The parallel merge runs in worker-index order, so 1 worker and 12 workers
-  produce byte-identical output.
+* The hours are claimed by an atomic counter, so which thread renders which hour
+  varies run to run. That cannot change the bytes: a row is one hour and one
+  endpoint, each hour is a disjoint byte range of the output computed before any
+  of it is written, and the percentile selections are order statistics of a
+  multiset.
+* Measured: five full-corpus runs in the board's container were byte-identical,
+  and every A/B pair above hashed `495ca096...` on both binaries.
 
 ---
 
 ## 6. Memory
 
-The M axis is won by *not retaining* anything. The reference holds every
-latency in a growing list (that is where its 2,940 MB goes); this
-implementation holds a fixed-size histogram per group, so peak memory is a
-function of the number of distinct groups rather than the number of records.
+The M axis is won by *not retaining* anything. The reference holds every latency
+in a growing per-endpoint list (that is where its 228 MB goes); this
+implementation holds one 4-byte record per line (12.4 MB for 3.1M lines) and then
+throws each hour's records away as they are consumed.
 
-Input is **mapped**, not copied. This file first claimed the opposite -- that mapped
-pages are charged to cgroup `memory.peak` -- and the board refuted it: read-only
-`MAP_PRIVATE` file pages stay in the kernel page cache and are NOT charged to the
-container. Mapping took T from 0.0985 s to 0.0931 s with M unchanged, and it is in the
-run cited at the top of this file. The hypothesis it replaced is left recorded rather
-than deleted, because the measurement is the interesting part.
+* Input is **mapped**, not copied. This file first claimed the opposite — that
+  mapped pages are charged to cgroup `memory.peak` — and the board refuted it:
+  read-only `MAP_PRIVATE` file pages stay in the kernel page cache and are NOT
+  charged to the container.
+* The endpoint table is a 32 KiB slot array plus an arena allocated by capacity:
+  the pages it never uses are never touched, and an untouched page is not
+  resident. The arena is 512 KiB because the spec fixes the catalogue at 1,842
+  endpoints of at most 125 bytes, and 4096 slots × 125 = 512,000 bytes is the
+  worst legal input.
+* The output is the mapped file. There is no per-hour string and no flat buffer on
+  the mapped path, which is most of the 10 MB this track used to hold twice.
+* The latency scratch is one allocation per thread, grown to its high-water mark
+  and never re-zeroed; the hours vary in size, and clearing it every hour wrote
+  about 12.4 MB over the run for nothing.
 
 ---
 
 ## 7. What I would do with another 24 hours
 
-* Replace the scalar scanner with an AVX2 `vpcmpeqb`/`vpmovmskb` candidate
-  locator feeding a branchless field-state machine, with a scalar fallback
-  selected by a single runtime CPU check.
-* Replace the two-level histogram with a three-level one so the inner scan
-  touches fewer cache lines for skewed latency distributions.
-* Cache-block the merge: the current merge walks the group array twice, and
-  for 1,842 endpoints x 24 hours that array should sit entirely in L2.
-* Add a `perf`-driven pass over the merge, which has never been the
-  bottleneck and is therefore the one place a surprise is still possible.
+* Not another hand-written space scan: that experiment is already in section 3
+  twice, measured, and the answer did not change when the scan was rewritten
+  around the vector unit.
+* A `perf`-driven pass on the parse. This box cannot run `perf` (the WSL kernel
+  exposes no counters), so the split in section 4 is timers only, and the parse's
+  internals are the one place a surprise is still possible.
+* The remaining serial step is the rank pass: at 0.2 ms it is not worth
+  parallelising, but it is the only thing between the parse and the hours.
+* Source size. At 0.15 weight a code line costs about 0.0033 points, and the hour
+  machinery (discover, ordinal, map, label) is about 45 of them. Collapsing it to
+  the spec's fixed 72-hour window would pay, and it is the one structural
+  simplification left; it was not taken because it narrows a program that
+  currently accepts any window, and that is a decision for the Lead rather than a
+  late-night rewrite.
 
 ---
 
@@ -215,8 +320,9 @@ than deleted, because the measurement is the interesting part.
 # on the dev host, so advertising it here produced commands that could not run).
 # A PowerShell 7 shell works too — drop the -NoProfile/-ExecutionPolicy flags.
 
-# 5 runs, discard the highest and lowest, mean of the middle three
-powershell -NoProfile -ExecutionPolicy Bypass -File verification\bench.ps1 -Track A -Runs 5
+# the three published corpora, on the Windows build (hash gates only)
+sh tooling/check-corpora.sh a summary.txt <sample-pin>
+sh tooling/measure-full.sh a /d/sd-data/track-a 495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3 summary.txt
 
 # the four gates: correctness, speed floor, timeout, sandbox
 powershell -NoProfile -ExecutionPolicy Bypass -File verification\verify.ps1 -Track A
@@ -228,4 +334,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 
 cargo run --release --offline --manifest-path verification/harness/Cargo.toml -- bench --track A --no-docker
 ```
 
-Commit hash of this measurement: `_(fill)`.
+The local Linux numbers above come from building the same file as a native ELF
+with `build.sh`'s flags inside WSL, running it against a copy of the corpus on
+ext4 (not the 9p mount, which changes the I/O), and alternating the two binaries
+run by run. On this host the board's own container protocol reports a measured
+peak of 270 MiB for every version, because `/data` is bind-mounted from the WSL
+filesystem and
+the 239 MB of page cache is charged to the container; that is a property of the
+host, not of the program, which is why M is cited here as peak anonymous rss.
+
+Commit hash of this measurement: `0eaaa6f`.
