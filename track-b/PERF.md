@@ -61,8 +61,8 @@ table does not carry them.
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | — | 56.35 s | (pin from the Oct 28 spec) | 0 |
 | 1 | Real Index: authored inverted index with posting lists, boolean AND/OR/NOT evaluated left to right, and phrases resolved by a second sequential pass over the candidate document ids | `run-545c440faae8` | 3.9907 s | 126.3 MB | 34.20 |
-| 2 | Bucketed build: one scan appends a 16-bit unit -- term index in its bucket, and the documents since that bucket's last posting -- so the per-worker term list, the per-worker posting arenas, the counting sort and the merge are all gone. **The board measured S 1150 and K 12.957; this is the best-known shape for this track and the one it is frozen at.** | _(commit a1e256e)_ | 0.4776 s | 129.6 MB | **55.63** |
-| 3 | Phrases answered inside the build scan. **REVERTED: the board measured this 0.46 points worse than step 2, with time 4.6% higher; 2e is the full record of the disagreement between this box and the board.** | _(commit 577a4de)_ | 0.4996 s | 127.9 MB | 55.17 |
+| 2 | Bucketed build: one scan appends a 16-bit unit -- term index in its bucket, and the documents since that bucket's last posting -- so the per-worker term list, the per-worker posting arenas, the counting sort and the merge are all gone. **The board measured S 1150 and K 12.957 at commit `a1e256e`; this is the best-known shape for this track and the one it is frozen at.** | `run-cb095521ec8c` | 0.4776 s | 129.6 MB | **55.63** |
+| 3 | Phrases answered inside the build scan. **REVERTED: the board measured this 0.46 points worse than step 2, with time 4.6% higher, at commit `577a4de`; 2e is the full record of the disagreement between this box and the board.** | `run-cd1f53ba0ff9` | 0.4996 s | 127.9 MB | 55.17 |
 
 ---
 
