@@ -29,6 +29,7 @@ use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 extern "C" {
     fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
+    fn prctl(op: i32, a: u64, b: u64, c: u64, d: u64) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
 }
 
@@ -58,24 +59,18 @@ fn prefetch<T>(p: *const T) {
     unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
 }
 
-/// A low malloc threshold, and it is about the M axis.
+/// Plain pages and a low malloc threshold, and it is about the M axis.
 ///
-/// glibc RAISES its own mmap threshold as large blocks are freed, up to 32 MB,
-/// so a dropped array stays on the heap and keeps being charged against a
-/// high-water mark; pinning the threshold low makes every large allocation its
-/// own mapping, whose pages return on free.
-///
-/// `PR_SET_THP_DISABLE` is deliberately NOT called. It was added here once, on
-/// the reasoning that a part-touched region would otherwise be charged a whole
-/// 2 MB huge page, and the board measured the opposite on this track: memory
-/// went the wrong way (77.1 -> 93.2 MB) and time went with it. The arrays here
-/// are large and dense, so a huge page and its 512 base pages cost the same and
-/// there is nothing to reclaim -- while dense regions that the kernel would
-/// have coalesced now fragment. The TLB benefit is real and was being given up
-/// for a mechanism that does not apply to this allocation shape.
+/// The scoring box backs part-written regions with whole 2 MB transparent huge
+/// pages, so touching a few pages of a large array can be charged at 2 MB.
+/// `PR_SET_THP_DISABLE` turns that off. glibc also RAISES its own mmap threshold
+/// as large blocks are freed, up to 32 MB, so a dropped array stays on the heap
+/// and keeps being charged against a high-water mark; pinning the threshold low
+/// makes every large allocation its own mapping whose pages return on free.
 #[cfg(target_os = "linux")]
 fn tune_allocator() {
     unsafe {
+        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
         mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
     }
 }
