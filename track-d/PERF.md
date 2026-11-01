@@ -138,10 +138,42 @@ in `tune_allocator`, and each was isolated by rebuilding with only that one
 present. `mallopt(-3, 1<<16)` earns its place: peak RSS 154 MB against 161 MB
 when it is removed, ratio measured 0.957 with quartiles 0.946 to 0.969, wall and
 CPU unchanged. `prctl(41, 1)` (PR_SET_THP_DISABLE) is retained on board evidence
-only: measured here it changed nothing (RSS 0.999, faults 0.998, wall 1.000, CPU
-0.984), but this host's transparent-hugepage setting is `madvise`, under which an
-anonymous allocation never receives a huge page in the first place, so nothing
-here disables anything. That is a gap in the local evidence, not a result.
+for the mechanism only, and not as a number this tree will reproduce: on the
+board, with huge pages on, a part-touched array was charged a whole 2 MB page,
+and that was measured on an earlier tree. Measured here it changed nothing (RSS
+0.999, faults 0.998, wall 1.000, CPU 0.984), for a reason that makes the local
+measurement unable to see anything: this host's transparent-hugepage setting is
+`madvise`, under which an anonymous allocation never receives a huge page in the
+first place. That is a gap in the local evidence, and it is left stated as one.
+
+**Where the rung's gain comes from, measured, 20 paired rounds each.** The rung
+bundles three things, so it was split. V1 is the frozen baseline with only the
+reused per-thread cursor added, so `base` to `V1` prices the cursor and `V1` to
+`rung` prices the 6-byte records, the chunked arena and the smaller parts.
+
+| comparison (measured) | wall | CPU | minor faults | faults removed |
+|---|---:|---:|---:|---:|
+| base to V1: cursor alone | 1.000 | 0.967 | 1.023 | 906 |
+| V1 to rung: records and parts | 1.079 | 1.070 | 1.082 | 3011 |
+| base to rung, measured directly | 1.130 | 1.110 | 1.110 | 4044 |
+
+The deterministic counts add up — 906 + 3011 is 3917 against 4044 measured
+directly — and the ratios do not: 1.000 x 1.079 is 1.079 against 1.130, and
+0.967 x 1.070 is 1.035 against 1.110. That gap is the error a 20-round median
+carries on this host, and it is written down rather than smoothed away. The
+reading that survives both metrics is the useful one: the record layout carries
+the gain, and the reused cursor is a wash on time while removing 906 faults on
+its own.
+
+**Considered and declined, with the reason.**
+* A `u16` page ordinal in the distance table. It saves about 0.16 MB and caps
+  exactness at 33.5 M nodes, because the ordinal is the thing that would wrap.
+  A rounding error on M is not worth a wrong answer on a graph nobody has seen.
+* Deleting `.min(63)` in `number()`. It looks dead — the common path never
+  takes it — and it is not. If `number()` is ever entered on a byte that is not
+  a digit, `len` is 0, the shift becomes `w << 64`, and LLVM is entitled to
+  treat that as poison; the clamp is the one instruction that keeps the
+  expression defined. Removing it would be a defect wearing a tidy-up's clothes.
 
 **Not measured.** The board's T and M for this rung. Wall time on this host has a
 15 to 50% spread and a 2% resolution, so the 11% above transfers as "large
