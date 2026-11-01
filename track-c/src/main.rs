@@ -381,7 +381,20 @@ impl Interner {
         id
     }
 
-    /// The dense global id of `name`, inserting it on first sight.
+    /// Read the probe slot `h` will want.
+    ///
+    /// Called while the record that owns the name is still being read, so the
+    /// probe -- `LAG` records later -- finds the line in cache instead of
+    /// stalling for it. This is an atomic load rather than a prefetch hint
+    /// because it cannot be optimised away and needs no target feature.
+    #[inline]
+    fn touch(&self, h: u64) {
+        let g = &self.shards[(h as usize) & SHARD_MASK];
+        let _ = g.table[(h >> 6) as usize & (SLOTS_PER_SHARD - 1)].load(Ordering::Relaxed);
+    }
+
+    /// The dense global id of `name`, whose hash is already `h`, inserting it on
+    /// first sight.
     ///
     /// The comparison is **byte for byte** against the arena, never by hash, so
     /// a hash collision costs one extra probe and can never merge two names.
@@ -389,12 +402,10 @@ impl Interner {
     /// compare-exchange of the packed slot, and a reader is a single acquire
     /// load plus that same byte compare. An insert takes the arena bytes before
     /// it publishes the slot, so the two orders cannot be observed wrong.
-    #[inline]
-    fn intern(&self, name: &[u8]) -> u32 {
+    fn intern_hashed(&self, name: &[u8], h: u64) -> u32 {
         if name.len() > LEN_MAX {
             return self.rare_intern(name);
         }
-        let h = fxhash(name);
         let g = &self.shards[(h as usize) & SHARD_MASK];
         let mask = SLOTS_PER_SHARD - 1;
         let mut slot = (h >> 6) as usize & mask;
@@ -853,6 +864,72 @@ fn record_boundaries(path: &str, nthreads: usize) -> std::io::Result<Vec<u64>> {
     Ok(pts)
 }
 
+/// How many records are in flight between the parse of a name and its intern.
+///
+/// One record is about 61 bytes here, so 16 records is roughly a kilobyte of
+/// straight-line parsing -- enough to cover the two dependent loads a lookup
+/// waits on (the probe slot, then the arena bytes it compares) without holding
+/// sixteen name copies for longer than they are useful.
+const LAG: usize = 16;
+
+/// A record parsed but not yet folded in: its name (a copy, because the read
+/// buffer is reused), the hash the probe will start from, and its numbers.
+///
+/// The copy is the price of the deferral. It is a dozen bytes into a buffer that
+/// is reused ring-slot by ring-slot, and it buys the hash and the slot read
+/// while the record's own fields are still being walked, so the dependent loads
+/// of the intern are not on the critical path of the parse.
+#[derive(Default)]
+struct Pending {
+    h: u64,
+    name: Vec<u8>,
+    id: i64,
+    region: i64,
+    cents: i64,
+    note_len: u64,
+}
+
+/// Finish one parsed record: join its region, intern its name, mark its bit and
+/// fold its sums into this thread's aggregates.
+#[allow(clippy::too_many_arguments)]
+fn retire(
+    p: &Pending,
+    groups: &mut [Agg],
+    distinct: &[CountryNames],
+    names: &Interner,
+    rarr: &[u16],
+    big: &FxMap<i64, u32>,
+    unmatched_slot: u32,
+) {
+    // One random load instead of a hash plus a probe through a 3 MB table, for
+    // the 99.7% of ids the flat array reaches. `region` is never negative:
+    // `digits` stops at the first byte that is not a digit, so the cast widens.
+    let slot = if (p.region as u64) < rarr.len() as u64 {
+        match rarr[p.region as usize] {
+            0 => unmatched_slot,
+            v => (v - 1) as u32,
+        }
+    } else {
+        match big.get(&p.region) {
+            Some(&code) => code,
+            None => unmatched_slot,
+        }
+    };
+    distinct[slot as usize].mark(names.intern_hashed(&p.name, p.h));
+    let agg = &mut groups[slot as usize];
+    agg.count += 1;
+    agg.id_sum += p.id;
+    agg.amount_sum += p.cents;
+    if p.cents < agg.amount_min {
+        agg.amount_min = p.cents;
+    }
+    if p.cents > agg.amount_max {
+        agg.amount_max = p.cents;
+    }
+    agg.name_bytes += p.name.len() as u64;
+    agg.note_bytes += p.note_len;
+}
+
 /// Parse `[start, end)` and return this range's aggregates, **indexed by the
 /// country slot itself**.
 ///
@@ -887,6 +964,9 @@ fn parse_range(
     let mut groups: Vec<Agg> = (0..=unmatched_slot as usize).map(|_| Agg::new()).collect();
     let mut name: Vec<u8> = Vec::with_capacity(64);
     let mut note: Vec<u8> = Vec::with_capacity(64);
+    let mut ring: Vec<Pending> = (0..LAG).map(|_| Pending::default()).collect();
+    let mut parsed = 0usize;
+    let mut retired = 0usize;
 
     let mut file = match File::open(path) {
         Ok(f) => f,
@@ -987,39 +1067,50 @@ fn parse_range(
                 break;
             }
 
-            // One random load instead of a hash plus a probe through a 3 MB
-            // table, for the 99.7% of ids the flat array reaches. `region` is
-            // never negative: `digits` stops at the first byte that is not a
-            // digit, so the cast is only widening.
-            let slot = if (region as u64) < rarr.len() as u64 {
-                match rarr[region as usize] {
-                    0 => unmatched_slot,
-                    v => (v - 1) as u32,
-                }
-            } else {
-                match big.get(&region) {
-                    Some(&code) => code,
-                    None => unmatched_slot,
-                }
-            };
-            distinct[slot as usize].mark(names.intern(&name));
-            let agg = &mut groups[slot as usize];
-            agg.count += 1;
-            agg.id_sum += id;
-            agg.amount_sum += cents;
-            if cents < agg.amount_min {
-                agg.amount_min = cents;
+            // The record is whole. Hash its name and read the probe slot it will
+            // want now, while the next fifteen records are still being walked,
+            // and hand the rest of the work to `retire` when this record's turn
+            // comes back round the ring.
+            if parsed - retired == LAG {
+                retire(
+                    &ring[retired % LAG],
+                    &mut groups,
+                    distinct,
+                    names,
+                    rarr,
+                    big,
+                    unmatched_slot,
+                );
+                retired += 1;
             }
-            if cents > agg.amount_max {
-                agg.amount_max = cents;
-            }
-            agg.name_bytes += name.len() as u64;
-            agg.note_bytes += note.len() as u64;
+            let p = &mut ring[parsed % LAG];
+            p.h = fxhash(&name);
+            names.touch(p.h);
+            p.name.clear();
+            p.name.extend_from_slice(&name);
+            p.id = id;
+            p.region = region;
+            p.cents = cents;
+            p.note_len = note.len() as u64;
+            parsed += 1;
         }
 
         if done >= total && (pos >= have || pos == 0) {
             break;
         }
+    }
+
+    while retired < parsed {
+        retire(
+            &ring[retired % LAG],
+            &mut groups,
+            distinct,
+            names,
+            rarr,
+            big,
+            unmatched_slot,
+        );
+        retired += 1;
     }
 
     groups
