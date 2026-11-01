@@ -951,56 +951,6 @@ fn retire(
 /// 0 meaning "this id is not in regions.csv"; the map is still the authority
 /// for ids at or past `regcap`, and for a corpus whose regions.csv names more
 /// countries than a `u16` can hold.
-/// Map the whole input read-only, or `None`.
-///
-/// `std` has no mmap, so this is the raw syscall. It exists because the parse
-/// otherwise COPIES every byte of a 202 MB file through a 128 KiB buffer, and that
-/// copy -- not the parsing -- is most of the read cost. Mapping lets the walk read
-/// the page cache in place. Read-only MAP_PRIVATE file pages are not charged to the
-/// process, so this does not trade memory for time.
-///
-/// Every failure returns `None` and the caller falls back to buffered reads, so a
-/// kernel that refuses the syscall costs speed and never correctness.
-#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-fn map_file(path: &str) -> Option<&'static [u8]> {
-    use std::os::fd::AsRawFd;
-    let f = File::open(path).ok()?;
-    let len = f.metadata().ok()?.len() as usize;
-    if len == 0 {
-        return None;
-    }
-    let ret: isize;
-    // SAFETY: the argument registers are the documented mmap(2) ABI on x86-64 --
-    // rax 9, rdi addr, rsi length, rdx prot, r10 flags, r8 fd, r9 offset -- and only
-    // rcx and r11, which `syscall` always clobbers, are declared as outputs.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") 9isize => ret,
-            in("rdi") 0usize,
-            in("rsi") len,
-            in("rdx") 1usize, // PROT_READ
-            in("r10") 2usize, // MAP_PRIVATE
-            in("r8") f.as_raw_fd(),
-            in("r9") 0usize,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, preserves_flags)
-        );
-    }
-    if ret < 0 {
-        return None;
-    }
-    // SAFETY: mmap returned a valid pointer to `len` readable bytes, mapped for the
-    // life of the process. The slice is never written and never unmapped.
-    Some(unsafe { core::slice::from_raw_parts(ret as *const u8, len) })
-}
-
-#[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
-fn map_file(_path: &str) -> Option<&'static [u8]> {
-    None
-}
-
 fn parse_range(
     path: &str,
     start: u64,
@@ -1018,13 +968,6 @@ fn parse_range(
     let mut parsed = 0usize;
     let mut retired = 0usize;
 
-    // The range this worker owns, as a slice of the mapping when there is one. It is
-    // taken FIRST so the whole range is one contiguous slice: `end` is a record
-    // boundary, so a single pass over it parses every record with no refill and no
-    // partial-record retry. `None` falls through to the buffered path below.
-    let map = map_file(path);
-    let seg: Option<&[u8]> = map.map(|m| &m[start as usize..(end as usize).min(m.len())]);
-
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return groups,
@@ -1040,60 +983,34 @@ fn parse_range(
     let mut done = 0usize;
 
     loop {
-        if seg.is_none() {
-            if pos > 0 {
-                buf.copy_within(pos..have, 0);
-                have -= pos;
-                pos = 0;
+        if pos > 0 {
+            buf.copy_within(pos..have, 0);
+            have -= pos;
+            pos = 0;
+        }
+        if done < total {
+            if have == buf.len() {
+                // The buffer is full and still no whole record came out of it, so
+                // one record is longer than `CHUNK`. Grow instead of giving up:
+                // the old `want == 0 { break }` dropped the rest of the range
+                // silently, which a small chunk would have made much likelier.
+                // This corpus cannot reach it, but the cost of being wrong here
+                // is a wrong answer, not a slow one.
+                buf.resize(buf.len() * 2, 0);
             }
-            if done < total {
-                if have == buf.len() {
-                    // The buffer is full and still no whole record came out of it, so
-                    // one record is longer than `CHUNK`. Grow instead of giving up:
-                    // the old `want == 0 { break }` dropped the rest of the range
-                    // silently, which a small chunk would have made much likelier.
-                    // This corpus cannot reach it, but the cost of being wrong here
-                    // is a wrong answer, not a slow one.
-                    buf.resize(buf.len() * 2, 0);
+            let want = (total - done).min(buf.len() - have);
+            match file.read(&mut buf[have..have + want]) {
+                Ok(0) => break,
+                Ok(k) => {
+                    have += k;
+                    done += k;
                 }
-                let want = (total - done).min(buf.len() - have);
-                match file.read(&mut buf[have..have + want]) {
-                    Ok(0) => break,
-                    Ok(k) => {
-                        have += k;
-                        done += k;
-                    }
-                    Err(_) => break,
-                }
+                Err(_) => break,
             }
         }
 
-        // Mapped: the buffer IS the range. `done` is set to `total` so the loop's own
-        // exit test below is satisfied after this single pass, and `have` is the
-        // slice's length rather than a fill count.
-        let recs: &[u8] = match seg {
-            Some(s) => s,
-            None => &buf[..have],
-        };
-        let have = recs.len();
-        if seg.is_some() {
-            done = total;
-        }
+        let recs: &[u8] = &buf[..have];
         while pos < have {
-            // Pull the page the walk will reach next into cache. A record is about
-            // 61 bytes and the box charges a fault on every new page the parse
-            // touches, so the page 2 KB ahead is the one that would stall this
-            // record's parse. 2 KB and not 4: the reference measured 4 KB ahead as
-            // SLOWER, because it walks past the region that is about to be used.
-            #[cfg(target_arch = "x86_64")]
-            if pos + 2048 < have {
-                unsafe {
-                    core::arch::x86_64::_mm_prefetch(
-                        recs.as_ptr().add(pos + 2048) as *const i8,
-                        core::arch::x86_64::_MM_HINT_T0,
-                    );
-                }
-            }
             let rec_start = pos;
             if recs[pos..].starts_with(&BOM) {
                 pos += 3;
