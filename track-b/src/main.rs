@@ -1,4 +1,4 @@
-//! Speed Demon 2026 â€” Track B (Index).
+//! Speed Demon 2026 Ã¢â‚¬â€ Track B (Index).
 //!
 //! Strategy
 //! --------
@@ -21,7 +21,7 @@
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
 //! (including every byte >= 0x80) is a separator.
 //!
-//! `std` only â€” no crates, no Cargo.toml.
+//! `std` only Ã¢â‚¬â€ no crates, no Cargo.toml.
 
 use std::env;
 use std::fs::{self, File};
@@ -73,7 +73,7 @@ fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) ->
     pairs
 }
 
-// â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ paths Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn data_dir() -> PathBuf {
     env::var("SD_DATA_DIR")
@@ -97,7 +97,7 @@ fn output_path() -> PathBuf {
     out_dir().join(name)
 }
 
-// â”€â”€ tokenisation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ tokenisation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const fn build_is_tok() -> [bool; 256] {
     let mut t = [false; 256];
@@ -174,7 +174,7 @@ fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
     }
 }
 
-// â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ term interning Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Hash a term with the CPU's CRC32 instruction.
 #[inline]
@@ -232,29 +232,48 @@ fn hash_bytes(b: &[u8]) -> u64 {
 }
 
 /// Byte-string interner: open-addressed table of term ids over a byte arena.
-/// Each slot is `(hash tag << 32) | (term id + 1)`; 0 marks an empty slot, so
-/// a probe rejects a non-matching slot from one 64-bit load in the common case.
+///
+/// An entry is TWO words side by side: the metadata word, and the term's first
+/// eight bytes zero padded.  A probe therefore verifies a token out of the one
+/// 64-byte line it has already fetched -- a 16-byte pair starting at an even
+/// word index can never straddle a line -- instead of chasing the metadata's
+/// arena offset into a second, dependent random read.
 struct TermTable {
     arena: Vec<u8>,
     offs: Vec<u32>,
     lens: Vec<u32>,
-    slots: Vec<u64>,
+    /// Two words per slot: `[metadata, first eight key bytes]`.
+    entries: Vec<u64>,
     mask: usize,
-    /// Set once `pack` has rewritten `slots` into the build layout.
+    /// Set once `pack` has rewritten `entries` into the build layout.
     packed: bool,
 }
 
-/// Build-layout slot: `tag << 47 | len << 41 | (arena offset + 1) << 20 | id`.
+/// Build-layout metadata: `tag << 47 | len << 41 | (arena offset + 1) << 20 | id`.
 ///
 /// The interning layout needs `offs` and `lens` out of two more 300 KB arrays
 /// on every candidate, which is two more random reads per token.  Folding them
-/// into the word the probe already has to fetch removes both, so a hit costs
-/// one table word plus the key bytes it has to compare anyway.  `+ 1` keeps a
+/// into the word the probe already has to fetch removes both.  `+ 1` keeps a
 /// used slot non-zero even when the tag is zero, which is what marks empty.
 const SLOT_ID: u64 = (1 << 20) - 1;
 const SLOT_OFF: u64 = ((1 << 21) - 1) << 20;
 const SLOT_LEN: u64 = 0x3f << 41;
 const SLOT_TAG: u64 = !SLOT_LEN & !SLOT_OFF & !SLOT_ID;
+
+/// The first eight bytes of a key, zero padded.  A token byte is never zero, so
+/// the padding marks where a short key ends and the compare is exact on its own
+/// for every key of eight bytes or less -- which is 80% of this corpus's tokens.
+#[inline]
+fn key8(b: &[u8]) -> u64 {
+    let n = b.len().min(8);
+    let mut w = 0u64;
+    let mut k = 0;
+    while k < n {
+        w |= (b[k] as u64) << (8 * k);
+        k += 1;
+    }
+    w
+}
 
 impl TermTable {
     fn new() -> Self {
@@ -262,11 +281,11 @@ impl TermTable {
             arena: Vec::new(),
             offs: Vec::new(),
             lens: Vec::new(),
-            slots: vec![0u64; 1 << 12],
+            entries: vec![0u64; 2 << 12],
             mask: (1 << 12) - 1,
             packed: false,
         };
-        t.slots.shrink_to_fit();
+        t.entries.shrink_to_fit();
         t
     }
 
@@ -287,7 +306,7 @@ impl TermTable {
         let tag = (h >> 32) as u32;
         let mut i = (h as usize) & self.mask;
         loop {
-            let e = self.slots[i];
+            let e = self.entries[i << 1];
             if e == 0 {
                 return i;
             }
@@ -307,7 +326,7 @@ impl TermTable {
     #[inline]
     fn get(&self, key: &[u8]) -> Option<u32> {
         let h = hash_bytes(key);
-        let e = self.slots[self.slot_for(key, h)];
+        let e = self.entries[self.slot_for(key, h) << 1];
         if e == 0 {
             None
         } else {
@@ -326,48 +345,66 @@ impl TermTable {
         if self.lens.iter().any(|&l| l > 63) {
             return false;
         }
-        for e in self.slots.iter_mut() {
-            if *e == 0 {
+        for i in 0..=self.mask {
+            let e = self.entries[i << 1];
+            if e == 0 {
                 continue;
             }
-            let t = (*e as u32 - 1) as usize;
+            let t = (e as u32 - 1) as usize;
             let o = self.offs[t] as usize;
             let l = self.lens[t] as usize;
-            let h = hash_bytes(&self.arena[o..o + l]);
-            *e = (h & SLOT_TAG) | ((l as u64) << 41) | (((o as u64) + 1) << 20) | (t as u64);
+            let (h, k8) = {
+                let key = &self.arena[o..o + l];
+                (hash_bytes(key), key8(key))
+            };
+            self.entries[i << 1] =
+                (h & SLOT_TAG) | ((l as u64) << 41) | (((o as u64) + 1) << 20) | (t as u64);
+            self.entries[(i << 1) + 1] = k8;
         }
         self.packed = true;
         true
     }
 
-    /// One random word, then the key bytes -- no `offs`/`lens` touch.
-    /// Probe with the key's hash already computed, so its slot can be prefetched.
+    /// The metadata word and the key's first eight bytes are the same 16-byte
+    /// pair, so a probe that lands on a slot reads one line and verifies out of
+    /// it -- the arena is touched only by a key longer than eight bytes.
+    /// Probe with the key's hash already computed, so its line can be prefetched.
     #[inline]
     fn probe_h(&self, key: &[u8], h: u64) -> Option<u32> {
         let tag = h & SLOT_TAG;
-        let mut i = (h as usize) & self.mask;
+        let mut i = ((h as usize) & self.mask) << 1;
+        let wrap = (self.mask << 1) | 1;
+        let want = key8(key);
         loop {
-            let e = self.slots[i];
+            let e = self.entries[i];
             if e == 0 {
                 return None;
             }
             if (e & SLOT_TAG) == tag {
                 let l = ((e & SLOT_LEN) >> 41) as usize;
                 if l == key.len() {
-                    let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
-                    if self.arena[o..o + l] == *key {
-                        return Some((e & SLOT_ID) as u32);
+                    if l <= 8 {
+                        // `want` is zero padded past the key's end and no token
+                        // byte is zero, so this is the whole comparison.
+                        if self.entries[i + 1] == want {
+                            return Some((e & SLOT_ID) as u32);
+                        }
+                    } else {
+                        let o = (((e & SLOT_OFF) >> 20) - 1) as usize;
+                        if self.entries[i + 1] == want && self.arena[o + 8..o + l] == key[8..] {
+                            return Some((e & SLOT_ID) as u32);
+                        }
                     }
                 }
             }
-            i = (i + 1) & self.mask;
+            i = (i + 2) & wrap;
         }
     }
 
     fn intern(&mut self, key: &[u8]) -> u32 {
         let h = hash_bytes(key);
         let i = self.slot_for(key, h);
-        let e = self.slots[i];
+        let e = self.entries[i << 1];
         if e != 0 {
             return e as u32 - 1;
         }
@@ -375,35 +412,39 @@ impl TermTable {
         self.offs.push(self.arena.len() as u32);
         self.lens.push(key.len() as u32);
         self.arena.extend_from_slice(key);
-        self.slots[i] = ((h >> 32) << 32) | (idx as u64 + 1);
-        if self.offs.len() * 3 >= self.slots.len() * 2 {
+        self.entries[i << 1] = ((h >> 32) << 32) | (idx as u64 + 1);
+        if self.offs.len() * 3 >= (self.mask + 1) * 2 {
             self.grow();
         }
         idx
     }
 
     fn grow(&mut self) {
-        let cap = self.slots.len() * 2;
-        let old = std::mem::replace(&mut self.slots, vec![0u64; cap]);
+        let cap = (self.mask + 1) * 2;
+        let old = std::mem::replace(&mut self.entries, vec![0u64; cap * 2]);
         self.mask = cap - 1;
-        for e in old {
-            if e == 0 {
-                continue;
+        let wrap = (self.mask << 1) | 1;
+        let mut at = 0;
+        while at < old.len() {
+            let e = old[at];
+            if e != 0 {
+                let t = (e as u32 - 1) as usize;
+                let o = self.offs[t] as usize;
+                let l = self.lens[t] as usize;
+                let h = hash_bytes(&self.arena[o..o + l]);
+                let mut i = ((h as usize) & self.mask) << 1;
+                while self.entries[i] != 0 {
+                    i = (i + 2) & wrap;
+                }
+                self.entries[i] = e;
+                self.entries[i + 1] = old[at + 1];
             }
-            let t = (e as u32 - 1) as usize;
-            let o = self.offs[t] as usize;
-            let l = self.lens[t] as usize;
-            let h = hash_bytes(&self.arena[o..o + l]);
-            let mut i = (h as usize) & self.mask;
-            while self.slots[i] != 0 {
-                i = (i + 1) & self.mask;
-            }
-            self.slots[i] = e;
+            at += 2;
         }
     }
 }
 
-// â”€â”€ queries â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ queries Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 const OP_AND: u8 = 0;
 const OP_OR: u8 = 1;
@@ -481,7 +522,7 @@ fn parse_queries(buf: &[u8], tt: &mut TermTable, out: &mut Vec<Query>) {
     }
 }
 
-// â”€â”€ corpus scan â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ corpus scan Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[inline]
 fn parse_u32(b: &[u8]) -> u32 {
@@ -699,6 +740,7 @@ fn index_doc(
     gen: u32,
     off: u32,
     nb: usize,
+    nb_shift: u32,
 ) {
     let n = text.len();
     let mut i = 0usize;
@@ -713,10 +755,13 @@ fn index_doc(
             let e = &mut nslot[t as usize];
             if *e >> 20 != gen {
                 *e = (gen << 20) | ((*e & ST_DF) + 1);
-                let b = t as usize % nb;
+                // `nb` is a power of two (see `bucket_count`), so the bucket and
+                // the term's index inside it are a mask and a shift rather than
+                // two divisions -- paid for every one of the 22.2 M postings.
+                let b = t as usize & (nb - 1);
                 let gap = off - prev[b];
                 prev[b] = off;
-                streams[b].put(t / nb as u32, gap);
+                streams[b].put(t >> nb_shift, gap);
             }
         }
     };
@@ -734,9 +779,12 @@ fn index_doc(
             let h = hash_bytes(&text[s..i]);
             #[cfg(target_arch = "x86_64")]
             unsafe {
-                // SAFETY: the address is inside `slots`; a prefetch never faults.
+                // SAFETY: the address is inside `entries`; a prefetch never faults.
                 core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
-                    tt.slots.as_ptr().add((h as usize) & tt.mask).cast(),
+                    tt.entries
+                        .as_ptr()
+                        .add(((h as usize) & tt.mask) << 1)
+                        .cast(),
                 );
             }
             if cnt >= LAG {
@@ -772,7 +820,15 @@ fn index_doc(
 /// 16-bit unit to that term's bucket, and that unit is the posting.  There is no
 /// term-id list to carry to the join and no counting sort to run over it, which is
 /// what this track's peak was made of.
-fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64, end: u64) -> Part {
+fn build_range(
+    path: &Path,
+    tt: &TermTable,
+    nterms: usize,
+    nb: usize,
+    nb_shift: u32,
+    start: u64,
+    end: u64,
+) -> Part {
     let mut nslot: Vec<u32> = vec![0u32; nterms];
     let mut prev: Vec<u32> = vec![0u32; nb];
     let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
@@ -852,7 +908,17 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, gen, off, nb);
+        index_doc(
+            text,
+            tt,
+            &mut streams,
+            &mut prev,
+            &mut nslot,
+            gen,
+            off,
+            nb,
+            nb_shift,
+        );
     }
 
     // The low twenty bits of each slot are the term's df.  A worker's df cannot
@@ -892,6 +958,8 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
     }
 
     let nb = bucket_count(nterms);
+    assert!(nb.is_power_of_two(), "[track-{TRACK}] bucket count must be a power of two");
+    let nb_shift = nb.trailing_zeros();
     let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
     let parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
@@ -900,7 +968,7 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
                 size * i as u64 / nworkers as u64,
                 size * (i as u64 + 1) / nworkers as u64,
             );
-            handles.push(s.spawn(move || build_range(path, tt, nterms, nb, a, b)));
+            handles.push(s.spawn(move || build_range(path, tt, nterms, nb, nb_shift, a, b)));
         }
         handles
             .into_iter()
@@ -1005,7 +1073,7 @@ fn scatter(
     }
 }
 
-// â”€â”€ set algebra on ascending id vectors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ set algebra on ascending id vectors Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// First index `>= from` whose value is `>= x`.
 #[inline]
@@ -1135,7 +1203,7 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     }
 }
 
-// â”€â”€ phrase verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ phrase verification Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// Does `text` (already lowercased) contain `terms` at `terms.len()`
 /// consecutive token positions?
@@ -1300,7 +1368,7 @@ fn verify_phrases(
     Ok(())
 }
 
-// â”€â”€ output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ output Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[inline]
 fn push_u64(out: &mut Vec<u8>, mut v: u64) {
@@ -1537,7 +1605,7 @@ fn format_bits(out: &mut Vec<u8>, b: &[u64]) {
     out.push(b'\n');
 }
 
-// â”€â”€ main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Ã¢â€â‚¬Ã¢â€â‚¬ main Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[cfg(target_os = "linux")]
 extern "C" {
@@ -1642,7 +1710,7 @@ fn main() {
     };
     let mut w = BufWriter::with_capacity(1 << 20, file);
 
-    // ── evaluate and format the answers across every worker ────────────────
+    // â”€â”€ evaluate and format the answers across every worker â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     //
     // Each query is independent and produces exactly one line, so splitting the
     // list changes no output byte: the chunks are concatenated in query order and

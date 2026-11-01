@@ -929,8 +929,19 @@ fn main() {
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
     let nat = native();
+    // Phase timing is off unless SD_TIME is set; the branch is once per phase.
+    let timing = std::env::var("SD_TIME").is_ok();
+    let t0 = std::time::Instant::now();
+    macro_rules! lap {
+        ($name:expr) => {
+            if timing {
+                eprintln!("[t] {:<16} {:>8.3}s", $name, t0.elapsed().as_secs_f64());
+            }
+        };
+    }
     let rf = map(&format!("{data}/regions.csv"));
     let f = map(&format!("{data}/records.csv"));
+    lap!("map");
 
     // 1. regions.csv in parallel, and the quote parity of every chunk of records.csv.
     let rstart = rf.iter().position(|&c| c == b'\n').map_or(rf.len(), |i| i + 1);
@@ -945,8 +956,12 @@ fn main() {
     let nchunk = f.len().div_ceil(STEP);
     let per = nchunk.div_ceil(nt).max(1);
     let got = on_threads(nt, |t| {
+        let a = std::time::Instant::now();
         let r = regions_part(rf, rcut[t], rcut[t + 1], &rarr, &codes);
-        (r, quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk), nat))
+        let ra = a.elapsed().as_secs_f64();
+        let b = std::time::Instant::now();
+        let p = quote_parity(f, (t * per).min(nchunk), ((t + 1) * per).min(nchunk), nat);
+        (r, p, ra, b.elapsed().as_secs_f64())
     });
     let mut ok = got.iter().all(|g| g.0.ok);
     let mut prev: Option<u64> = None;
@@ -956,10 +971,16 @@ fn main() {
     }
     let mut over: Vec<(u64, u16)> = Vec::new();
     let mut par = Vec::with_capacity(nchunk + 1);
-    for (r, p) in got {
+    if timing {
+        let (ra, pa) = got.iter().fold((0.0, 0.0), |(x, y), g| (x + g.2, y + g.3));
+        eprintln!("[t]   regions-part   {:>8.3}s (sum of threads)", ra);
+        eprintln!("[t]   quote-parity   {:>8.3}s (sum of threads)", pa);
+    }
+    for (r, p, _, _) in got {
         over.extend(r.over);
         par.extend(p);
     }
+    lap!("regions+parity");
     if !ok {
         // not strictly ascending, or a line of another shape: the literal parse decides
         rarr.iter().for_each(|s| s.store(0, Relaxed));
@@ -988,6 +1009,7 @@ fn main() {
         let c = ((start + (f.len() - start) * i / npieces) / STEP).min(nchunk.saturating_sub(1));
         cut[i] = cut[i - 1].max(first_boundary(f, c * STEP, before.get(c).copied().unwrap_or(0)));
     }
+    lap!("boundaries");
 
     // 3. Parse the pieces. A run that needs the exact name map is repeated with it.
     let nco = ncodes + 1;
@@ -1014,6 +1036,7 @@ fn main() {
     if over {
         parts = run(true).0;
     }
+    lap!("parse");
 
     // 4. Merge and write: countries in code order, then _UNMATCHED.
     let mut out: Vec<u8> = Vec::new();
@@ -1033,4 +1056,5 @@ fn main() {
     if let Err(e) = std::fs::write(format!("{outd}/aggregates.txt"), out) {
         die(&format!("cannot write aggregates.txt: {e}"));
     }
+    lap!("merge+write");
 }
