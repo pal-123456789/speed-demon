@@ -4,12 +4,13 @@
 //!
 //! 1. Parse once. graph.txt is memory-mapped and cut into one line-aligned
 //!    range per thread. Each thread files every edge, as sequential appends,
-//!    under the part of the node range its tail falls in (parts of 65,536
-//!    nodes). An edge is one 32-bit word: the head in the low bits, the weight
-//!    above it; a weight too large for its field is stored as all ones with its
-//!    value on a side list, so weights up to 2^32 - 1 stay exact.
+//!    under the part of the node range its tail falls in (parts of 16,384
+//!    nodes, so a tail's offset in its part is 16 bits). An edge is one 32-bit
+//!    word: the head in the low bits, the weight above it; a weight too large
+//!    for its field is stored as all ones with its value on a side list, so
+//!    weights up to 2^32 - 1 stay exact.
 //! 2. Build each part on its own: count out-degrees and place edges inside a
-//!    256 KB counter array, so no atomics and few cache misses.
+//!    64 KB counter array, so no atomics and few cache misses.
 //! 3. Renumber for locality: ids are a random relabelling, so each thread cuts
 //!    the graph into blobs of 512 nodes grown by BFS; the graph is copied into
 //!    that numbering and then reversed.
@@ -18,10 +19,12 @@
 //!    pages handed out on first touch. s == t is 0; a target with no in-edge is
 //!    -1 at once. Distances are unique, so thread order never changes output.
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+
+#[cfg(target_os = "linux")]
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
-use std::sync::Mutex;
-use std::time::Instant;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 #[cfg(target_os = "linux")]
 extern "C" {
@@ -30,16 +33,10 @@ extern "C" {
     fn mallopt(param: i32, value: i32) -> i32;
 }
 
-/// A file descriptor for the mapping call. Only the Linux mapping uses it.
-#[cfg(target_os = "linux")]
-fn raw_fd(f: &std::fs::File) -> i32 {
-    use std::os::fd::AsRawFd;
-    f.as_raw_fd()
-}
-
 const INF: u64 = u64::MAX;
 const BLOB: usize = 512; // nodes per locality blob
-const PART_BITS: u32 = 16; // nodes per part: 2^16, so a part's counters fit in L2
+const PART_BITS: u32 = 14; // nodes per part: 2^14, so a tail's offset is 16 bits
+const CHUNK: usize = 1024; // parse records per arena chunk
 const PAGE: usize = 512; // distances per page
 
 /// A pointer the threads share; every use writes indices no other thread writes.
@@ -62,27 +59,49 @@ fn prefetch<T>(p: *const T) {
     unsafe { _mm_prefetch::<_MM_HINT_T0>(p as *const i8) }
 }
 
+/// Plain pages and a low malloc threshold, and it is about the M axis.
+///
+/// The scoring box backs part-written regions with whole 2 MB transparent huge
+/// pages, so touching a few pages of a large array can be charged at 2 MB.
+/// `PR_SET_THP_DISABLE` turns that off. glibc also RAISES its own mmap threshold
+/// as large blocks are freed, up to 32 MB, so a dropped array stays on the heap
+/// and keeps being charged against a high-water mark; pinning the threshold low
+/// makes every large allocation its own mapping whose pages return on free.
+#[cfg(target_os = "linux")]
+fn tune_allocator() {
+    unsafe {
+        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
+        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tune_allocator() {}
+
+/// The whole file as a readable slice.
+///
+/// On Linux this is a real mapping: an anonymous page of zeros, then the file
+/// over its start (PROT_READ; MAP_PRIVATE | MAP_ANONYMOUS, then MAP_PRIVATE |
+/// MAP_FIXED), so an 8-byte read at ANY byte of the file stays inside the
+/// mapping. The scoring box is Linux. The other target reads the file into a
+/// leaked box instead, so the local fallback build compiles and the offline
+/// corpora can still be checked on a development machine.
 #[cfg(target_os = "linux")]
 fn map(path: &str) -> &'static [u8] {
     let file = std::fs::File::open(path).expect(path);
     let len = file.metadata().unwrap().len() as usize;
-    // An anonymous page of zeros, then the file over its start (PROT_READ;
-    // MAP_PRIVATE | MAP_ANONYMOUS, then MAP_PRIVATE | MAP_FIXED), so an
-    // 8-byte read at any byte of the file stays inside the mapping.
     unsafe {
         let p = mmap(std::ptr::null_mut(), len + 4096, 1, 0x22, -1, 0);
-        let ok = len == 0 || mmap(p, len, 1, 0x12, raw_fd(&file), 0) == p;
+        let ok = len == 0 || mmap(p, len, 1, 0x12, file.as_raw_fd(), 0) == p;
         assert!(p as isize != -1 && ok, "mmap {path}");
         std::slice::from_raw_parts(p as *const u8, len)
     }
 }
 
-/// The same bytes on a target with no `mmap`, so the offline corpora can still be checked on a
-/// development machine. The scoring box is Linux and takes the path above; this exists only so a
-/// local verification build links.
 #[cfg(not(target_os = "linux"))]
 fn map(path: &str) -> &'static [u8] {
-    Box::leak(std::fs::read(path).expect(path).into_boxed_slice())
+    let v = std::fs::read(path).expect(path);
+    Box::leak(v.into_boxed_slice())
 }
 
 /// The number at text[*i..], leaving *i past the one byte that ends it.
@@ -213,28 +232,41 @@ impl Dist {
     }
 }
 
+/// One thread's parse output: each edge as (its tail's offset inside its part,
+/// its packed word), appended to 1,024-record chunks claimed in turn from one
+/// arena per thread.
+///
+/// A part's records could be a growable list per part, but there are 107 parts
+/// and 12 threads, so that is 1,284 lists to allocate, move and fault; the
+/// 16-bit offset and the 32-bit word go into one arena instead, and only the
+/// chunks a thread actually reaches are ever written. A chunk is only read
+/// back through `each`, which is what the count pass and the fill pass share.
+struct Filed {
+    off: Vec<u16>,
+    word: Vec<u32>,
+    chunk: Vec<Vec<u32>>, // part -> the chunk numbers it owns, in order
+    len: Vec<usize>,      // part -> records written
+    heavy: Vec<Vec<u32>>, // part -> its oversized weights, in order
+}
+
+impl Filed {
+    /// Part p's records, in the order this thread wrote them.
+    fn each(&self, p: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        self.chunk[p].iter().enumerate().flat_map(move |(k, &c)| {
+            let at = c as usize * CHUNK;
+            let n = (self.len[p] - k * CHUNK).min(CHUNK);
+            self.off[at..at + n].iter().map(|&o| o as usize).zip(self.word[at..at + n].iter().copied())
+        })
+    }
+}
+
 /// The weight of edge e stored as all ones: its entry in the sorted list.
 fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
     heavy[heavy.partition_point(|h| h.0 < e)].1
 }
 
 fn main() {
-    // Plain pages (a part-touched array with huge pages would count whole
-    // 2 MB pages), and freed arrays really go back to the kernel.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
-        mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
-    }
-    // Lap timers: off unless SD_TIME is set, so a scored run pays one env lookup.
-    let clock = Instant::now();
-    let laps = std::env::var_os("SD_TIME").is_some();
-    let mark = |what: &str, ms: f64| {
-        if laps {
-            eprintln!("{what:>12} {:>8.1} ms cumulative", ms);
-        }
-    };
-    let lap = |what: &str| mark(what, clock.elapsed().as_secs_f64() * 1e3);
+    tune_allocator();
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
@@ -256,13 +288,19 @@ fn main() {
     let parts = (n >> sh) + 1;
 
     // 1. Parse once, filing each edge under its tail's part.
-    type Bucket = (Vec<u64>, Vec<u32>); // (offset in part << 32 | word), heavy weights in order
     let cut = cuts(text, i, nt);
-    let filed: Vec<(Vec<Bucket>, usize)> = on_threads(nt, |t| {
-        let mut out: Vec<Bucket> = (0..parts).map(|_| Default::default()).collect();
-        let guess = (cut[t + 1] - cut[t]) / 17 / parts + 64;
-        out.iter_mut().for_each(|b| b.0.reserve(guess));
-        let (mut i, mut loops) = (cut[t], 0);
+    let filed: Vec<(Filed, usize)> = on_threads(nt, |t| {
+        // A line is at least 6 bytes, and a part's last chunk is part full.
+        let cap = (cut[t + 1] - cut[t]) / 6 + parts * CHUNK;
+        let mut f = Filed {
+            off: vec![0; cap],
+            word: vec![0; cap],
+            chunk: vec![Vec::new(); parts],
+            len: vec![0; parts],
+            heavy: vec![Vec::new(); parts],
+        };
+        let (mut at, mut next, mut loops) = (vec![0u32; parts], 0usize, 0usize);
+        let mut i = cut[t];
         while i < cut[t + 1] {
             let u = number(text, &mut i);
             let v = number(text, &mut i);
@@ -271,30 +309,30 @@ fn main() {
                 loops += 1;
                 continue; // a self-loop never shortens a path
             }
-            let b = &mut out[(u >> sh) as usize];
+            let p = (u >> sh) as usize;
+            if f.len[p] % CHUNK == 0 {
+                (at[p], next) = (next as u32 * CHUNK as u32, next + 1);
+                f.chunk[p].push(next as u32 - 1);
+            }
             if w >= big {
-                b.1.push(w);
+                f.heavy[p].push(w);
                 w = big;
             }
-            b.0.push(((u & ((1 << sh) - 1)) as u64) << 32 | (v | w << hb) as u64);
+            let k = at[p] as usize;
+            f.off[k] = (u & ((1 << sh) - 1)) as u16;
+            f.word[k] = v | w << hb;
+            (at[p], f.len[p]) = (at[p] + 1, f.len[p] + 1);
         }
         assert_eq!(i, cut[t + 1], "graph.txt: a line does not end where the grammar says");
-        (out, loops)
+        (f, loops)
     });
     // Part p's edges start where part p - 1's end.
     let mut base = vec![0u32; parts + 1];
     for p in 0..parts {
-        base[p + 1] = base[p] + filed.iter().map(|f| f.0[p].0.len() as u32).sum::<u32>();
+        base[p + 1] = base[p] + filed.iter().map(|f| f.0.len[p] as u32).sum::<u32>();
     }
     let lines = base[parts] as usize + filed.iter().map(|f| f.1).sum::<usize>();
     assert_eq!(lines, declared, "graph.txt: parsed {lines} edges, header declares {declared}");
-    let buckets: Vec<Mutex<Bucket>> = (0..parts * nt).map(|_| Mutex::default()).collect();
-    for (t, f) in filed.into_iter().enumerate() {
-        for (p, b) in f.0.into_iter().enumerate() {
-            *buckets[p * nt + t].lock().unwrap() = b;
-        }
-    }
-    lap("parse");
 
     // 2. Build each part's adjacency on its own.
     let m = base[parts] as usize;
@@ -303,7 +341,7 @@ fn main() {
     let (fr, lr) = (Raw::of(&mut first), Raw::of(&mut link));
     let claim_part = AtomicUsize::new(0);
     let mut heavy: Vec<(u32, u32)> = on_threads(nt, |_| {
-        let mut heavy = Vec::new();
+        let (mut heavy, mut cursor) = (Vec::new(), vec![0u32; 1 << sh]);
         loop {
             let p = claim_part.fetch_add(1, Relaxed);
             if p >= parts {
@@ -311,19 +349,17 @@ fn main() {
             }
             let lo = p << sh;
             let len = (n - lo).min(1 << sh);
-            let mine: Vec<Bucket> = (0..nt).map(|t| std::mem::take(&mut *buckets[p * nt + t].lock().unwrap())).collect();
-            let mut cursor = vec![0u32; len];
-            mine.iter().for_each(|b| b.0.iter().for_each(|&r| cursor[(r >> 32) as usize] += 1));
+            cursor.fill(0);
+            filed.iter().for_each(|f| f.0.each(p).for_each(|(o, _)| cursor[o] += 1));
             let mut at = base[p];
-            for (k, c) in cursor.iter_mut().enumerate() {
+            for (k, c) in cursor[..len].iter_mut().enumerate() {
                 unsafe { *fr.at(lo + k) = at };
                 (at, *c) = (at + *c, at);
             }
-            for (records, weights) in &mine {
-                let mut h = weights.iter();
-                for &r in records {
-                    let c = &mut cursor[(r >> 32) as usize];
-                    let x = r as u32;
+            for f in &filed {
+                let mut h = f.0.heavy[p].iter();
+                for (o, x) in f.0.each(p) {
+                    let c = &mut cursor[o];
                     if x >> hb == big {
                         heavy.push((*c, *h.next().unwrap()));
                     }
@@ -335,8 +371,7 @@ fn main() {
     })
     .concat();
     heavy.sort_unstable();
-    drop(buckets);
-    lap("parts");
+    drop(filed);
 
     // 3. Locality order: compact BFS blobs. A thread grows a blob over
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
@@ -408,7 +443,6 @@ fn main() {
     let ir = Raw::of(&mut id_v);
     on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     drop((claimed, chains));
-    lap("blobs");
 
     // The graph in the new numbering: degrees scattered, summed, then each
     // edge's head mapped (weight bits kept), with the random reads of later
@@ -451,33 +485,15 @@ fn main() {
     // id map can go, freed on a side thread while the reverse graph is built.
     let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
     std::thread::spawn(move || drop((heavy, first_v, link_v, id_v)));
-    lap("renumber");
 
-    // The reverse graph in the same format, with no atomics: counting is
-    // partitioned by HEAD range, not by tail range, so thread t only ever
-    // touches counters for vertices it owns. Every thread walks the whole edge
-    // array, so each edge word is read once per thread instead of once in
-    // total -- but in the same order, so the walks share cache lines, and no
-    // line is written by two threads. In-degrees land in roff[v + 1], summed,
-    // then roff[v] is v's cursor, which leaves it at v's end, so shifting it up
-    // by one restores the offsets. roff[h] and roff[h + 1] are written by one
-    // thread only, which is what removes the two atomics per edge.
+    // The reverse graph in the same format: in-degrees counted into
+    // roff[v + 1], summed, then roff[v] used as v's cursor, which leaves it at
+    // v's end, so shifting it up by one restores the offsets.
     let adj = &adj;
     let mut roff = vec![0u32; n + 1];
     let rr = Raw::of(&mut roff);
-    on_threads(nt, |t| {
-        let r = share(n, t, nt);
-        let (lo, wid) = (r.start as u32, (r.end - r.start) as u32);
-        for u in 0..n {
-            for e in off[u]..off[u + 1] {
-                let h = (adj[e as usize] & hmask).wrapping_sub(lo);
-                if h < wid {
-                    unsafe { *rr.at(h as usize + r.start + 1) += 1 };
-                }
-            }
-        }
-    });
-    lap("rev count");
+    let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
+    on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
     for v in 0..n {
         roff[v + 1] += roff[v];
     }
@@ -485,21 +501,14 @@ fn main() {
     let rar = Raw::of(&mut radj);
     let mut rheavy: Vec<(u32, u32)> = on_threads(nt, |t| {
         let mut out = Vec::new();
-        let r = share(n, t, nt);
-        let (lo, wid) = (r.start as u32, (r.end - r.start) as u32);
-        for u in 0..n {
+        for u in share(n, t, nt) {
             for e in off[u]..off[u + 1] {
                 let x = adj[e as usize];
-                let h = x & hmask;
-                if h.wrapping_sub(lo) < wid {
-                    let c = unsafe { rr.at(h as usize) };
-                    let j = unsafe { *c };
-                    unsafe { *c = j + 1 };
-                    if x >> hb == big {
-                        out.push((j, heavy_weight(&heavy2, e)));
-                    }
-                    unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
+                let j = bump((x & hmask) as usize);
+                if x >> hb == big {
+                    out.push((j, heavy_weight(&heavy2, e)));
                 }
+                unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
             }
         }
         out
@@ -508,7 +517,6 @@ fn main() {
     rheavy.sort_unstable();
     roff.copy_within(0..n, 1);
     roff[0] = 0;
-    lap("rev fill");
 
     // 4. Queries sorted so neighbouring searches share cached pages.
     let mut order: Vec<usize> = (0..ends.len()).collect();
@@ -578,8 +586,6 @@ fn main() {
     });
 
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
-    lap("queries");
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write(format!("{outd}/distances.txt"), out).unwrap();
-    lap("output");
 }
