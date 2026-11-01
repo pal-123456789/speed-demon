@@ -19,7 +19,7 @@
 //!    -1 at once. Distances are unique, so thread order never changes output.
 use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -453,14 +453,30 @@ fn main() {
     std::thread::spawn(move || drop((heavy, first_v, link_v, id_v)));
     lap("renumber");
 
-    // The reverse graph in the same format: in-degrees counted into
-    // roff[v + 1], summed, then roff[v] used as v's cursor, which leaves it at
-    // v's end, so shifting it up by one restores the offsets.
+    // The reverse graph in the same format, with no atomics: counting is
+    // partitioned by HEAD range, not by tail range, so thread t only ever
+    // touches counters for vertices it owns. Every thread walks the whole edge
+    // array, so each edge word is read once per thread instead of once in
+    // total -- but in the same order, so the walks share cache lines, and no
+    // line is written by two threads. In-degrees land in roff[v + 1], summed,
+    // then roff[v] is v's cursor, which leaves it at v's end, so shifting it up
+    // by one restores the offsets. roff[h] and roff[h + 1] are written by one
+    // thread only, which is what removes the two atomics per edge.
     let adj = &adj;
     let mut roff = vec![0u32; n + 1];
     let rr = Raw::of(&mut roff);
-    let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
-    on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
+    on_threads(nt, |t| {
+        let r = share(n, t, nt);
+        let (lo, wid) = (r.start as u32, (r.end - r.start) as u32);
+        for u in 0..n {
+            for e in off[u]..off[u + 1] {
+                let h = (adj[e as usize] & hmask).wrapping_sub(lo);
+                if h < wid {
+                    unsafe { *rr.at(h as usize + r.start + 1) += 1 };
+                }
+            }
+        }
+    });
     lap("rev count");
     for v in 0..n {
         roff[v + 1] += roff[v];
@@ -469,14 +485,21 @@ fn main() {
     let rar = Raw::of(&mut radj);
     let mut rheavy: Vec<(u32, u32)> = on_threads(nt, |t| {
         let mut out = Vec::new();
-        for u in share(n, t, nt) {
+        let r = share(n, t, nt);
+        let (lo, wid) = (r.start as u32, (r.end - r.start) as u32);
+        for u in 0..n {
             for e in off[u]..off[u + 1] {
                 let x = adj[e as usize];
-                let j = bump((x & hmask) as usize);
-                if x >> hb == big {
-                    out.push((j, heavy_weight(&heavy2, e)));
+                let h = x & hmask;
+                if h.wrapping_sub(lo) < wid {
+                    let c = unsafe { rr.at(h as usize) };
+                    let j = unsafe { *c };
+                    unsafe { *c = j + 1 };
+                    if x >> hb == big {
+                        out.push((j, heavy_weight(&heavy2, e)));
+                    }
+                    unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
                 }
-                unsafe { *rar.at(j as usize) = u as u32 | (x & !hmask) };
             }
         }
         out
