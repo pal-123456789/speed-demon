@@ -12,10 +12,10 @@
 //! * BOOL: evaluate strictly left to right on ascending `u32` id vectors
 //!   (intersection / union / difference).  Galloping search is used whenever
 //!   one side is much smaller than the other.
-//! * PHRASE: intersect the terms' id lists (rarest first) for candidates,
-//!   collect the `(document, phrase)` pairs, and verify them in a second pass
-//!   over `docs.txt` -- split across the same byte ranges as the build, so the
-//!   pairs' ascending document order is preserved without a sort.
+//! * PHRASE: a phrase's rarest term, chosen from a 1/32 sample, becomes its
+//!   anchor; every occurrence of that anchor is checked against the phrase
+//!   during the build scan, while the document's token ids are still in cache.
+//!   Matches are `(query, document)` words, sorted once and deduped.
 //!
 //! Tokenisation is exactly `re.findall(rb"[a-z0-9]+", text.lower())` on bytes:
 //! ASCII-lowercase `A-Z` only, then maximal runs of `a-z0-9`; every other byte
@@ -39,41 +39,7 @@ const QUERIES_FILE: &str = "queries.txt";
 /// where this track's 12x gap to the leader came from.
 const NWORKERS: usize = 12;
 
-/// Candidate `(document << 32) | query` pairs for every phrase query `qi` with
-/// `qi % nth == t`: the rarest term's list, intersected with the others in
-/// increasing length.  Intersection is commutative, so the candidate set is
-/// exactly the reference's.
-fn phrase_pairs(queries: &[Query], t: usize, nth: usize, postings: &Postings) -> Vec<u64> {
-    let mut pairs: Vec<u64> = Vec::new();
-    let mut cand: Vec<u32> = Vec::new();
-    let mut order: Vec<usize> = Vec::new();
-    for qi in (t..queries.len()).step_by(nth) {
-        if let Query::Phrase(terms) = &queries[qi] {
-            order.clear();
-            order.extend(0..terms.len());
-            order.sort_by_key(|&i| postings.len(terms[i]));
-            cand.clear();
-            if let Some(&first) = order.first() {
-                postings.decode_into(terms[first], &mut cand);
-            }
-            // Filter the rarest term's candidates in place instead of decoding
-            // each other term: they are the common ones, and the filter order
-            // does not change the set.
-            for &i in order.iter().skip(1) {
-                if cand.is_empty() {
-                    break;
-                }
-                cand.retain(|&d| postings.has(terms[i], d));
-            }
-            for &d in cand.iter() {
-                pairs.push(((d as u64) << 32) | qi as u64);
-            }
-        }
-    }
-    pairs
-}
-
-// â”€â”€ paths â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── paths ─â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn data_dir() -> PathBuf {
     env::var("SD_DATA_DIR")
@@ -156,25 +122,7 @@ fn ascii_lower_in_place(b: &mut [u8]) {
     }
 }
 
-/// Token spans (start, len) of the already-lowercased text.
-#[inline]
-fn tokenize_spans(text: &[u8], spans: &mut Vec<(u32, u32)>) {
-    spans.clear();
-    let n = text.len();
-    let mut i = 0usize;
-    while i < n {
-        while i < n && !IS_TOK[text[i] as usize] {
-            i += 1;
-        }
-        let s = i;
-        i = scan_token(text, i);
-        if i > s {
-            spans.push((s as u32, (i - s) as u32));
-        }
-    }
-}
-
-// â”€â”€ term interning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── term interning ─â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[inline]
 fn hash_bytes(b: &[u8]) -> u64 {
@@ -239,13 +187,6 @@ impl TermTable {
     #[inline]
     fn len(&self) -> usize {
         self.offs.len()
-    }
-
-    #[inline]
-    fn key(&self, id: u32) -> &[u8] {
-        let o = self.offs[id as usize] as usize;
-        let l = self.lens[id as usize] as usize;
-        &self.arena[o..o + l]
     }
 
     #[inline]
@@ -554,11 +495,13 @@ impl Stream {
 }
 
 /// One worker's share of the index before the layout: what it counted per term,
-/// the first document it saw, and its streams of units.
+/// the first document it saw, its streams of units, and the phrase matches it
+/// found on the way.
 struct Part {
     count: Vec<u16>,
     first: u32,
     streams: Vec<Stream>,
+    hits: Vec<u64>,
 }
 
 impl Part {
@@ -567,6 +510,7 @@ impl Part {
             count: vec![0u16; nterms],
             first: 0,
             streams: (0..nb).map(|_| Stream::new()).collect(),
+            hits: Vec::new(),
         }
     }
 }
@@ -651,48 +595,266 @@ impl Postings {
 /// ones.
 const ST_DF: u32 = (1 << 20) - 1;
 
-/// Index one lowercased document: the first time a term occurs in it, append one
-/// unit to that term's bucket of this worker's streams.  The unit *is* the
-/// posting -- there is no term list, no per-document starts array, and no second
-/// pass over either, so nothing here has to be held until the join.
-#[inline]
-fn index_doc(
-    text: &[u8],
-    tt: &TermTable,
-    streams: &mut [Stream],
-    prev: &mut [u32],
-    nslot: &mut [u32],
-    gen: u32,
-    off: u32,
+/// A token that is no query term still occupies a position.  A phrase is checked
+/// by comparing a run of token ids, so a non-term has to be something that can
+/// never equal a phrase's id.
+const NOTERM: u32 = u32::MAX;
+
+/// Whether a term's documents are filed as postings at all.  A term that only a
+/// phrase names needs none: the phrase is answered at the anchor's occurrences
+/// during the scan, so there is nothing to look up afterwards.
+const F_LIST: u8 = 1;
+/// Whether every occurrence of this term has to be checked against the phrase
+/// that anchored on it.
+const F_ANCHOR: u8 = 2;
+
+/// What a scan reads and no worker changes: the dictionary, the per-term role
+/// flags, the anchored phrases, and the queries those came from.
+struct Ctx<'a> {
+    tt: &'a TermTable,
+    flags: &'a [u8],
+    /// `astart[t]..astart[t + 1]` is term `t`'s run of `anchored`.
+    astart: &'a [u32],
+    /// `(anchor term, query, the anchor's position in the phrase)`.
+    anchored: &'a [(u32, u32, u32)],
+    queries: &'a [Query],
+    anchors: bool,
     nb: usize,
-) {
-    let n = text.len();
-    let mut i = 0usize;
-    while i < n {
-        while i < n && !IS_TOK[text[i] as usize] {
-            i += 1;
+}
+
+/// One worker's state through its range: its bucket streams, the last document
+/// and the count it has seen per term, one document's token ids, and the phrase
+/// matches it has found.
+struct Worker {
+    streams: Vec<Stream>,
+    prev: Vec<u32>,
+    nslot: Vec<u32>,
+    ids: Vec<u32>,
+    hits: Vec<u64>,
+    gen: u32,
+}
+
+impl Worker {
+    fn new(nterms: usize, nb: usize) -> Self {
+        Worker {
+            streams: (0..nb).map(|_| Stream::new()).collect(),
+            prev: vec![0u32; nb],
+            nslot: vec![0u32; nterms],
+            ids: Vec::with_capacity(1024),
+            hits: Vec::new(),
+            gen: 0,
         }
-        let s = i;
-        i = scan_token(text, i);
-        if i > s {
-            let key = &text[s..i];
-            let found = if tt.packed {
-                tt.probe(key)
-            } else {
-                tt.get(key)
-            };
-            if let Some(t) = found {
-                let e = &mut nslot[t as usize];
-                if *e >> 20 != gen {
-                    *e = (gen << 20) | ((*e & ST_DF) + 1);
-                    let b = t as usize % nb;
-                    let gap = off - prev[b];
-                    prev[b] = off;
-                    streams[b].put(t / nb as u32, gap);
+    }
+
+    /// One lowercased document, at its offset from this worker's first: tokenise
+    /// it into `ids`, append a unit for every list term new to it, and check each
+    /// anchored phrase at every occurrence of its anchor.
+    #[inline]
+    fn index_doc(&mut self, ctx: &Ctx, text: &[u8], off: u32, doc: u32) {
+        self.ids.clear();
+        let n = text.len();
+        let mut i = 0usize;
+        while i < n {
+            while i < n && !IS_TOK[text[i] as usize] {
+                i += 1;
+            }
+            let s = i;
+            i = scan_token(text, i);
+            if i > s {
+                let key = &text[s..i];
+                let found = if ctx.tt.packed {
+                    ctx.tt.probe(key)
+                } else {
+                    ctx.tt.get(key)
+                };
+                let t = found.unwrap_or(NOTERM);
+                self.ids.push(t);
+                if t != NOTERM && ctx.flags[t as usize] & F_LIST != 0 {
+                    let e = &mut self.nslot[t as usize];
+                    if *e >> 20 != self.gen {
+                        *e = (self.gen << 20) | ((*e & ST_DF) + 1);
+                        let b = t as usize % ctx.nb;
+                        let gap = off - self.prev[b];
+                        self.prev[b] = off;
+                        self.streams[b].put(t / ctx.nb as u32, gap);
+                    }
+                }
+            }
+        }
+        // The phrases are checked once every id of the document is in place: a
+        // phrase sits around its anchor, so it needs the tokens either side of
+        // it, and only the anchors are looked at again.
+        if ctx.anchors {
+            let len = self.ids.len();
+            for p in 0..len {
+                let t = self.ids[p];
+                if t != NOTERM && ctx.flags[t as usize] & F_ANCHOR != 0 {
+                    check_anchor(&mut self.hits, ctx, &self.ids, p, doc);
                 }
             }
         }
     }
+}
+
+/// Is one anchored phrase present at `p`?  The anchor sits at its own position in
+/// the phrase, so the ids around `p` have to be the phrase's ids; a start before
+/// the document underflows, and `get` then says no.
+#[inline]
+fn check_anchor(hits: &mut Vec<u64>, ctx: &Ctx, ids: &[u32], p: usize, doc: u32) {
+    let t = ids[p];
+    let (from, to) = (
+        ctx.astart[t as usize] as usize,
+        ctx.astart[t as usize + 1] as usize,
+    );
+    for &(_, qi, at) in &ctx.anchored[from..to] {
+        if let Query::Phrase(terms) = &ctx.queries[qi as usize] {
+            let s = p.wrapping_sub(at as usize);
+            if ids.get(s..s + terms.len()) == Some(&terms[..]) {
+                hits.push(((qi as u64) << 32) | doc as u64);
+            }
+        }
+    }
+}
+
+/// Per-term document frequency over the first 1/32 of one worker's range.
+///
+/// The anchor only has to be the *rarest* term of its phrase, so an estimate is
+/// enough and it costs a thirty-second of the corpus instead of all of it.  The
+/// line walk and the partition rule are `build_range`'s, with the sample's own end
+/// standing in for the range's.
+fn sample_df(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> Vec<u32> {
+    let mut df = vec![0u32; nterms];
+    let mut last = vec![u32::MAX; nterms];
+    let sample_end = start + (end - start) / 32;
+    let f = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return df,
+    };
+    let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut pos = start;
+    if start > 0 {
+        let mut junk: Vec<u8> = Vec::with_capacity(512);
+        if r.seek(SeekFrom::Start(start)).is_err() {
+            return df;
+        }
+        match r.read_until(b'\n', &mut junk) {
+            Ok(0) | Err(_) => return df,
+            Ok(k) => pos += k as u64,
+        }
+    }
+    let mut line: Vec<u8> = Vec::with_capacity(2048);
+    loop {
+        line.clear();
+        let n = match r.read_until(b'\n', &mut line) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 || pos >= sample_end {
+            break;
+        }
+        pos += n as u64;
+        let mut stop = n;
+        if line[stop - 1] == b'\n' {
+            stop -= 1;
+        }
+        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
+            Some(t) => (parse_u32(&line[..t]), t + 1),
+            None => continue,
+        };
+        let text = &mut line[tstart..stop];
+        ascii_lower_in_place(text);
+        let mut i = 0usize;
+        while i < text.len() {
+            while i < text.len() && !IS_TOK[text[i] as usize] {
+                i += 1;
+            }
+            let s = i;
+            i = scan_token(text, i);
+            if i > s {
+                let key = &text[s..i];
+                let found = if tt.packed {
+                    tt.probe(key)
+                } else {
+                    tt.get(key)
+                };
+                if let Some(t) = found {
+                    if last[t as usize] != id {
+                        last[t as usize] = id;
+                        df[t as usize] += 1;
+                    }
+                }
+            }
+        }
+    }
+    df
+}
+
+/// Sample every worker's share in parallel and sum the counts.
+fn sample_all(path: &Path, tt: &TermTable, nterms: usize) -> Vec<u32> {
+    let size = match fs::metadata(path) {
+        Ok(m) => m.len(),
+        Err(_) => return vec![0u32; nterms],
+    };
+    if size == 0 || nterms == 0 {
+        return vec![0u32; nterms];
+    }
+    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
+    let parts: Vec<Vec<u32>> = thread::scope(|s| {
+        let mut handles = Vec::with_capacity(nworkers);
+        for i in 0..nworkers {
+            let (a, b) = (
+                size * i as u64 / nworkers as u64,
+                size * (i as u64 + 1) / nworkers as u64,
+            );
+            handles.push(s.spawn(move || sample_df(path, tt, nterms, a, b)));
+        }
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok())
+            .collect()
+    });
+    let mut df = vec![0u32; nterms];
+    for p in &parts {
+        for (d, c) in df.iter_mut().zip(p) {
+            *d += *c;
+        }
+    }
+    df
+}
+
+/// Choose each phrase's anchor -- its rarest term by sampled frequency -- and
+/// build the per-term ranges the scan looks up.  A tie keeps the earlier term,
+/// which is exact either way: the phrase is checked at whichever term was chosen.
+fn anchor_phrases(
+    queries: &[Query],
+    df: &[u32],
+    nterms: usize,
+    flags: &mut [u8],
+) -> (Vec<u32>, Vec<(u32, u32, u32)>) {
+    let mut astart = vec![0u32; nterms + 1];
+    let mut anchored: Vec<(u32, u32, u32)> = Vec::new();
+    for (qi, q) in queries.iter().enumerate() {
+        if let Query::Phrase(terms) = q {
+            if terms.is_empty() {
+                continue;
+            }
+            let mut j = 0usize;
+            for k in 1..terms.len() {
+                if df[terms[k] as usize] < df[terms[j] as usize] {
+                    j = k;
+                }
+            }
+            let t = terms[j];
+            anchored.push((t, qi as u32, j as u32));
+            astart[t as usize + 1] += 1;
+            flags[t as usize] |= F_ANCHOR;
+        }
+    }
+    for i in 0..nterms {
+        astart[i + 1] += astart[i];
+    }
+    anchored.sort_unstable();
+    (astart, anchored)
 }
 
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
@@ -714,17 +876,14 @@ fn index_doc(
 /// 16-bit unit to that term's bucket, and that unit is the posting.  There is no
 /// term-id list to carry to the join and no counting sort to run over it, which is
 /// what this track's peak was made of.
-fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64, end: u64) -> Part {
-    let mut nslot: Vec<u32> = vec![0u32; nterms];
-    let mut prev: Vec<u32> = vec![0u32; nb];
-    let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
-    let mut gen: u32 = 0;
+fn build_range(path: &Path, ctx: &Ctx, nterms: usize, start: u64, end: u64) -> Part {
+    let mut w = Worker::new(nterms, ctx.nb);
     let mut first: u32 = 0;
     let mut seen = false;
 
     let f = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return Part::empty(nterms, nb),
+        Err(_) => return Part::empty(nterms, ctx.nb),
     };
     let mut r = BufReader::with_capacity(1 << 20, f);
     let mut pos = start;
@@ -736,10 +895,10 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64
         // then claims lines that belong to the next one.
         let mut junk: Vec<u8> = Vec::with_capacity(512);
         if r.seek(SeekFrom::Start(start)).is_err() {
-            return Part::empty(nterms, nb);
+            return Part::empty(nterms, ctx.nb);
         }
         match r.read_until(b'\n', &mut junk) {
-            Ok(0) | Err(_) => return Part::empty(nterms, nb),
+            Ok(0) | Err(_) => return Part::empty(nterms, ctx.nb),
             Ok(k) => pos += k as u64,
         }
     }
@@ -785,23 +944,23 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64
         // without ever storing a document id.  Twelve bits is 4095 documents,
         // so a longer range clears the stamp field -- keeping the counts --
         // and starts again.  No worker on this corpus comes close.
-        gen += 1;
-        if gen >= (1 << 12) {
-            for e in nslot.iter_mut() {
+        w.gen += 1;
+        if w.gen >= (1 << 12) {
+            for e in w.nslot.iter_mut() {
                 *e &= ST_DF;
             }
-            gen = 1;
+            w.gen = 1;
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, gen, off, nb);
+        w.index_doc(ctx, text, off, id);
     }
 
     // The low twenty bits of each slot are the term's df.  A worker's df cannot
     // exceed the documents it scanned, which the offset check above already
     // bounds at 65,535.
     let mut count: Vec<u16> = vec![0u16; nterms];
-    for (t, e) in nslot.iter().enumerate() {
+    for (t, e) in w.nslot.iter().enumerate() {
         let c = e & ST_DF;
         if c > u16::MAX as u32 {
             panic!("[track-{TRACK}] a worker's range holds more than 65,535 documents");
@@ -811,7 +970,8 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64
     Part {
         count,
         first,
-        streams,
+        streams: w.streams,
+        hits: w.hits,
     }
 }
 
@@ -827,13 +987,13 @@ fn build_range(path: &Path, tt: &TermTable, nterms: usize, nb: usize, start: u64
 /// each worker's run inside it is.  A term's stretch is worker 0's run, then worker
 /// 1's; the ranges ascend with the file, so the concatenation comes out ascending
 /// in document id with no sort and no dedupe.
-fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Postings> {
+fn build_index(path: &Path, ctx: &Ctx, nterms: usize) -> io::Result<(Postings, Vec<u64>)> {
     let size = fs::metadata(path)?.len();
     if size == 0 || nterms == 0 {
-        return Ok(Postings::empty(nterms));
+        return Ok((Postings::empty(nterms), Vec::new()));
     }
 
-    let nb = bucket_count(nterms);
+    let nb = ctx.nb;
     let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
     let parts: Vec<Part> = thread::scope(|s| {
         let mut handles = Vec::with_capacity(nworkers);
@@ -842,7 +1002,7 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
                 size * i as u64 / nworkers as u64,
                 size * (i as u64 + 1) / nworkers as u64,
             );
-            handles.push(s.spawn(move || build_range(path, tt, nterms, nb, a, b)));
+            handles.push(s.spawn(move || build_range(path, ctx, nterms, a, b)));
         }
         handles
             .into_iter()
@@ -851,8 +1011,19 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
     });
     let nw = parts.len();
     if nw == 0 {
-        return Ok(Postings::empty(nterms));
+        return Ok((Postings::empty(nterms), Vec::new()));
     }
+
+    // The phrase matches are one `(query << 32) | document` word each, and a
+    // document can hold the same phrase twice, so sort and keep one of each.
+    // The workers' ranges ascend with the file, but the queries interleave, so
+    // this is the only ordering step left on the phrase path.
+    let mut hits: Vec<u64> = Vec::new();
+    for p in &parts {
+        hits.extend_from_slice(&p.hits);
+    }
+    hits.sort_unstable();
+    hits.dedup();
 
     let mut seg: Vec<u16> = vec![0u16; nterms * nw];
     let mut offs: Vec<u32> = Vec::with_capacity(nterms + 1);
@@ -884,13 +1055,16 @@ fn build_index(path: &Path, tt: &TermTable, nterms: usize) -> io::Result<Posting
             }
         });
     }
-    Ok(Postings {
-        seg,
-        offs,
-        first,
-        at,
-        nw,
-    })
+    Ok((
+        Postings {
+            seg,
+            offs,
+            first,
+            at,
+            nw,
+        },
+        hits,
+    ))
 }
 
 /// Write one worker's units into the arena.  A unit names the term's index in its
@@ -1079,168 +1253,6 @@ fn difference_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
 
 // â”€â”€ phrase verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-/// Does `text` (already lowercased) contain `terms` at `terms.len()`
-/// consecutive token positions?
-fn spans_contain(text: &[u8], spans: &[(u32, u32)], terms: &[&[u8]]) -> bool {
-    let k = terms.len();
-    if k == 0 {
-        return true;
-    }
-    if spans.len() < k {
-        return false;
-    }
-    let first = terms[0];
-    'win: for w in 0..=(spans.len() - k) {
-        let (s, l) = spans[w];
-        if l as usize != first.len() || &text[s as usize..s as usize + l as usize] != first {
-            continue;
-        }
-        for j in 1..k {
-            let (s, l) = spans[w + j];
-            let t = terms[j];
-            if l as usize != t.len() || &text[s as usize..s as usize + l as usize] != t {
-                continue 'win;
-            }
-        }
-        return true;
-    }
-    false
-}
-
-/// Verify the `(document, phrase)` pairs that fall inside one byte range of
-/// `docs.txt`, returning the hits as `(query << 32) | document`.
-///
-/// The range rule is `build_range`'s: a line belongs to the worker whose range
-/// holds its first byte, and the straddling line is discarded here because the
-/// worker to the left already owned it.  Candidates are only looked for on the
-/// documents the caller asked about, so the corpus is still read front to back
-/// with no seeks inside the range.
-fn verify_range(
-    path: &Path,
-    pairs: &[u64],
-    queries: &[Query],
-    tt: &TermTable,
-    start: u64,
-    end: u64,
-) -> Vec<u64> {
-    let mut out: Vec<u64> = Vec::new();
-    let f = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return out,
-    };
-    let mut r = BufReader::with_capacity(1 << 18, f);
-    let mut pos = start;
-    if start > 0 {
-        let mut junk: Vec<u8> = Vec::with_capacity(512);
-        if r.seek(SeekFrom::Start(start)).is_err() {
-            return out;
-        }
-        match r.read_until(b'\n', &mut junk) {
-            Ok(0) | Err(_) => return out,
-            Ok(k) => pos += k as u64,
-        }
-    }
-
-    let mut line: Vec<u8> = Vec::with_capacity(2048);
-    let mut spans: Vec<(u32, u32)> = Vec::with_capacity(256);
-    let mut terms: Vec<&[u8]> = Vec::with_capacity(8);
-    let mut pi = 0usize;
-    loop {
-        if pi >= pairs.len() {
-            break;
-        }
-        line.clear();
-        let n = match r.read_until(b'\n', &mut line) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 || pos >= end {
-            break;
-        }
-        pos += n as u64;
-        let mut stop = n;
-        if line[stop - 1] == b'\n' {
-            stop -= 1;
-        }
-        let (id, tstart) = match line[..stop].iter().position(|&b| b == b'\t') {
-            Some(t) => (parse_u32(&line[..t]), t + 1),
-            None => continue,
-        };
-        // `pairs` is sorted by document id, and the ids ascend with the byte
-        // offset, so this cursor only ever moves forward.
-        while pi < pairs.len() && ((pairs[pi] >> 32) as u32) < id {
-            pi += 1;
-        }
-        if pi >= pairs.len() {
-            break;
-        }
-        if (pairs[pi] >> 32) as u32 != id {
-            continue;
-        }
-        let text = &mut line[tstart..stop];
-        ascii_lower_in_place(text);
-        tokenize_spans(text, &mut spans);
-        loop {
-            let qi = (pairs[pi] & 0xffff_ffff) as usize;
-            if let Query::Phrase(ts) = &queries[qi] {
-                terms.clear();
-                terms.extend(ts.iter().map(|&t| tt.key(t)));
-                if spans_contain(text, &spans, &terms) {
-                    out.push(((qi as u64) << 32) | id as u64);
-                }
-            }
-            pi += 1;
-            if pi >= pairs.len() || (pairs[pi] >> 32) as u32 != id {
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Second pass: verify every `(document, phrase)` pair.
-///
-/// This used to be the one serial phase left: 214k candidate pairs spread over
-/// 249,998 documents, so it read all 254 MB and tokenised 86% of the corpus on
-/// one core.  The byte ranges are disjoint and their document ids increase, so
-/// the per-worker hit lists concatenate into the ascending per-query id list the
-/// writer needs, in worker order, with no sort and no shared state.
-fn verify_phrases(
-    path: &PathBuf,
-    pairs: &[u64],
-    queries: &[Query],
-    tt: &TermTable,
-    hits: &mut [Vec<u32>],
-) -> io::Result<()> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    let size = fs::metadata(path)?.len();
-    if size == 0 {
-        return Ok(());
-    }
-    let nworkers = NWORKERS.min((size as usize / (1 << 20)).max(1));
-    let parts: Vec<Vec<u64>> = thread::scope(|s| {
-        let mut handles = Vec::with_capacity(nworkers);
-        for i in 0..nworkers {
-            let (a, b) = (
-                size * i as u64 / nworkers as u64,
-                size * (i as u64 + 1) / nworkers as u64,
-            );
-            handles.push(s.spawn(move || verify_range(path, pairs, queries, tt, a, b)));
-        }
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
-    });
-    for p in &parts {
-        for &e in p {
-            hits[(e >> 32) as usize].push(e as u32);
-        }
-    }
-    Ok(())
-}
 
 // â”€â”€ output â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -1290,30 +1302,42 @@ fn eval_bool(
     postings.decode_into(terms[0], cur);
     for (i, &op) in ops.iter().enumerate() {
         let t = terms[i + 1];
-        match op {
-            OP_AND => {
-                if cur.is_empty() {
-                    continue;
-                }
-                postings.decode_into(t, opnd);
-                intersect_into(cur, opnd, nxt);
+        let dn = postings.len(t);
+        // An operand far longer than the running result is filtered against the
+        // compressed postings in place: decoding it to intersect it would write
+        // out every posting of a term that only ever gets tested a few times.
+        if !cur.is_empty() && dn > cur.len() * 16 && (op == OP_AND || op == OP_NOT) {
+            if op == OP_AND {
+                cur.retain(|&d| postings.has(t, d));
+            } else {
+                cur.retain(|&d| !postings.has(t, d));
             }
-            OP_OR => {
-                if postings.len(t) == 0 {
-                    continue;
+        } else {
+            match op {
+                OP_AND => {
+                    if cur.is_empty() {
+                        continue;
+                    }
+                    postings.decode_into(t, opnd);
+                    intersect_into(cur, opnd, nxt);
                 }
-                postings.decode_into(t, opnd);
-                union_into(cur, opnd, nxt);
-            }
-            _ => {
-                if cur.is_empty() || postings.len(t) == 0 {
-                    continue;
+                OP_OR => {
+                    if dn == 0 {
+                        continue;
+                    }
+                    postings.decode_into(t, opnd);
+                    union_into(cur, opnd, nxt);
                 }
-                postings.decode_into(t, opnd);
-                difference_into(cur, opnd, nxt);
+                _ => {
+                    if cur.is_empty() || dn == 0 {
+                        continue;
+                    }
+                    postings.decode_into(t, opnd);
+                    difference_into(cur, opnd, nxt);
+                }
             }
+            std::mem::swap(cur, nxt);
         }
-        std::mem::swap(cur, nxt);
         if cur.is_empty() && !ops[i + 1..].iter().any(|&o| o == OP_OR) {
             // Empty survives AND and NOT; only a later OR can fill it again.
             break;
@@ -1350,7 +1374,34 @@ fn main() {
 
     let nterms = tt.len();
     tt.pack();
-    let postings = match build_index(&docs_path, &tt, nterms) {
+
+    // Which terms carry postings at all: a phrase is answered from the scan, so a
+    // term that only a phrase names needs nothing to look up afterwards.  Then the
+    // sampled frequencies that choose each phrase's anchor -- the rarest term it
+    // names, which is what makes the in-scan check cheap.
+    let mut flags: Vec<u8> = vec![0u8; nterms];
+    for q in &queries {
+        if let Query::Bool { terms, .. } = q {
+            for &t in terms {
+                flags[t as usize] |= F_LIST;
+            }
+        }
+    }
+    let df = sample_all(&docs_path, &tt, nterms);
+    let (astart, anchored) = anchor_phrases(&queries, &df, nterms, &mut flags);
+    drop(df);
+    lap!("sample + anchors");
+    let ctx = Ctx {
+        tt: &tt,
+        flags: &flags,
+        astart: &astart,
+        anchored: &anchored,
+        queries: &queries,
+        anchors: !anchored.is_empty(),
+        nb: bucket_count(nterms),
+    };
+
+    let (postings, all_hits) = match build_index(&docs_path, &ctx, nterms) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("[track-{TRACK}] cannot index {}: {e}", docs_path.display());
@@ -1360,32 +1411,15 @@ fn main() {
 
     lap!("build index");
 
-    // Phrase candidates, gathered as `(document << 32) | query index` so the
-    // verification pass can walk the corpus in document order.
+    // The phrase answers were found as the scan went past them, so this is only
+    // the split into per-query lists; the sort in `build_index` left each query's
+    // documents ascending and unique.
     let mut hits: Vec<Vec<u32>> = vec![Vec::new(); queries.len()];
-    let nth = NWORKERS.min(queries.len().max(1));
-    let cand_parts: Vec<Vec<u64>> = thread::scope(|s| {
-        let postings = &postings;
-        let queries = &queries;
-        let mut handles = Vec::with_capacity(nth);
-        for t in 0..nth {
-            handles.push(s.spawn(move || phrase_pairs(queries, t, nth, postings)));
-        }
-        handles
-            .into_iter()
-            .filter_map(|h| h.join().ok())
-            .collect()
-    });
-    let mut pairs: Vec<u64> = cand_parts.concat();
-    drop(cand_parts);
-    lap!("phrase candidates");
-    pairs.sort_unstable();
-
-    if let Err(e) = verify_phrases(&docs_path, &pairs, &queries, &tt, &mut hits) {
-        eprintln!("[track-{TRACK}] cannot verify phrases: {e}");
+    for &e in &all_hits {
+        hits[(e >> 32) as usize].push(e as u32);
     }
-    drop(pairs);
-    lap!("phrase verify");
+    drop(all_hits);
+    lap!("phrase hits");
 
     if let Err(e) = fs::create_dir_all(out_dir()) {
         eprintln!("[track-{TRACK}] cannot create output dir: {e}");
@@ -1405,11 +1439,8 @@ fn main() {
     // list changes no output byte: the chunks are concatenated in query order and
     // the write stays serial. This is the same shape as Track D's query phase.
     //
-    // Only BOOL queries are evaluated here; the phrase answers were already
-    // computed by the single sequential pass above, and they must stay that way.
-    // `verify_phrases` reads all 254 MB of docs.txt, so splitting it by query
-    // would have twelve workers read 3 GB instead of 254 MB -- which is why this
-    // parallelises the *answers* and not the phrase scan.
+    // Only BOOL queries are evaluated here; the phrase answers came out of the
+    // scan itself and are already per-query ascending.
     let nthreads = NWORKERS.min(queries.len().max(1));
     let chunk = queries.len().div_ceil(nthreads).max(1);
     let parts: Vec<Vec<u8>> = thread::scope(|s| {

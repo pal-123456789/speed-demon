@@ -56,6 +56,7 @@ the reference (final scoring 10x).
 | 0 | The reference, unchanged | — | 56.35 s | (pin from the Oct 28 spec) | 0 |
 | 1 | Real Index: authored inverted index with posting lists, boolean AND/OR/NOT evaluated left to right, and phrases resolved by a second sequential pass over the candidate document ids | `run-545c440faae8` | 3.9907 s | 126.3 MB | 34.20 |
 | 2 | Bucketed build: one scan appends a 16-bit unit -- term index in its bucket, and the documents since that bucket's last posting -- so the per-worker term list, the per-worker posting arenas, the counting sort and the merge are all gone | _(board read pending this push)_ | _(pending)_ | _(pending)_ | _(pending)_ |
+| 3 | Phrases answered inside the build scan: each phrase's rarest term is chosen from a 1/32 sample and checked at each of its occurrences while the document's ids are in cache, so the candidate pass and the second corpus read are gone | _(board read pending this push)_ | _(pending)_ | _(pending)_ | _(pending)_ |
 
 ---
 
@@ -181,6 +182,63 @@ bitmap stage is what removes it.
 
 ---
 
+## 2d. Stage 3: the phrase path moves into the scan
+
+**`KNOWN`, same rig as 2c: runs interleaved, full corpus, byte-identical output on
+every run.** Stage 3 against stage 2 is 7 rounds; the pair against the shape they
+replaced is 5 rounds.
+
+```
+                                   CPU s (median)   wall s (median)   peak MB
+before stage 2 (term list + arenas)     6.812            1.167          185.4
+after stage 2 (bucketed build)          6.781            1.034           92.5
+after stage 3 (phrases in the scan)     6.422            0.914           91.8
+```
+
+**Measured: stage 3 is worth about 5% of the CPU and 10% of the wall clock, and it
+is memory-neutral.** Cumulative against the shape this track started the day with:
+CPU 6.812 to 6.141 s, wall 1.167 to 0.952 s, peak working set 185.4 to 91.2 MB.
+
+### What changed
+
+Every phrase used to need two more passes: intersect its terms' lists for candidate
+documents, then read the whole corpus again to check each candidate. Now a phrase
+picks its rarest term from a 1/32 sample pass, and every occurrence of that anchor
+is checked against the phrase *during the scan that builds the index*, while the
+document's token ids are still in cache. The candidate phase and the second 254 MB
+pass are gone with the pair list and its sort; matches are `(query, doc)` words,
+sorted once and deduped because one document can hold the same phrase twice.
+
+Deleted with them: the phrase-pair builder, the span tokeniser, the substring
+checker, both verification passes and the term-key lookup -- about 220 code lines,
+against about 230 for the sample pass, the anchor setup and the per-document id
+buffer. The source size is level rather than better, which is not what I expected
+from this stage.
+
+### Why the memory did not move, measured rather than guessed
+
+A term that only a phrase names now carries no postings at all, and the expectation
+was that this would be a large part of the index. It is not. The scan reports
+75,747 terms, of which 53,444 carry postings; 19,000 phrases anchor on 17,971 terms;
+and the postings total 21,086,219, barely below what the whole query set cost
+before, because most phrase terms are BOOL terms as well. The peak is still the unit
+streams and the arena at about 45 MB each.
+
+The measurement that prices the next move is where those postings sit: measured, 370
+terms over 7,800 documents hold 47.9% of all postings and 181 terms over 15,250 hold
+38.2%. A term kept as a bitmap costs 31 KB whatever its df, so above roughly 15,000
+documents a bitmap is smaller than a u16 list -- but more to the point, those are
+the postings that would never enter the unit stream, and that is where the
+remaining duplication is.
+
+### Reverted inside this stage
+
+Enlarging the unit chunks from 64 KiB to 256 KiB, so a freed chunk would be its own
+mapping and go back to the kernel: measured **worse**, peak working set 90.9 to
+124.2 MB and CPU 5.969 to 6.172 s. 64 KiB stays.
+
+---
+
 ## 3. Experiments that failed, and were reverted
 
 This section is deliberately the longest part of the file. The organizers say
@@ -208,6 +266,8 @@ interesting part and judges are told to reward them."*
 | **Three-byte term ids** | _ | **measured: M 215.3 -> 203.8 MB, T 0.5424 -> 0.6139 s** | **the memory win was real and in the predicted direction, but a three-byte read is unaligned -- three loads and two shifts, 22.24 M times in the scatter -- and cost 13% of the runtime for a 2.2% gain on the memory factor.** |
 | **Reserving `starts` and `ids`** | _ | **measured: worse on both axes** | **reserving capacity pre-touches pages that lazy growth never needs, and the document count is an estimate rather than a known total.** |
 | **Decoding every phrase term before intersecting it** | _ | **measured: phrase candidates 0.033 -> 0.658 s, reverted** | **the rarest term's list is the whole candidate set; the other terms only need a membership test. Decoding them wrote 89 MB of postings that were then read once and thrown away. A binary search inside one worker's run of the compressed units answers the same question with no decode, and that generalises to every set operation on this track.** |
+| **256 KiB unit chunks instead of 64 KiB** | _ | **measured: peak working set 90.9 -> 124.2 MB, CPU 5.969 -> 6.172 s** | **the idea was that a chunk above the allocator's mapping threshold would be its own mapping and go back to the kernel on free. It made the peak larger, not smaller, on the same corpus and hash. 64 KiB stays.** |
+| **Removing the postings of phrase-only terms** | _ | **measured: 5% fewer postings, memory level** | **not reverted, but the expected saving was wrong: 53,444 of 75,747 terms carry postings, so the terms that only phrases name were never a large part of the index. Kept because it is strictly less work, not because it paid.** |
 
 The last three were tried and reverted late in the campaign, after the PGO work above was
 already in place. Each looks correct from a byte count or a cache-resident-table argument,
@@ -264,6 +324,26 @@ compressed posting has to be decoded before a `u32` intersect can read it. That
 trade is exactly where this track stands after stage 2, and it is why the next
 stage is aimed at the second half of it rather than at the build.
 
+**Stage 3 re-measured the same way, with the two phases it deleted and the one it
+added. Two interleaved rounds; the second is the clean pair:**
+
+```
+stage                     before      after
+parse queries             0.027 s     0.026 s
+sample + anchors          (none)      0.031 s
+build index               0.528 s     0.594 s
+phrase candidates         0.037 s     (gone)
+phrase verify             0.134 s     (gone)
+phrase hits               (none)      0.002 s
+evaluate+format+write     0.301 s     0.274 s
+total                     1.027 s     0.927 s
+```
+
+The two deleted phases were a measured 0.171 s and the sample pass plus the in-scan
+anchor checks cost a measured 0.097 s, which is the whole of the gain. The build did
+not get slower by accident: it now checks every occurrence of every phrase's anchor
+while it tokenises the same text, which is the point of the change.
+
 **The measurement that did surprise me, and it stands:** I had been saying this track was
 roughly 57% build and 43% query. It is **49.7% build and 50.3% everything after it**. The
 phrase pass alone is 9.6%, and it is deliberately NOT parallelised -- twelve workers would read
@@ -300,13 +380,20 @@ of working set (219 MB on the board, measured on that same shape) for an index
 whose postings are 44.5 MB of 16-bit offsets. That paragraph described the intent,
 not the code.
 
-**Stage 2 removes the term list and one of the two arena copies.** The peak is now
-the shared posting array plus the bucket chunks the scatter has not drained yet:
-**92.6 MB of working set, measured with the runs interleaved against the previous
-shape** (181.6 MB before, same box, same corpus, same hashes). One copy remains on
-purpose -- a document's first occurrence of a term is buffered as a unit until the
-layout knows where that term's stretch begins -- and that is what the next stage,
-bitmaps over the terms holding most of the postings, is aimed at.
+**Stage 2 removes the term list and one of the two arena copies, and stage 3 keeps
+the second copy but stops it growing with the phrases.** The peak is the shared
+posting array plus the bucket chunks the scatter has not drained yet: **91.8 MB of
+working set after stage 2 and 91.2 MB after stage 3, measured with the runs
+interleaved against the previous shape** (185.4 MB for the shape this track started
+the day with, same box, same corpus, same hashes on every run).
+
+One copy remains on purpose: a document's first occurrence of a term is buffered as
+a unit until the layout knows where that term's stretch begins. Stage 3 was expected
+to shrink both the unit stream and the arena by dropping the postings of terms that
+only phrases name, and it did not, because most phrase terms are BOOL terms too --
+the measurement is in 2d. What is left is priced there as well: 370 terms over 7,800
+documents hold 47.9% of the postings, and a bitmap for one of those terms never has
+to enter the unit stream at all.
 
 Input is read with a buffered streaming reader rather than `mmap`, for the
 same reason as Track A: mapped pages are charged to cgroup `memory.peak`.
