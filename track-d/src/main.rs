@@ -21,6 +21,7 @@ use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 use std::sync::Mutex;
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 extern "C" {
@@ -225,6 +226,15 @@ fn main() {
         prctl(41, 1, 0, 0, 0); // PR_SET_THP_DISABLE
         mallopt(-3, 1 << 16); // M_MMAP_THRESHOLD
     }
+    // Lap timers: off unless SD_TIME is set, so a scored run pays one env lookup.
+    let clock = Instant::now();
+    let laps = std::env::var_os("SD_TIME").is_some();
+    let mark = |what: &str, ms: f64| {
+        if laps {
+            eprintln!("{what:>12} {:>8.1} ms cumulative", ms);
+        }
+    };
+    let lap = |what: &str| mark(what, clock.elapsed().as_secs_f64() * 1e3);
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
@@ -284,6 +294,7 @@ fn main() {
             *buckets[p * nt + t].lock().unwrap() = b;
         }
     }
+    lap("parse");
 
     // 2. Build each part's adjacency on its own.
     let m = base[parts] as usize;
@@ -325,6 +336,7 @@ fn main() {
     .concat();
     heavy.sort_unstable();
     drop(buckets);
+    lap("parts");
 
     // 3. Locality order: compact BFS blobs. A thread grows a blob over
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
@@ -396,6 +408,7 @@ fn main() {
     let ir = Raw::of(&mut id_v);
     on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     drop((claimed, chains));
+    lap("blobs");
 
     // The graph in the new numbering: degrees scattered, summed, then each
     // edge's head mapped (weight bits kept), with the random reads of later
@@ -438,6 +451,7 @@ fn main() {
     // id map can go, freed on a side thread while the reverse graph is built.
     let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
     std::thread::spawn(move || drop((heavy, first_v, link_v, id_v)));
+    lap("renumber");
 
     // The reverse graph in the same format: in-degrees counted into
     // roff[v + 1], summed, then roff[v] used as v's cursor, which leaves it at
@@ -447,6 +461,7 @@ fn main() {
     let rr = Raw::of(&mut roff);
     let bump = |i: usize| unsafe { AtomicU32::from_ptr(rr.at(i)).fetch_add(1, Relaxed) };
     on_threads(nt, |t| share(n, t, nt).for_each(|u| (off[u]..off[u + 1]).for_each(|e| { bump((adj[e as usize] & hmask) as usize + 1); })));
+    lap("rev count");
     for v in 0..n {
         roff[v + 1] += roff[v];
     }
@@ -470,6 +485,7 @@ fn main() {
     rheavy.sort_unstable();
     roff.copy_within(0..n, 1);
     roff[0] = 0;
+    lap("rev fill");
 
     // 4. Queries sorted so neighbouring searches share cached pages.
     let mut order: Vec<usize> = (0..ends.len()).collect();
@@ -539,6 +555,8 @@ fn main() {
     });
 
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
+    lap("queries");
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write(format!("{outd}/distances.txt"), out).unwrap();
+    lap("output");
 }
