@@ -53,15 +53,17 @@
 //! per-thread copies disappear: 3.3M entries collapse to ~100k interned names
 //! (about 3 MB) plus 240 bitmaps of 32 KB (about 8 MB). The bitmaps are shared
 //! and updated with one relaxed `fetch_or`, so the only synchronisation left on
-//! the record path is the interner shard, and its tables are small enough to stay
-//! in cache.
+//! the record path is the interner's slot claim -- and that happens once per
+//! **distinct name**, not once per record: a lookup is a plain acquire load and
+//! a byte compare, and the mutex the old table took on all 3.32 M records is gone.
 
+use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, read};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::process::exit;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -194,13 +196,89 @@ fn fxhash(b: &[u8]) -> u64 {
 // ── the shared name interner ────────────────────────────────────────────────
 
 /// The interner is sharded by the name hash, so twelve threads almost never
-/// contend: each shard holds ~1,500 names and its arena and probe table together
-/// are about 35 KB.
+/// touch the same shard: this corpus's 100,520 names are about 1,570 per shard.
 const SHARDS: usize = 64;
 const SHARD_MASK: usize = SHARDS - 1;
 
-/// A probe table slot holds the **whole entry**, packed: bit 63 occupied, then a
-/// 32-bit dense id, an 8-bit name length, and a 23-bit arena offset (8 MB).
+/// Slots per shard, allocated once and never resized. 64 shards of 2048 is
+/// 131,072 ids -- the same reach as `BITCAP` -- at the load factor the growable
+/// table used to settle on (1,570/2,048 = 0.77).
+const SLOTS_PER_SHARD: usize = 2048;
+/// The occupancy past which a shard sends new names to the exact fallback map.
+/// This is the old rehash threshold; without it, a nearly full table would
+/// degrade into long linear-probe chains instead.
+const SHARD_LOAD_MAX: usize = SLOTS_PER_SHARD - SLOTS_PER_SHARD / 8;
+/// Name text per shard. This corpus uses about 19 KB of it; the rest is address
+/// space rather than resident memory, because the allocator hands back pages
+/// only once they are written.
+const ARENA_CAP: usize = 64 << 10;
+
+/// One shard's byte arena: `ARENA_CAP` bytes, allocated once and **never moved,
+/// grown or freed** for the life of the run.
+///
+/// That immobility is the point. The old arena grew with
+/// `Vec::extend_from_slice`, whose reallocation frees the very bytes another
+/// thread is comparing against, and the old table grew by rehashing, which moves
+/// every entry. Neither can happen if twelve threads read without a lock.
+struct Arena {
+    base: *mut u8,
+    cap: usize,
+    used: AtomicUsize,
+}
+
+impl Arena {
+    fn new(cap: usize) -> Self {
+        let base = unsafe { alloc(Self::layout(cap)) };
+        if base.is_null() {
+            handle_alloc_error(Self::layout(cap));
+        }
+        Arena { base, cap, used: AtomicUsize::new(0) }
+    }
+
+    fn layout(cap: usize) -> Layout {
+        Layout::from_size_align(cap, 64).expect("arena layout")
+    }
+
+    /// Claim `len` bytes, or `None` when the shard's arena is full. The offset
+    /// is unique to this caller, so two threads writing their own names never
+    /// touch the same byte.
+    #[inline]
+    fn reserve(&self, len: usize) -> Option<u32> {
+        let off = self.used.fetch_add(len, Ordering::Relaxed);
+        if off + len <= self.cap {
+            Some(off as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Write a name's bytes at a reserved offset. This must happen **before**
+    /// the slot carrying the offset is published.
+    #[inline]
+    unsafe fn put(&self, off: u32, bytes: &[u8]) {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(off as usize), bytes.len());
+    }
+
+    /// The bytes at an offset that a published slot carries.
+    #[inline]
+    unsafe fn get(&self, off: u32, len: usize) -> &[u8] {
+        std::slice::from_raw_parts(self.base.add(off as usize), len)
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        unsafe { dealloc(self.base, Self::layout(self.cap)) }
+    }
+}
+
+// The pointer is to one allocation that no field of this type moves, and every
+// access is at an offset a `reserve` gave to exactly one thread.
+unsafe impl Send for Arena {}
+unsafe impl Sync for Arena {}
+
+/// A probe slot holds the **whole entry**, packed: bit 63 occupied, then a
+/// 32-bit dense id, an 8-bit name length, and a 23-bit arena offset.
 ///
 /// There used to be a third array, `ents: Vec<(off, len, id)>`, and a slot held
 /// an index into it. On this corpus that array was 1.2 MB of the interner's
@@ -209,11 +287,19 @@ const SHARD_MASK: usize = SHARDS - 1;
 /// with a shared interner and twelve threads, dropping it took the interner from
 /// 109 ns to 50 ns per intern, because a probe can now reject a slot on a length
 /// mismatch (8 bits of the slot itself) without touching the arena at all.
-#[derive(Default)]
+///
+/// The slot is a single `AtomicU64`, so the entire entry is published by one
+/// compare-exchange: a reader sees either nothing or a complete entry, never a
+/// half-written one, and **no lookup takes a lock**.
 struct Shard {
-    arena: Vec<u8>,
-    table: Vec<u64>,
-    n: usize,
+    table: Vec<AtomicU64>,
+    arena: Arena,
+    /// Occupied slots. Only the insert path reads or writes it.
+    n: AtomicUsize,
+    /// Set once this shard can take no more names; from then on a *miss* is
+    /// answered by the exact fallback map. A lookup never consults it, so a name
+    /// that is already in the table still resolves from the table.
+    spilled: AtomicBool,
 }
 
 const LEN_SHIFT: u32 = 32;
@@ -223,37 +309,47 @@ const ID_MASK: u64 = (1 << 32) - 1;
 const LEN_MAX: usize = (1 << (OFF_SHIFT - LEN_SHIFT)) - 1;
 const OFF_MAX: usize = (1 << (63 - OFF_SHIFT)) - 1;
 
-/// Rewrite one shard's probe table at twice the size. Only that shard's own lock
-/// is held, and it happens at most twice per shard in the whole run.
-fn rehash(s: &mut Shard) {
-    let n = s.table.len() * 2;
-    let mask = n - 1;
-    let mut t = vec![0u64; n];
-    for e in s.table.iter().copied() {
-        if e == 0 {
-            continue;
+impl Shard {
+    fn new() -> Self {
+        Shard {
+            table: (0..SLOTS_PER_SHARD).map(|_| AtomicU64::new(0)).collect(),
+            arena: Arena::new(ARENA_CAP),
+            n: AtomicUsize::new(0),
+            spilled: AtomicBool::new(false),
         }
-        // The occupied flag shares the word with the offset, so it comes off
-        // before the fields are read.
-        let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
-        let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
-        let mut slot = (fxhash(&s.arena[off..off + len]) >> 6) as usize & mask;
-        while t[slot] != 0 {
-            slot = (slot + 1) & mask;
-        }
-        t[slot] = e;
     }
-    s.table = t;
+
+    /// The id of the entry in `word`, if `word` holds exactly `name`.
+    ///
+    /// The comparison is **byte for byte** against the arena, never by hash: a
+    /// hash collision costs one extra probe and can never merge two names, which
+    /// is what keeps `names_distinct` exact without storing a hash-only set.
+    #[inline]
+    fn match_of(&self, word: u64, name: &[u8]) -> Option<u32> {
+        let e = word & !SLOT_BUSY;
+        if ((e >> LEN_SHIFT) as usize) & LEN_MAX != name.len() {
+            return None;
+        }
+        let off = ((e >> OFF_SHIFT) as u32) & (OFF_MAX as u32);
+        // Safety: `word` was published by a release compare-exchange *after*
+        // these bytes were written, and this thread read it with an acquire
+        // load. `base` is never moved or freed while the shard lives, and the
+        // offset was reserved for exactly this name.
+        let stored = unsafe { self.arena.get(off, name.len()) };
+        if stored == name {
+            Some((e & ID_MASK) as u32)
+        } else {
+            None
+        }
+    }
 }
 
 struct Interner {
     next: AtomicU32,
-    shards: Vec<Mutex<Shard>>,
-    /// Exact fallback for a name a packed slot cannot describe: longer than 255
-    /// bytes, or past the 8 MB the offset field can address. This corpus reaches
-    /// neither (100,520 names, 1.2 MB, longest 25 bytes), but the interner still
-    /// has to be exact at any size, so the escape hatch is real code and not a
-    /// comment. It is consulted only when a name cannot be packed.
+    shards: Vec<Shard>,
+    /// Exact fallback, consulted only when a name cannot be packed into a shard:
+    /// longer than 255 bytes, or reaching a shard whose table or arena is full.
+    /// Its keys are the name bytes themselves, so it stays exact.
     rare: Mutex<FxMap<Vec<u8>, u32>>,
 }
 
@@ -261,13 +357,17 @@ impl Interner {
     fn new() -> Self {
         Interner {
             next: AtomicU32::new(0),
-            shards: (0..SHARDS).map(|_| Mutex::new(Shard::default())).collect(),
+            shards: (0..SHARDS).map(|_| Shard::new()).collect(),
             rare: Mutex::new(FxMap::with_hasher(FxBuild)),
         }
     }
 
-    /// Dense global id for a name no packed slot can hold. Byte-exact, because
-    /// the map keys are the name bytes themselves.
+    /// Dense global id for a name a packed slot cannot hold: longer than 255
+    /// bytes, or seen after its shard's table or arena filled. Byte-exact,
+    /// because the map keys are the name bytes themselves. This corpus reaches
+    /// none of those (100,520 names, 1.2 MB, longest 25 bytes, about 1,570 names
+    /// and 19 KB per shard), but the interner has to be exact at any size, so
+    /// the escape hatch is real code and not a comment.
     fn rare_intern(&self, name: &[u8]) -> u32 {
         let mut r = match self.rare.lock() {
             Ok(r) => r,
@@ -283,55 +383,85 @@ impl Interner {
 
     /// The dense global id of `name`, inserting it on first sight.
     ///
-    /// The comparison is **byte for byte** against the arena, never by hash: a
-    /// hash collision costs one extra probe and can never merge two names, which
-    /// is what keeps `names_distinct` exact without storing a hash-only set.
+    /// The comparison is **byte for byte** against the arena, never by hash, so
+    /// a hash collision costs one extra probe and can never merge two names.
+    /// Nothing is locked on the way: the whole entry is claimed with one
+    /// compare-exchange of the packed slot, and a reader is a single acquire
+    /// load plus that same byte compare. An insert takes the arena bytes before
+    /// it publishes the slot, so the two orders cannot be observed wrong.
     #[inline]
     fn intern(&self, name: &[u8]) -> u32 {
         if name.len() > LEN_MAX {
             return self.rare_intern(name);
         }
         let h = fxhash(name);
-        let m = &self.shards[(h as usize) & SHARD_MASK];
-        let mut g = match m.lock() {
-            Ok(g) => g,
-            Err(e) => e.into_inner(), // a panic elsewhere must not lose the answer
-        };
-        if g.table.is_empty() {
-            g.table = vec![0u64; 1024];
-        }
-        let mask = g.table.len() - 1;
+        let g = &self.shards[(h as usize) & SHARD_MASK];
+        let mask = SLOTS_PER_SHARD - 1;
         let mut slot = (h >> 6) as usize & mask;
-        loop {
-            let v = g.table[slot];
+        // The arena offset reserved for this name, taken the first time an empty
+        // slot is met and reused if that claim loses. `u32::MAX` means "none
+        // yet"; a real offset can never reach it, since the arena is 64 KB.
+        let mut off: u32 = u32::MAX;
+        for _ in 0..SLOTS_PER_SHARD {
+            let v = g.table[slot].load(Ordering::Acquire);
             if v == 0 {
-                let off = g.arena.len();
-                if off > OFF_MAX {
+                // A miss. This is the only path that mutates anything, and it is
+                // taken about once per distinct name rather than once per record.
+                if g.spilled.load(Ordering::Relaxed) {
                     return self.rare_intern(name);
                 }
-                let id = self.next.fetch_add(1, Ordering::Relaxed);
-                let len = name.len() as u64;
-                g.arena.extend_from_slice(name);
-                g.table[slot] = SLOT_BUSY
-                    | id as u64
-                    | (len << LEN_SHIFT)
-                    | ((off as u64) << OFF_SHIFT);
-                g.n += 1;
-                if g.n * 8 >= g.table.len() * 7 {
-                    rehash(&mut g);
+                if off == u32::MAX {
+                    if g.n.load(Ordering::Relaxed) >= SHARD_LOAD_MAX {
+                        g.spilled.store(true, Ordering::Relaxed);
+                        return self.rare_intern(name);
+                    }
+                    match g.arena.reserve(name.len()) {
+                        Some(o) => {
+                            off = o;
+                            // Safety: `o` is this call's own range, and the
+                            // write is ordered before the releasing claim below.
+                            unsafe { g.arena.put(o, name) };
+                        }
+                        None => {
+                            g.spilled.store(true, Ordering::Relaxed);
+                            return self.rare_intern(name);
+                        }
+                    }
                 }
+                let id = self.next.fetch_add(1, Ordering::Relaxed);
+                let packed = SLOT_BUSY
+                    | id as u64
+                    | ((name.len() as u64) << LEN_SHIFT)
+                    | ((off as u64) << OFF_SHIFT);
+                match g.table[slot].compare_exchange(
+                    0,
+                    packed,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        g.n.fetch_add(1, Ordering::Relaxed);
+                        return id;
+                    }
+                    // Somebody claimed this slot between the load and the CAS.
+                    // What beat us is read back and compared **unconditionally**:
+                    // if it is this same name, its id is the answer. Skipping
+                    // that compare would let one name hold two ids, which is a
+                    // wrong `names_distinct`, not a slow one.
+                    Err(cur) => {
+                        if let Some(id) = g.match_of(cur, name) {
+                            return id;
+                        }
+                    }
+                }
+            } else if let Some(id) = g.match_of(v, name) {
                 return id;
-            }
-            // The occupied flag shares the word with the offset, so it comes off
-            // before the fields are read.
-            let e = v & !SLOT_BUSY;
-            let off = ((e >> OFF_SHIFT) as usize) & OFF_MAX;
-            let len = ((e >> LEN_SHIFT) as usize) & LEN_MAX;
-            if len == name.len() && &g.arena[off..off + len] == name {
-                return (e & ID_MASK) as u32;
             }
             slot = (slot + 1) & mask;
         }
+        // Every slot was walked without finding the name or a free one.
+        g.spilled.store(true, Ordering::Relaxed);
+        self.rare_intern(name)
     }
 }
 
