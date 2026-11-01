@@ -31,12 +31,12 @@ Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p
 
 | Axis | Reference | This submission | Ratio | Weight | Contribution |
 |---|---:|---:|---:|---:|---:|
-| T · wall time | 32.047276 s | 0.0419 s | 764.9x | 0.50 | 27.657 (derived) |
-| M · peak memory | 227.98336 MB | 30.1 MB | 7.57x | 0.20 | 1.499 (derived) |
-| S · source size | 56 lines | 750 lines | 0.0747x | 0.15 | 0.678 (derived) |
+| T · wall time | 32.047276 s | 0.041585 s | 770.65x | 0.50 | 27.7605 (derived) |
+| M · peak memory | 227.98336 MB | 31.993856 MB | 7.1258x | 0.20 | 1.4810 (derived) |
+| S · source size | 56 lines | 750 lines | 0.0747x | 0.15 | 0.6776 (derived) |
 | D · dependencies | 1.00 | 1.00 | 1.00x | 0.15 | 1.000 |
-| **K** | | | | | **27.83 (board)** |
-| **speed score** | | | | | **72.23 (board)** |
+| **K** | | | | | **27.8589 (board)** |
+| **speed score** | | | | | **72.2482 (board)** |
 
 `K = (Tref/T)^0.50 x (Mref/M)^0.20 x (Sref/S)^0.15 x (Dref/D)^0.15`.
 Memory is capped at 50x; wall time is not; S and D are capped at 1.0, so they
@@ -49,17 +49,29 @@ a growing per-endpoint list. `/data` is pre-warmed outside our cgroup, so readin
 it is free for M; our own allocations, /tmp writes and the output file's
 first-touched pages are what count.
 
-> Measured on the live board, best run `run-dda2ca043537` at commit `043ec44`:
-> **T 0.0419 s, M 30.1 MB, S 750 lines, K 27.83, 72.23 points.**
-> T, M and S are the board's own for that run rather than measured locally, which
-> is why the local Linux numbers below stay separate from them. The board keeps
-> only the BEST result per track, so this is the only live run ID for Track A.
+> **The M unit, because it decides the fifth digit of K.** The board's M axis is
+> `memory.peak` in BYTES and the published reference is 227.98336 decimal MB, so
+> the term is `(227.98336 / (M_bytes / 1e6))^0.20`. Reading `M_bytes` as MiB
+> divides by 1048576 instead, and that alone makes K about 0.95% high. It is
+> worth writing down because it cost an afternoon: the axes the board published
+> for this run multiply, in decimal MB, to the K it published (27.858872 against
+> 27.8589, a derived check), while the same three axes in MiB give 28.1244 and
+> look like a board that contradicts itself. There is no contradiction and no
+> reconciliation was invented here; the unit was the whole of it. A local K
+> computed from `M_bytes` in MiB reads roughly a percent high on every track.
+
+> Measured on the live board, best run `run-1001097d113a` at commit `043ec44`:
+> **T 0.041585 s, M 31.993856 MB (30.512 MiB), S 750 lines, K 27.8589, 72.2482
+> points.** T, M and S are the board's own for that run rather than measured
+> locally, which is why the local Linux numbers below stay separate from them.
+> The board keeps only the BEST result per track, so this is the only live run ID
+> for Track A.
 >
-> The four ratios beside the published T, M and S multiply to 28.10 while the
-> board publishes K 27.83 for the same run; the published points figure follows
-> from 27.83 exactly. Both are reproduced here as published rather than
-> reconciled, because the board rounds its axes and its K independently and this
-> file will not adjust one published number to make another one look tidier.
+> **A board run ID is valid only until the next run.** This same commit was
+> scored twice and the board issued a new ID the second time — the first citation
+> of it in this file became a dangling reference within the hour, which is
+> exactly what this table's own rule is written against. The ID above is the
+> current one; if the run is scored again, this file is stale again.
 
 **Where the next point comes from.** With the weights above, each 1% off wall
 time is worth about 0.108 points, each 1% off memory about 0.043, and each 1% on
@@ -82,7 +94,11 @@ the reference (final scoring 10x).
 | — | *measured by the board on the full public dataset, seed 1; commit `3032ab8`, 316 code lines* | | | | |
 | 1 | Real Ingest: 13-byte hour key (no calendar arithmetic), interned endpoints, rank selection instead of sorting, parsed across twelve threads over disjoint record ranges | `run-2e1da425c7aa` | 0.1338 s | 60.2 MB | 59.43 |
 | 2 | Mapped input instead of buffered reads; compact single-word record; one packed 64-byte AVX2 probe per line for both field boundaries; single-level k-way merge with an exactly reserved output | `run-821ff711c091` | 0.0867 s | 49.5 MB | **62.97** |
-| 3 | Hour-partitioned phase 2 (the serial merge between workers gone); one shared lock-free endpoint table with a 13-bit record key sized to the spec's 1,842-endpoint catalogue; every hour formatted straight into the mapped output file at a precomputed offset; 32-byte AVX2 newline search; per-thread scratch zeroed once | `run-dda2ca043537` (measured) | 0.0419 s | 30.1 MB | **72.23** |
+| 3 | Hour-partitioned phase 2 (the serial merge between workers gone); one shared lock-free endpoint table with a 13-bit record key sized to the spec's 1,842-endpoint catalogue; every hour formatted straight into the mapped output file at a precomputed offset; 32-byte AVX2 newline search; per-thread scratch zeroed once | `run-1001097d113a` (measured) | 0.041585 s | 31.993856 MB | **72.2482** |
+
+The M column is decimal MB (`memory.peak` bytes, divided by 1e6), which is the
+unit the published reference is in; see the note in section 1 for why that
+matters.
 
 **Step 3 is one board row and four local steps, and that is the board's rule, not
 a shortcut.** The board keeps only the BEST result per track, so the intermediate
@@ -94,6 +110,12 @@ landed. The 68.610 points that `f6ab1c5` measured on the board is likewise not a
 citable row any more: its run ID was superseded by step 3 and the board no longer
 holds it. The same applies to the intermediate pushes between step 1 and step 2:
 what they contained is in section 3, with the measurement that killed each one.
+
+**One run ID, and it is provisional.** This commit has already been scored twice
+under two different IDs for the same numbers, so the ID above is the current one
+as of this writing and not a durable reference. Anyone re-pushing, re-scoring or
+re-checking this table should confirm the ID against the board first; a stale ID
+is a dangling citation, which is the one thing this table's rule forbids.
 
 ---
 
@@ -157,12 +179,12 @@ on all three axes; magnitude on time was optimistic, and the source estimate was
 better than the local counter suggested:
 
 ```
-                    projected from local   board, run-dda2ca043537
-wall time           0.0578 -> 0.032 s      0.0419 s   (better than the old
-                                                       number, but not by 1.8x)
-peak memory         39.4   -> 27.6 MB      30.1 MB
+                    projected from local   board, run-1001097d113a
+wall time           0.0578 -> 0.032 s      0.041585 s   (a 41% local gain landed
+                                                         as 27.5%)
+peak memory         39.4   -> 27.6 MB      31.993856 MB (decimal MB)
 source              543    -> 750 lines   750 lines
-points              68.610 -> ~75.8        72.23
+points              68.610 -> ~75.8        72.2482
 ```
 
 The gap is the box, exactly as the caveat said: `/data` arrives warm on the
@@ -170,6 +192,13 @@ board and its L3 is 24 MiB against this laptop's, so a 41% local wall gain lande
 as 27.5%. The local numbers are still the right *direction* instrument and the
 wrong *magnitude* one, and that is worth knowing the next time they are used to
 choose between two candidate changes.
+
+**The same lesson, one axis over, and it is sharper.** The local memory figure is
+in MiB because that is what `/proc` reports; the board's M axis is decimal MB. A
+projection that carries MiB into the K arithmetic inherits the 0.95% bias
+described in section 1 on top of the box difference, and the two errors point in
+opposite directions, which is the worst combination for learning anything from
+the comparison. Convert to decimal MB before the formula sees it.
 
 ### 2b. What was planned
 
@@ -370,4 +399,5 @@ the 239 MB of page cache is charged to the container; that is a property of the
 host, not of the program, which is why M is cited here as peak anonymous rss.
 
 Commit of the code these local measurements are of: `0eaaa6f`.
-Board run for the same code: `run-dda2ca043537` at commit `043ec44`.
+Board run for the same code: `run-1001097d113a` at commit `043ec44` (provisional:
+this commit has been re-scored once already, and a re-score issues a new ID).
