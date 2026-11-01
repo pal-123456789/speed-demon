@@ -16,6 +16,14 @@
 
 ---
 
+> **Read 2f first if you want the current state of this track.** The table in
+> section 1 and the stage narrative in 2c/2e/3/4 record the shape this track was
+> frozen at (stage 2, 55.63 points) and the stage that was reverted on the board
+> (stage 3). The board has since measured the same track family at **58.290
+> points**, and stage 4 -- the component audit, the CPU-second phase split and the
+> one change it justified -- is in **2f**. Section 1's table is kept because the
+> board-run ledger in 1b is cumulative and each row cites the run that measured it.
+
 ## 1. The task
 
 Build an inverted index over a 250 MB text corpus, then answer 50,000 boolean and phrase queries. Build time and query time are measured together, as one total wall time. There is no build/query split any more.
@@ -63,6 +71,7 @@ table does not carry them.
 | 1 | Real Index: authored inverted index with posting lists, boolean AND/OR/NOT evaluated left to right, and phrases resolved by a second sequential pass over the candidate document ids | `run-545c440faae8` | 3.9907 s | 126.3 MB | 34.20 |
 | 2 | Bucketed build: one scan appends a 16-bit unit -- term index in its bucket, and the documents since that bucket's last posting -- so the per-worker term list, the per-worker posting arenas, the counting sort and the merge are all gone. **The board measured S 1150 and K 12.957 at commit `a1e256e`; this is the best-known shape for this track and the one it is frozen at.** | `run-cb095521ec8c` | 0.4776 s | 129.6 MB | **55.63** |
 | 3 | Phrases answered inside the build scan. **REVERTED: the board measured this 0.46 points worse than step 2, with time 4.6% higher, at commit `577a4de`; 2e is the full record of the disagreement between this box and the board.** | `run-cd1f53ba0ff9` | 0.4996 s | 127.9 MB | 55.17 |
+| 4 | Per-document resolve-then-handle split of the build scan, with each term's per-worker state prefetched as its id is resolved: a labelled scratch A/B of four interleaved sittings measured the build's user CPU down between 11% and 20%, and the full-corpus pin reproduced 5/5. **Not yet on the board — the Lead pushes and the run ID is transcribed from the board UI, so this cell stays pending until then; 2f is the measurement record.** | _pending the Lead's push_ | _pending_ | _pending_ | _pending_ |
 
 ---
 
@@ -227,6 +236,223 @@ evaluator scores zero on a holdout rather than scoring low.
 
 ---
 
+## 2f. Stage 4: the component audit, the measured split, and the one change it justified
+
+**Where this track actually stands.** The board measured `6ba0849` at **58.290 points**: T
+`0.4028 s`, M `90.84 MB`, S `1531` code lines, D `1.00`. Memory had already come down from the
+`219 MB` the same track read at the start of the session, which is why M is no longer the axis to
+spend on. Everything in this section is a **local** measurement on the WSL2 dev box with the corpus
+staged on ext4, and every one of them is labelled local; the board rows in 1b are the ones that
+count.
+
+### 2f.1 The phase split, in CPU seconds, not wall seconds
+
+Wall time on this host cannot rank two variants: the same binary measured between `0.47 s` and
+`5.46 s` in one sitting, because WSL2 charges about ten microseconds per first-touch page fault and
+the box takes a variable load. So the phases are measured in **user CPU seconds summed over all
+twelve workers**, which excludes fault handling and is the quantity that carries to the bare-metal
+board. The binary's own laps were extended for this measurement to report wall, user CPU, system
+CPU and `smaps_rollup` `Anonymous` at every boundary; that extension is a scratch variant and is not
+shipped.
+
+```
+before stage 4, best of five runs, full corpus, 12 workers
+
+stage                    wall     user     sys    share of wall
+parse queries           0.028     0.02    0.01       4.6%
+sample                  0.025     0.09    0.06       4.1%
+build index             0.418     2.84    0.49      69.2%
+phrase candidates       0.018     0.06    0.02       3.0%
+phrase verify           0.080     0.58    0.06      13.2%
+evaluate+format+write   0.035     0.25    0.04       5.8%
+total                   0.604                           
+```
+
+**The build is 74% of the CPU, not the half the stage-2 profile in section 4 claimed**, and it is
+not instruction-bound. Counting the scan directly (a scratch build that increments relaxed
+counters) gives:
+
+```
+tokens scanned                    37,411,528
+of which a query term             28,716,697   (76.8%)
+of which a bitmap term            15,968,525
+of which a new posting-list term  12,648,435   == the posting count
+query terms interned                  75,747
+terms held as bitmaps                    311   holding 9,592,095 postings
+```
+
+So 76.8% of every token in the corpus is looked up, and each hit does two *dependent* random reads:
+the term-table slot and then the key it names, then the term's per-worker state. At about 3.3
+CPU-seconds for 37.4 M tokens the scan spends on the order of 89 ns of CPU per token, which no
+instruction-count model explains. It is memory latency, and that single fact predicted every
+result below.
+
+### 2f.2 Pricing each component by deleting it
+
+Each row is a **labelled scratch build that answers WRONG on purpose**, timed with the SD_TIME laps
+and discarded. User CPU is summed over threads and `base` is the committed shape. The three rows
+marked † were priced in a second sitting against a base measured in the first, so their deltas carry
+about ±10% on top of the run-to-run spread; `F_split`, `L16` and `L32` were interleaved with `base`
+round by round and do not have that extra error.
+
+```
+variant       what it removes from the build scan              user CPU s   vs base
+base          nothing (the shape that shipped)                     4.64        --
+E_tokenize    everything after the token bounds                     0.58     -87.5%
+A_probe       the whole per-token effect: hash + probe only         1.83     -60.6%
+B_bmi         A_probe plus the bmi[t] load, nothing else            1.87     -59.7%
+H_bits        the posting-list path, keeps the bitmap bit (†)       2.46     -47.0%
+G_nslot       the unit writes, keeps the dedupe (†)                 3.06     -34.1%
+D_noscatter   the scatter into the posting arena                    3.96     -14.7%
+F_push        the Vec-of-Vec chunk cursor, replaced by a raw one (†) 4.88     +5.2%
+L16 / L32     the prefetch ring 16 / 32 tokens deep            3.90 / 3.92  -2.5 / -2.0%
+```
+
+`F_split` -- the change that actually shipped -- is measured properly interleaved in 2f.4 and is
+deliberately **not** given a row here: comparing it against this table's `base` would compare two
+different sittings, which is the mistake this file keeps warning about.
+
+Reading the deltas as shares of the one wall time, and letting the scratch noise average out:
+
+```
+tokenize (separator and token bounds)              0.58    12.5%
+hash (2x CRC32 + multiply) + table probe           1.25    26.9%
+bitmap path (15.97 M bit sets)                     0.59    12.7%
+posting-list dedupe + count (12.75 M)              0.60    12.9%
+posting-list unit writes + gap bookkeeping         0.94    20.3%
+scatter into the posting arena (12.65 M)           0.68    14.7%
+```
+
+**Three of those results are worth more than the change they led to, because each one closes a door
+that looked open:**
+
+* **The `bmi[t]` read is free.** `B_bmi` minus `A_probe` is `0.04 s`, inside the spread. Renumbering
+  terms by class so a token's role is read off its id range — the idea with the most obvious
+  theoretical appeal, since it deletes one random read per token — would therefore buy about 1%,
+  which is not measurable here. **Not attempted**, and that is the measured reason.
+* **The chunk cursor is not the cost.** `F_push` replaced `Vec<Vec<u16>>::last_mut().unwrap()[len]`
+  with a raw pointer, deleting roughly ten instructions per unit write on 12.65 M writes, and
+  measured *five percent worse* (i.e. nothing). Consistent with 2f.1: the scan is waiting on memory,
+  so deleting instructions is free of benefit. **Reverted, never committed.**
+* **A deeper prefetch ring is not the cost either.** `L16` and `L32` measured inside the noise, so
+  the eight-token lag is already deep enough to cover the slot load. **Not taken.**
+
+### 2f.3 The change, and why it is the one the measurements point at
+
+The two dependent random reads are: the term-table probe, and the term's per-worker state. The
+existing eight-token ring covers **only the first** — it prefetches a token's slot and resolves the
+token eight tokens later. But the per-term state was read *at the moment the token was resolved*, so
+it had no lead time at all: it is one unhidden cache miss per hit, and there are 28.7 M hits.
+
+So the per-document work is split into two passes:
+
+1. resolve every token of the document into a small `ids` buffer, which is where the ring already
+   drains, and **prefetch that term's `nslot` and `bmi` slots as each id is appended**;
+2. run the per-term work over the buffer.
+
+Nothing about *what* is computed changes, and the order does not change either: pass 1 emits ids in
+token order and pass 2 walks them in that order, and all of a document's tokens are still processed
+before the next document. That is the whole correctness argument for the gap chain (`prev[b]`), the
+per-document dedupe stamp and the bitmap bits, all of which depend on document order and on nothing
+else. The bound is `max line 7,609 bytes` in this corpus, so the buffer is at most ~3,800 `u32` per
+worker.
+
+The second pass now reads a working set of about 115 cache lines per document -- the terms that
+document actually holds -- and pass 1 has already asked for all of them.
+
+### 2f.4 Before and after, and what is not in the noise
+
+`F_split` was measured **interleaved** against the committed binary, round by round, in four
+separate sittings, because wall time drifts by more than the effect inside one sitting. `min` and
+`median` are over the rounds of that sitting.
+
+```
+sitting   rounds   base user CPU (min / median)   F_split (min / median)   min delta   median delta
+C            6         4.00 / 4.20                   3.31 / 3.68            -17.2%        -12.4%
+D            8         5.68 / 6.12                   4.54 / 4.92            -20.1%        -19.6%
+E           12         4.10 / 4.83                   3.62 / 4.31            -11.7%        -10.8%
+F           10         4.62 / 4.84                   3.99 / 4.10            -13.6%        -15.3%
+```
+
+**Direction: a win in all four sittings. Magnitude: 11% to 20% of user CPU, and the spread between
+sittings is the host's load, not the code.** Attributing the gain inside the change: the split on
+its own measures between 5.6% and 7.0% better than base at the minimum, and the state prefetch
+is the other half.
+
+**What is NOT claimed. Wall time on this host moved less and inconsistently** -- one twelve-round
+sitting read a `9.6%` wall improvement at the minimum and only `3.2%` at the median, because a third
+of the local wall time is page faults that the scoring box does not pay the same way. And a point
+estimate: this change is worth roughly `+0.9` to `+1.2` board points, which is **at or inside the
+board's own ±1.5 point noise**. It is the right change on the measurement, but one board run of it
+will not prove it, and nobody should treat a single unchanged-looking run as a refutation.
+
+Memory did not move: `smaps_rollup` `Anonymous` peaks at `56.2 MB` after the change against `55.9
+MB` before, both during `build index`, which is the phase that sets the peak.
+
+### 2f.5 Exactness
+
+Every gate, run against the committed binary:
+
+```
+full corpus, 5 runs, pin f86973c210228141bcb6f1f1b10188ad2a9b65f71e7cd7cf4590b38de4e80927
+                                                   5/5 MATCH
+tiny hostile oracle (verification/cases/track-b)    MATCH
+official sample (verification/data/track-b)         MATCH  eeeec1e9319da98a
+check-b-variants.sh, three data dirs               ALL MATCH (as-written, all-bitmaps, no-bitmaps)
+check-consistency.py                               229 assertions, all agree
+check_claims.py --strict                           0 unsourced claims
+```
+
+`check-b-variants.sh` was given the tiny oracle, the official sample and a fresh adversarial query
+set from `tooling/fuzz-b-queries.py` (7,136 queries over sampled documents, deliberately
+over-sampling the bitmap/list transitions). The change does not touch the classification, so this
+test is not expected to move -- it is run because it is the test that would catch it if a
+restructuring of the scan had quietly changed which documents get a bit.
+
+Code lines: `1491` before, `1510` after, so the board's S moves from `1531` to about `1550`
+(estimate; `scc` is not installed on this host and the repo's own fallback is what produced these).
+That costs about `0.004` points on the S axis -- 25 lines for a double-digit CPU win is the right
+trade on this track, where S is the smallest weight and capped at 1.0 anyway.
+
+### 2f.6 The measurement that matters most: the step to track D is not reachable here
+
+This track is the **dropped** one in the overall: it contributes exactly zero until it passes track
+C, and the real prize is passing track D. So it is worth writing down what passing would actually
+cost, from the board's own scoring formula and the board's own readings:
+
+```
+K          = (T_ref/T)^0.50 * (M_ref/M)^0.20 * (S_ref/S)^0.15 * (D_ref/D)^0.15
+points     = 50 * log10(K)
+T_ref 56.352376 s, M_ref 2199.9616 MB, S_ref 91 lines, D_ref 1.00
+
+this track now (board)      T 0.4028   M 90.84   S 1531   ->  K 14.65   ->  58.29 points
+after stage 4 (estimate)    T ~0.370   M 90.84   S 1550   ->  K 15.26   ->  ~59.2 points
+track C's 66.81 needs                                              K 21.69
+track D's 68.59 needs                                              K 23.55
+
+the *best competing entry* on this track, for scale:
+                            T 0.1738   M 47.1    S 607    ->  K 29.22   ->  ~73.1 points
+```
+
+Read the last two blocks together, because they decide the whole question. Reaching track D needs
+`K 23.55`, which is **80% of the best entry's K**. From where this track stands that is a factor
+`1.61` on the composite — a **2.6x cut in T alone (derived)**, or a 2.6x cut in T *and* memory down to the
+best entry's, together. Nothing in 2f.2 is within an order of magnitude of that: the largest single
+lever found on the hottest path was 11-20% of user CPU, and the remaining map (build 74%, phrase
+verify 13%, evaluate 6%) offers perhaps another 20-30% across several coordinated changes, not 160%.
+
+**So the honest conclusion is that this step cannot be reached from here in this session, and the
+arithmetic above is the reason rather than an opinion.** Closing it would take a rewrite of the
+scan rather than a change to it — the three structural differences that the best entry's own log
+attributes its speed to are a mapped pointer walk instead of a per-line buffered read, a 64-byte
+class-mask tokenizer instead of this track's 8-byte SWAR scan, and phrase verification folded into
+the build scan so the second full read of the corpus disappears. Each is a structural change; the
+third has already been priced on the board and lost (**2e**), which is itself a warning about
+expecting the other two to transfer. What stage 4 does is take the one deletion the local
+measurements actually support, prove it cannot change an answer, and leave the tree building.
+
+---
+
 ## 3. Experiments that failed, and were reverted
 
 This section is deliberately the longest part of the file. The organizers say
@@ -256,6 +482,10 @@ interesting part and judges are told to reward them."*
 | **Decoding every phrase term before intersecting it** | _ | **measured: phrase candidates 0.033 -> 0.658 s, reverted** | **the rarest term's list is the whole candidate set; the other terms only need a membership test. Decoding them wrote 89 MB of postings that were then read once and thrown away. A binary search inside one worker's run of the compressed units answers the same question with no decode, and that generalises to every set operation on this track.** |
 | **Verifying phrases inside the build scan** | _ | **measured on the board: T 0.4776 -> 0.4996 s and 55.63 -> 55.17 points, reverted** | **locally it was -11.6% wall, and the board read +4.6% time. The deleted candidate and verification phases were real (0.171 s locally) but compute-bound, while the build scan they moved into is memory-bound on the scoring box. Full accounting in 2e. This is the reason every time number in this file is labelled local or board.** |
 | **Removing the postings of phrase-only terms** | _ | **measured: only 5% fewer postings, memory level** | **kept, but not for the reason it was written: 53,444 of 75,747 terms carry postings, so the terms that only phrases name were never a large part of the index. It is strictly less work, not a win.** |
+| **A raw-pointer chunk cursor for the build's unit stream** (stage 4) | the `Vec<Vec<u16>>::last_mut().unwrap()[len]` store costs ten instructions on each of 12.65 M unit writes | **measured: `+5.2%` user CPU, i.e. nothing** | **the scan is memory-latency bound, not instruction bound, so deleting instructions buys nothing — and the raw cursor costs 14 more lines for it. Measurement and the model it falsified are in 2f.2. Not committed.** |
+| **A deeper prefetch ring** (24 or 32 tokens instead of 8, stage 4) | 28.7 M hits at 8 tokens of cover are not enough to hide the term-table slot load | **measured: `-2.5%` and `-2.0%`, both inside the run-to-run spread** | **the eight-token lag already covers the slot; the miss that was *not* covered is the per-term state read, which is what stage 4 actually fixed. Not committed.** |
+| **Renumbering terms by class so the `bmi` array goes away** (stage 4) | one random read per token deleted on the hottest path should pay, and it is the idea with the most theoretical appeal here | **priced before attempting: the `bmi[t]` load is `0.04 s` of `4.64` user CPU seconds, inside the spread — about 1%** | **not attempted. Deleting a cache-resident read that is already overlapped is not a win, and the renumbering would have to be paid for across the query evaluator. Priced in 2f.2.** |
+| **Unchecked indexing in the new per-document handle loop** (stage 4) | with the state now L2-resident, the two bounds checks per hit (28.7 M hits) should become visible | **measured: `-21.6%` at the minimum but `-15.7%` at the median against `-13.6%`/`-15.3%` for the split alone — one lucky round, not an effect** | **not committed. Reported because a minimum-only comparison would have claimed a further 8% that does not reproduce.** |
 
 The last three were tried and reverted late in the campaign, after the PGO work above was
 already in place. Each looks correct from a byte count or a cache-resident-table argument,
@@ -264,6 +494,12 @@ and each is recorded because the measurement is the interesting part.
 ---
 
 ## 4. Where the time actually goes
+
+> **Historical: this section profiles the stage-2 shape**, when the track still carried per-worker
+> term lists and a merged posting arena, and it is kept because it is the measurement that produced
+> stage 2's deletion. **For the shape that ships, the CPU-second phase split, the component pricing
+> and the reasoning are in 2f.** In particular the "49.7% build and 50.3% everything after it" line
+> below is not true of the current code: measured on it, the build is 74% of the CPU.
 
 Measured by the binary's own `SD_TIME=1` instrumentation, which prints cumulative seconds at
 each stage boundary. Three runs on the local box; the two clean ones agree to within 0.01 s,
@@ -399,4 +635,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 
 cargo run --release --offline --manifest-path verification/harness/Cargo.toml -- bench --track B --no-docker
 ```
 
-Commit hash of this measurement: `_(fill)`.
+Commit hash of this measurement: `_(fill with the pushed commit)`. Stage 4 was measured on the
+local stage-4 commit, which the Lead verifies and then pushes; this cell is filled from that push, as
+on the other tracks. Naming a hash here would be self-referential -- writing it into the file changes
+the commit it names. The scratch variants those numbers came from were never committed and are
+deleted -- every one is described in 2f.2 by what it deleted, so any of them can be rebuilt and
+re-priced if a judge wants to.

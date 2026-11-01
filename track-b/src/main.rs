@@ -730,20 +730,33 @@ const ST_DF: u32 = (1 << 20) - 1;
 /// A term number that names nothing: no bitmap, and no block in progress.
 const NONE: u32 = u32::MAX;
 
-/// Calls `on` with the id of each token of `text` that is a query term, in token
-/// order.  A token's table slot is a random read, so its slot is prefetched and
-/// the token is looked up `LAG` tokens later; results are still reported in token
-/// order, so callers that keep per-document state see the document's tokens once
-/// each and in order.
+/// Resolves every token of `text` that is a query term into `ids`, in token
+/// order.  A token's table slot is a random read, so its slot is prefetched and the
+/// token is looked up `LAG` tokens later.
+///
+/// `state` and `bmi` are the arrays the caller indexes with each id, and their
+/// slots are prefetched as each id is resolved.  The probe and the per-term state
+/// read are the two dependent random reads of the build and the ring covers only
+/// the first; resolving a whole document before any of its state is read gives the
+/// second one a document of lead time instead of nothing.
 #[inline(always)]
-fn each_term(text: &[u8], tt: &TermTable, mut on: impl FnMut(u32)) {
+fn term_ids(text: &[u8], tt: &TermTable, ids: &mut Vec<u32>, state: *const u32, bmi: *const u32) {
     const LAG: usize = 8;
     let n = text.len();
+    ids.clear();
     let mut ring = [(0u64, 0usize, 0usize); LAG];
     let mut cnt = 0usize;
     let mut hit = |found: Option<u32>| {
         if let Some(t) = found {
-            on(t);
+            ids.push(t);
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                // SAFETY: `t` is a term id, so both addresses lie inside arrays of
+                // `nterms` words, and a prefetch never faults.
+                use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+                _mm_prefetch::<_MM_HINT_T0>(state.add(t as usize).cast());
+                _mm_prefetch::<_MM_HINT_T0>(bmi.add(t as usize).cast());
+            }
         }
     };
     let mut i = 0usize;
@@ -795,17 +808,19 @@ fn index_doc(
     nslot: &mut [u32],
     bmi: &[u32],
     pending: &mut [u64],
+    ids: &mut Vec<u32>,
     bit: u64,
     gen: u32,
     off: u32,
     nb: usize,
     nbsh: u32,
 ) {
-    each_term(text, tt, |t| {
+    term_ids(text, tt, ids, nslot.as_ptr(), bmi.as_ptr());
+    for &t in ids.iter() {
         let bi = bmi[t as usize];
         if bi != NONE {
             pending[bi as usize] |= bit;
-            return;
+            continue;
         }
         let e = &mut nslot[t as usize];
         if *e >> 20 != gen {
@@ -815,21 +830,29 @@ fn index_doc(
             prev[b] = off;
             streams[b].put(t >> nbsh, gap);
         }
-    });
+    }
 }
 
 /// Guess a term's document frequency from a sample: the documents of one byte
 /// range that hold it.  This only ever decides how a term is stored, never what
 /// it matches, so a sample that is wrong costs space or time and cannot change an
 /// answer.
-fn sample_doc(text: &[u8], tt: &TermTable, last: &mut [u32], df: &mut [u32], gen: u32) {
-    each_term(text, tt, |t| {
+fn sample_doc(
+    text: &[u8],
+    tt: &TermTable,
+    last: &mut [u32],
+    df: &mut [u32],
+    gen: u32,
+    ids: &mut Vec<u32>,
+) {
+    term_ids(text, tt, ids, last.as_ptr(), df.as_ptr());
+    for &t in ids.iter() {
         let e = &mut last[t as usize];
         if *e != gen {
             *e = gen;
             df[t as usize] += 1;
         }
-    });
+    }
 }
 
 /// Streaming pass over one byte range of `docs.txt`, returning that range's own
@@ -865,6 +888,7 @@ fn build_range(
     start: u64,
     end: u64,
 ) -> Part {
+    let mut ids: Vec<u32> = Vec::with_capacity(256);
     let mut nslot: Vec<u32> = vec![0u32; nterms];
     let mut prev: Vec<u32> = vec![0u32; nb];
     let mut streams: Vec<Stream> = (0..nb).map(|_| Stream::new()).collect();
@@ -953,7 +977,7 @@ fn build_range(
         }
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, bmi, &mut pending, bit, gen, off, nb, nbsh);
+        index_doc(text, tt, &mut streams, &mut prev, &mut nslot, bmi, &mut pending, &mut ids, bit, gen, off, nb, nbsh);
     }
     if block != NONE {
         flush(&mut pending, block as usize, words, bmp);
@@ -997,6 +1021,7 @@ fn flush(pending: &mut [u64], w: usize, words: usize, bmp: Raw<AtomicU64>) {
 /// malformed still reports the id the full scan will use.
 fn sample_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64) -> (u32, Vec<u32>) {
     let (mut df, mut last) = (vec![0u32; nterms], vec![0u32; nterms]);
+    let mut ids: Vec<u32> = Vec::with_capacity(256);
     let (mut first, mut gen, mut seen) = (0u32, 0u32, false);
     let stop_at = start + (end - start) / 32;
     let f = match File::open(path) {
@@ -1045,7 +1070,7 @@ fn sample_range(path: &Path, tt: &TermTable, nterms: usize, start: u64, end: u64
         gen += 1;
         let text = &mut line[tstart..stop];
         ascii_lower_in_place(text);
-        sample_doc(text, tt, &mut last, &mut df, gen);
+        sample_doc(text, tt, &mut last, &mut df, gen, &mut ids);
     }
     (first, df)
 }
