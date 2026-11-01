@@ -249,6 +249,7 @@ interesting part and judges are told to reward them."*
 |---|---|---|---|
 | **Bidirectional Dijkstra, forward + reverse CSR** | _ | **built in full and hash-verified, then measured 1.52x SLOWER** | **the meeting condition and the second label table cost more than the smaller search saves, on a graph this sparse** |
 | A Contraction-Hierarchy build | _ | not attempted, on arithmetic | LEGAL, but preprocessing happens inside the timed run and the searches are already small: 11,660 settled nodes per query, 0.67% of the graph. The organizers say the same thing — CH is legal, it just rarely repays on this mix — and the same settle counter now confirms it independently |
+| **Exact degree-2 chain contraction** | a vertex with one in-edge and one out-edge can be bypassed by a single edge of summed weight, so the search has fewer vertices to settle | **EXACT AND REVERTED** — full corpus `a23dbdf0...` byte-identical over all 2,000 lines, plus the tiny oracle and the official sample; but 10 paired full-corpus rounds put the two builds within noise of each other (min 400 ms both, median ~435 against ~440 ms) | the corpus contains **no chains**: all 100,735 bypassable vertices are chains of length exactly one, so the technique can remove at most 5.8% of vertices one hop at a time. It rewrites the edge array for a 2.0% edge reduction and buys nothing measurable. §4b has the three exactness defects it took to get here |
 | Too many ALT landmarks | _ | REFUTED BY MEASUREMENT | the premise was that landmark bounds would shrink the search, and the search is already 0.67% of the graph, so they can save at most about 2x. Memory grows as k*n*4 with per-landmark offsets, and the M axis has about 9 MB of headroom against the leader |
 | 32-bit distances | _ | not attempted, deliberately | there is no proven bound on the maximum path weight, and a wrong answer is worse than a slow one. The labels stay 64-bit |
 | Preprocessing justified by sequential query timing | _ | resolved by measurement | the queries run 12-way parallel and the budget is 12x smaller than a sequential reading suggests. This is also why the build/query split matters: the build is 16% and the queries 84%, so any preprocessing has to pay for itself 2,000 times inside a single timed run |
@@ -306,6 +307,73 @@ at once, so the table is TINY and cache-resident: its cost is the probe, not the
 **So the attack is the label and heap data structures, not the search size.** Halving the
 per-relax cost takes the query phase from 1.98 s to about 1.0 s locally, which is the x1.414
 on the T factor that makes this track the third counting one.
+
+### 4b. Degree-2 chain contraction: made exact, then REVERTED on measurement
+
+The structural idea that shrinks the graph the search runs on: a vertex with one in-edge and
+one out-edge is replaced by a single edge from its predecessor to its successor whose weight
+is the sum, and the vertex disappears. Every path through it is preserved exactly, so no
+answer can change. If the settle count is where the gap is, this is the first thing to try, so
+it was worth an attempt.
+
+**The exactness work, and the three defects that made the first attempt wrong.** An earlier
+attempt had been reverted as "fast but wrong": it built clean and matched the tiny oracle and
+the 25 MB sample, and was deterministically wrong on the full corpus. The method that worked
+was to diff the output, not to reason:
+
+1. **A shortcut that crosses an oversized weight added the marker, not the weight.** An edge
+   whose weight needs more bits than the packed field has stores a marker in the field and the
+   real value on a side list. The chain walk accumulated `cx >> hb`, the packed field, so for a
+   heavy edge it added 2047 instead of the weight. This corpus contains edges of weight
+   `2^32 - 1`, so two of the 2,000 answers came out short by exactly `2^32`. The diff showed it
+   as **TOO SHORT by 4294964356**, the signature that points straight at a dropped weight.
+2. **The in-degree test was `!= 1` where it must be `> 1`.** A vertex whose in-edge comes from
+   a vertex that is itself bypassed stops having that in-edge in the contracted graph, so it
+   becomes a chain vertex, but `!= 1` kept it alive. Nothing then followed its chain and a
+   shortcut stopped one hop short. The predicate is `outdeg == 1 && indeg <= 1`.
+3. **Bypassing the end of a chain invented reachability.** A vertex with **no** out-edge and
+   one in-edge was treated as a chain vertex, but the walk then read a next edge that does not
+   exist. This turned two queries' `-1` into a number, the signature that points at the
+   unreachable shortcut.
+
+With all three fixed the full corpus is exact: `a23dbdf0...`, byte-identical to the
+uncontracted output over all 2,000 lines, plus the tiny oracle and the official sample.
+
+**Then the measurement, which does not support keeping it.** With everything else identical
+(the heavy side list is `u64` in both copies, since a shortcut weight can exceed `u32`), 10
+interleaved full-corpus rounds:
+
+```
+uncontracted   min 400 ms   median 435.5 ms   peak RSS 157.7-160.2 MB
+contracted     min 400 ms   median 449.5 ms   peak RSS 157.6-159.1 MB
+```
+
+That is a wash, inside the noise this rig resolves, and it is the *good* case: contraction
+removes 100,735 of 1,740,512 vertices and 100,735 of 4,999,492 edges, a **2.0% edge
+reduction**, for a full extra pass over both degree arrays and the whole edge array. An earlier
+pair of runs measured the contracted build 15-40% slower, but that pair compared a release
+baseline against a build still carrying the instrumentation above; the identical-build
+comparison is the one to trust.
+
+**Why more tuning cannot rescue it: the corpus has no chains.** Every one of the 100,735
+bypassable vertices is a chain of length **exactly one** -- there is not a single chain of
+length two anywhere in the 5 M edges:
+
+```
+chain length histogram:  {1: 100900}   chains of length >= 4: 0
+out-degree histogram:    0: 42   1: 122713   2: 480030   3: 690033   4+: 447694
+in-degree  histogram:    0: 34   1: 122849   2: 479699   3: 690101   4+: 447829
+```
+
+The degrees are essentially uniform over 1-4. Contraction can therefore remove at most 5.8% of
+the vertices, one hop at a time, and it cannot make a search skip a *run* of vertices, because
+there are no runs. The settle gap cannot be closed from this direction on this graph, and
+neither can any variant of it: the ceiling here is 5.8% of vertices against a 4.34x
+requirement.
+
+**So the refutation section 3 had already made on arithmetic now has a structural proof behind
+it, and the open item stays where section 4 put it: the attack is the per-relaxation cost of
+the label store, not the search size.** The contraction code is not in the tree.
 
 **The general lesson, now paid for twice in one session:** I proposed ALT landmarks from the
 phase split alone, and the search-size counter refuted it. The phase split tells you WHICH
