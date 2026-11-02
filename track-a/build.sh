@@ -1,18 +1,11 @@
 #!/bin/sh
-# relocation-model=static is a plain static ELF at a fixed address (3.9% fewer user cycles,
-# half the iTLB misses on the board). It is Linux-only: the MSVC linker rejects ADDR32 relocations
-# in a non-PIE image with LNK2017, and this script also builds the offline corpora on a dev box.
-RELOC=""
-[ "$(uname -s)" = Linux ] && RELOC="-C relocation-model=static"
 # Offline build for THIS track folder. rustc only, no cargo, no registry,
 # no network: the scored build runs with --network=none inside the official
 # allowlisted build stage, which already ships rustc.
 #
-# -C target-cpu=alderlake : the scoring CPU is a Core i5-13500 (Alder
-# Lake: AVX2, BMI2, PCLMULQDQ, AVX-VNNI, no AVX-512). It is named EXPLICITLY rather than left to
-# `native`, because the board's build host is not the scoring box -- a `native` build there emits
-# AVX-512 for a machine that does not want it, which is the measured 2-7% regression every track
-# showed when `native` was tried. crt-static skips the dynamic loader.
+# -C target-cpu=x86-64-v3: the scoring CPU is a Core i5-13500 (AVX2, BMI2,
+# FMA; AVX-512 fused off), so v3 is exactly right and safe on every host this
+# runs on.
 #
 # PGO. The contract allows build-time training on generator output --
 #   "Build-time training (PGO, a JVM AOT cache, native-image) is allowed on
@@ -33,7 +26,7 @@ set -eu
 cd "$(dirname "$0")"
 
 COMMON="--edition 2021 -C opt-level=3 -C codegen-units=1 -C panic=abort
-        -C target-cpu=alderlake "
+        -C target-cpu=x86-64-v3"
 
 plain() {
     # shellcheck disable=SC2086
