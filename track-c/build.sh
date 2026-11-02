@@ -3,7 +3,7 @@
 # no network: the scored build runs with --network=none inside the official
 # allowlisted build stage, which already ships rustc.
 #
-# -C target-cpu=native: the scoring CPU is a Core i5-13500 (AVX2, BMI2,
+# -C target-cpu=x86-64-v3: the scoring CPU is a Core i5-13500 (AVX2, BMI2,
 # FMA; AVX-512 fused off), so v3 is exactly right and safe on every host this
 # runs on.
 #
@@ -26,7 +26,7 @@ set -eu
 cd "$(dirname "$0")"
 
 COMMON="--edition 2021 -C opt-level=3 -C codegen-units=1 -C panic=abort
-        -C target-cpu=native"
+        -C target-cpu=x86-64-v3"
 
 plain() {
     # shellcheck disable=SC2086
