@@ -704,9 +704,14 @@ fn main() {
                             std::ptr::copy_nonoverlapping(name.as_ptr(), o.add(21), name.len());
                             o = o.add(21 + name.len());
                             for mut x in l.numbers() {
+                                // One width() per number, not two: this phase formats about 800,000
+                                // numbers across 72 hours, and width is a leading-zero count, a
+                                // multiply and a table compare. The digits loop then walks exactly
+                                // the w bytes the advance reserved.
+                                let w = width(x) as usize;
                                 *o = b' ';
-                                o = o.add(1 + width(x) as usize);
-                                for i in 1..=width(x) as usize {
+                                o = o.add(1 + w);
+                                for i in 1..=w {
                                     *o.sub(i) = b'0' + (x % 10) as u8;
                                     x /= 10;
                                 }
