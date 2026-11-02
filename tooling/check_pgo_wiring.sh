@@ -71,13 +71,35 @@ for t in $TRACKS; do
                 ;;
         esac
 
-        # It must be reachable from inside the track folder, because that
-        # folder is the entire build context.
+        # Reachable from inside the container, which is what matters. Two
+        # patterns qualify and they are genuinely different:
+        #
+        #   * a `.profdata` SHIPPED inside the track folder, so it is part of
+        #     the build context; or
+        #   * a profile the SAME script CREATES immediately before using it,
+        #     with `llvm-profdata merge -o <arg>`. The container runs the
+        #     script, and /tmp inside that container is writable, so an
+        #     absolute path is reachable -- it is created, not delivered.
+        #
+        # The rule this replaces rejected the second pattern outright, which
+        # failed all four tracks including the two that have shipped working
+        # PGO for the whole campaign. A check that is wrong about the sound
+        # case trains people to ignore it.
         case "$arg" in
-            /*) FAIL "$t: profile-use=$arg is an absolute path; a scored build gets only $t/ as its context" ;;
+            /*)
+                if grep -qF "llvm-profdata merge -o $arg" "$BUILD"; then
+                    NOTE "  ok    $t: $arg is created by this script's own llvm-profdata merge"
+                else
+                    FAIL "$t: profile-use=$arg is neither inside $t/ nor created by this script, so rustc would warn and exit 0 with no profile"
+                fi
+                ;;
             *)
                 if [ ! -f "$t/$arg" ]; then
-                    FAIL "$t: profile-use=$arg does not exist inside $t/, so it cannot reach the scored image"
+                    if grep -qF "llvm-profdata merge -o $arg" "$BUILD"; then
+                        NOTE "  ok    $t: $arg is created by this script"
+                    else
+                        FAIL "$t: profile-use=$arg does not exist inside $t/, so it cannot reach the scored image"
+                    fi
                 fi
                 ;;
         esac
