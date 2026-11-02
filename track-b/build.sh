@@ -1,7 +1,7 @@
 #!/bin/sh
 # Offline build for THIS track folder. rustc only, no cargo, no registry, no network.
 #
-# -C target-cpu=x86-64-v3: the scoring CPU is a Core i5-13500 (AVX2, BMI2, FMA; no AVX-512).
+# -C target-cpu=native: the scoring CPU is a Core i5-13500 (AVX2, BMI2, FMA; no AVX-512).
 #
 # PGO. The contract allows build-time training on generator output, and gen_b.py beside this script
 # is a byte-identical copy of the organizers' Track B generator, so it is free in S. This script
@@ -11,7 +11,7 @@
 # build that FAILS is a rejected track, worse than a slow one, so PGO must never break the build.
 set -eu
 cd "$(dirname "$0")"
-COMMON="--edition 2021 -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=x86-64-v3"
+COMMON="--edition 2021 -C opt-level=3 -C codegen-units=1 -C panic=abort -C target-cpu=native"
 plain() { rustc $COMMON -C strip=symbols -o run src/main.rs; }
 pgo() {
     command -v llvm-profdata >/dev/null 2>&1 || return 1
