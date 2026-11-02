@@ -48,7 +48,9 @@ unsafe fn mmap(addr: *mut c_void, len: usize, _prot: i32, _flags: i32, _fd: i32,
     if !addr.is_null() {
         return addr;
     }
-    let v: Vec<u8> = vec![0u8; len.max(1) + 4096];
+    // 4 MB of slack: the huge-page helper aligns its own pointer up to a 2 MB boundary, so a
+    // stand-in that added one 4 KB page could hand back an aligned pointer past its allocation.
+    let v: Vec<u8> = vec![0u8; len.max(1) + (4 << 20)];
     Box::leak(v.into_boxed_slice()).as_mut_ptr() as *mut c_void
 }
 
@@ -127,6 +129,24 @@ fn map_file(path: &str) -> (usize, usize) {
     let size = v.len();
     v.resize(size + 4096, 0);
     (Box::leak(v.into_boxed_slice()).as_mut_ptr() as usize, size)
+}
+
+/// Zero-filled anonymous memory on 2 MB pages, aligned so every page is a whole huge page.
+///
+/// The bitsets are one row of 2,048 words per country -- 4 MB for 240 countries -- and a record's
+/// mark lands at random in them, so on 4 KB pages nearly every mark missed the first-level TLB.
+/// Only types whose all-zero bytes are a valid value.
+fn zeroed_huge<T>(n: usize) -> &'static [T] {
+    const HUGE: usize = 2 << 20;
+    let bytes = n * std::mem::size_of::<T>();
+    let want = (bytes + HUGE - 1) & !(HUGE - 1);
+    let raw = unsafe { mmap(std::ptr::null_mut(), want + HUGE, 3, 0x22, -1, 0) };
+    if raw as isize == -1 {
+        die("cannot map the bitsets");
+    }
+    let p = ((raw as usize + HUGE - 1) & !(HUGE - 1)) as *mut c_void;
+    unsafe { madvise(p, want, 14) }; // MADV_HUGEPAGE
+    unsafe { std::slice::from_raw_parts(p as *const T, n) }
 }
 
 #[inline(always)]
@@ -340,6 +360,10 @@ impl NameTable {
 }
 
 /// One country's running aggregates (per thread, summed at the end).
+///
+/// Exactly 64 bytes, and aligned to a cache line, so a record's update touches one line rather than
+/// straddling two. Every record updates one of these, 256 of them per thread.
+#[repr(align(64))]
 #[derive(Clone, Copy)]
 struct Totals {
     count: u64,
@@ -675,7 +699,7 @@ fn main() {
     let pieces = 8 * nt;
     let cut = split(bytes, start, pieces, b"\r\n");
     let names = NameTable::new();
-    let seen = NamesSeen(zeroed(256 * WORDS));
+    let seen = NamesSeen(zeroed_huge(256 * WORDS));
 
     // Populate tables and flag countries; populate bitsets and fill the region
     // table; parse records.
