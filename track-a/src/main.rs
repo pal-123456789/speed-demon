@@ -453,17 +453,6 @@ fn main() {
     // With transparent huge pages, a chunk region written only in part could be
     // backed by whole 2 MB pages and count against peak memory.
     unsafe { prctl(41, 1, 0, 0, 0) }; // PR_SET_THP_DISABLE
-    // `SD_TIME=1` prints seconds at each phase boundary. Only the barrier LEADER prints, and the
-    // leader is the last thread to arrive, so each line is the moment the phase really ended.
-    let t0 = std::time::Instant::now();
-    let timing = std::env::var_os("SD_TIME").is_some();
-    macro_rules! lap {
-        ($name:expr) => {
-            if timing {
-                eprintln!("[t] {:<10} {:>8.4}s", $name, t0.elapsed().as_secs_f64());
-            }
-        };
-    }
     let nt = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .clamp(1, 12);
@@ -547,7 +536,6 @@ fn main() {
                 // (a proper prefix first), which is the order lines are printed in
                 // an hour.
                 once(&ranked, || {
-                    lap!("parse");
                     let parsers = std::mem::take(&mut *parsed.lock().unwrap());
                     let most = (0..HOURS)
                         .map(|h| parsers.iter().map(|p| p.count(h)).sum())
@@ -571,7 +559,6 @@ fn main() {
                         rank,
                         most,
                     });
-                    lap!("rank");
                 });
                 let sh = shared.get().unwrap();
 
@@ -658,7 +645,6 @@ fn main() {
                     }
                 }
                 once(&sized, || {
-                    lap!("hours");
                     // Every hour is finished: whatever chunks the last releases left go
                     // back now, before the output's pages start to count.
                     sh.parsers.iter().for_each(|ps| ps.release(&finished));
@@ -695,7 +681,6 @@ fn main() {
                         }
                     }
                     let _ = text.set(base);
-                    lap!("size+map");
                 });
 
                 let base = *text.get().unwrap() as *mut u8;
