@@ -1,6 +1,15 @@
 # ⚡ Speed Demon 2026 — Four Tracks, Rust, No Dependencies
 
 <p align="center">
+  <a href="https://github.com/pal-123456789/speed-demon/blob/speed-demon/LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-3DA639?style=flat-square"></a>
+  <img alt="Language: Rust" src="https://img.shields.io/badge/language-Rust-CE412B?style=flat-square&logo=rust&logoColor=white">
+  <img alt="Dependencies: none" src="https://img.shields.io/badge/dependencies-none-4C8EDA?style=flat-square">
+  <img alt="Tracks: four" src="https://img.shields.io/badge/tracks-four-8957E5?style=flat-square">
+  <img alt="Answers: exact" src="https://img.shields.io/badge/answers-exact-2EA043?style=flat-square">
+  <img alt="Build: offline" src="https://img.shields.io/badge/build-offline-6E7781?style=flat-square">
+</p>
+
+<p align="center">
   <b>A complete, board-scored submission to Speed Demon 2026.</b><br/>
   Four independent Rust programs · one shared engineering discipline · every answer exact.
 </p>
@@ -19,6 +28,27 @@
 ```
 
 Every number above is a **live board measurement**, not a projection.
+
+---
+
+## Contents
+
+<details open>
+<summary><b>Jump to</b></summary>
+
+- [The shape of the submission](#the-shape-of-the-submission)
+- [What this is](#what-this-is)
+- [The four tracks](#the-four-tracks) · [🅰 Ingest](#-track-a--ingest) · [🅱 Index](#-track-b--index) · [🅲 Join](#-track-c--join) · [🅳 Traverse](#-track-d--traverse)
+- [Why the answers can be trusted](#why-the-answers-can-be-trusted)
+- [Repository layout](#repository-layout)
+- [Building and running a track](#building-and-running-a-track)
+- [Engineering notes](#engineering-notes)
+- [Honest limits](#honest-limits)
+- [Where the rest of the story is](#where-the-rest-of-the-story-is)
+
+</details>
+
+---
 
 ## The shape of the submission
 
@@ -65,6 +95,8 @@ There is no package manager anywhere in the scored path.
 
 ---
 
+---
+
 ## What this is
 
 Four standalone programs, one per track. Each is a **single Rust source file** compiled directly
@@ -75,6 +107,7 @@ The four problems are genuinely different — a 239 MB web-log aggregation, a 25
 answering 50,000 boolean and phrase queries, a 202 MB hostile CSV join, and 2,000 shortest-path
 queries on a 5 M-edge graph — so the four programs share a discipline rather than an implementation:
 
+> [!WARNING]
 > **Delete before you add. Measure on the board. Never publish a wrong byte.**
 
 That discipline is not a slogan — it is what the numbers came from, and [docs/JOURNEY.md](docs/JOURNEY.md)
@@ -227,7 +260,12 @@ flowchart LR
 
 ---
 
+---
+
 ## Why the answers can be trusted
+
+> [!TIP]
+> **Every guarantee below is mechanically enforced in this repository** — none of it is a promise.
 
 This is the part that matters most, and it is the part that is easiest to fake — so it is
 mechanically enforced in this repository.
@@ -244,7 +282,9 @@ mechanically enforced in this repository.
 **The pre-build plan is kept in [plan/](plan/) — including the places measurement proved it wrong,
 which is the more useful half of it.**
 
-**Zero wrong answers have ever been published from this repository.** Every experiment in this
+> [!IMPORTANT]
+> **Zero wrong answers have ever been published from this repository.** Every experiment that
+> could have compromised that was measured, found wanting, and removed. Every experiment in this
 project's history that could have compromised that was measured, found wanting, and removed — the
 ledger of those is in [docs/JOURNEY.md](docs/JOURNEY.md).
 
@@ -313,6 +353,9 @@ package manager in the scored path at all**, so there is nothing to resolve and 
 
 ## Engineering notes
 
+> [!NOTE]
+> **Three decisions shaped every track**, and each was chosen once rather than per track.
+
 **The compiler target is named explicitly, never `native`.** The build writes
 `-C target-cpu=alderlake` — the scoring CPU is a Core i5-13500, whose Alder Lake feature set is
 AVX2, BMI2 and PCLMULQDQ with AVX-512 fused off. `native` would resolve against whatever host
@@ -332,7 +375,13 @@ a single teardown at process exit.
 
 ---
 
+---
+
 ## Honest limits
+
+> [!WARNING]
+> **These are named rather than hidden, because a submission that claims no weaknesses is not
+> reporting honestly.**
 
 - **Track D's queue retains its pool capacity between queries.** It is emptied but not shrunk, so it
   holds every pushed entry including stale ones, where the heap it replaced freed on pop. **This is
@@ -347,6 +396,18 @@ a single teardown at process exit.
   claiming it.
 
 ---
+
+---
+
+## Where the rest of the story is
+
+| Read this | For |
+|---|---|
+| **[docs/JOURNEY.md](docs/JOURNEY.md)** | how it was built — `28.468 → 78.121`, including every experiment that was measured and reverted |
+| **[docs/TECHNIQUES.md](docs/TECHNIQUES.md)** | every optimisation in the submission, by track and by the axis it attacks |
+| **[docs/MEASUREMENT.md](docs/MEASUREMENT.md)** | how every number here was obtained, and what is deliberately not claimed |
+| **[plan/README.md](plan/README.md)** | the pre-build plan, including where measurement proved it wrong |
+| **`track-*/README.md`** · **`track-*/PERF.md`** | one track's design, and its own measured ledger |
 
 <p align="center">
   <b>Four tracks. One file each. Every answer exact.</b><br/>

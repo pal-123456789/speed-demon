@@ -154,3 +154,16 @@ tooling/measure-full.sh a /path/to/track-a <expected-hash> summary.txt
 
 Each track's own `PERF.md`, beside its source, holds that track's measurement ledger — what was
 tried, what it measured, and what stayed.
+
+---
+
+<p align="center">
+  <sub>
+  <b>Speed Demon 2026</b> · four Rust programs · no dependencies · every answer exact<br/>
+  <a href="../README.md">README</a> ·
+  <a href="JOURNEY.md">Journey</a> ·
+  <a href="TECHNIQUES.md">Techniques</a> ·
+  <a href="MEASUREMENT.md">Measurement</a> ·
+  <a href="../plan/README.md">Plan</a>
+  </sub>
+</p>

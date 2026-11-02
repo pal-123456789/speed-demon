@@ -46,3 +46,16 @@ measurement later contradicted.
 
 **That gap between plan and measurement is the useful part of this folder.** See
 [docs/JOURNEY.md](../docs/JOURNEY.md) for what actually happened.
+
+---
+
+<p align="center">
+  <sub>
+  <b>Speed Demon 2026</b> · four Rust programs · no dependencies · every answer exact<br/>
+  <a href="../README.md">README</a> ·
+  <a href="JOURNEY.md">Journey</a> ·
+  <a href="TECHNIQUES.md">Techniques</a> ·
+  <a href="MEASUREMENT.md">Measurement</a> ·
+  <a href="../plan/README.md">Plan</a>
+  </sub>
+</p>

@@ -1,5 +1,6 @@
 # The Journey — how this submission was built, and what it cost
 
+> [!NOTE]
 > **28.468 → 78.121 overall.** Every number here is a live board measurement.
 >
 > This document exists because the interesting part of a performance project is not the final
@@ -204,3 +205,16 @@ reversal above — because a losing experiment was always **reverted**, never sh
 
 **The remaining known inefficiencies are documented rather than hidden** — see the "Honest limits"
 section of the [README](../README.md) and the per-track `PERF.md` ledgers beside each source file.
+
+---
+
+<p align="center">
+  <sub>
+  <b>Speed Demon 2026</b> · four Rust programs · no dependencies · every answer exact<br/>
+  <a href="../README.md">README</a> ·
+  <a href="JOURNEY.md">Journey</a> ·
+  <a href="TECHNIQUES.md">Techniques</a> ·
+  <a href="MEASUREMENT.md">Measurement</a> ·
+  <a href="../plan/README.md">Plan</a>
+  </sub>
+</p>

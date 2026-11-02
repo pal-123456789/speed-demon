@@ -152,3 +152,16 @@ degree-2 contraction, atomic-free transposition, and several others.
 
 **Two known inefficiencies remain and are documented rather than hidden** — the [README's](<../README.md>)
 "Honest limits" section names them, and each track's `PERF.md` carries the detail.
+
+---
+
+<p align="center">
+  <sub>
+  <b>Speed Demon 2026</b> · four Rust programs · no dependencies · every answer exact<br/>
+  <a href="../README.md">README</a> ·
+  <a href="JOURNEY.md">Journey</a> ·
+  <a href="TECHNIQUES.md">Techniques</a> ·
+  <a href="MEASUREMENT.md">Measurement</a> ·
+  <a href="../plan/README.md">Plan</a>
+  </sub>
+</p>
