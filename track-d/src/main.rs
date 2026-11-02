@@ -195,6 +195,85 @@ impl Heap {
     }
 }
 
+/// Monotone bucket queue: one bucket per distance inside the window
+/// [cur, cur + RING); anything further out waits in an overflow heap. Edge
+/// weights are small next to a search's radius, so the heap is rarely touched.
+const RING: usize = 1024;
+struct Dial {
+    head: Vec<u32>, // bucket -> newest entry in `pool`, or u32::MAX
+    bits: Vec<u64>, // non-empty buckets
+    pool: Vec<(u32, u32)>, // (node, next entry in the bucket)
+    cur: u64,
+    ring_n: usize,
+    over: Heap,
+}
+
+impl Dial {
+    fn new() -> Self {
+        Dial { head: vec![u32::MAX; RING], bits: vec![0; RING / 64], pool: Vec::new(), cur: 0, ring_n: 0, over: Heap::default() }
+    }
+    fn len(&self) -> usize {
+        self.ring_n + self.over.0.len()
+    }
+    fn put(&mut self, d: u64, u: u32) {
+        let b = d as usize % RING;
+        self.pool.push((u, self.head[b]));
+        self.head[b] = self.pool.len() as u32 - 1;
+        self.bits[b / 64] |= 1 << (b % 64);
+        self.ring_n += 1;
+    }
+    fn push(&mut self, d: u64, u: u32) {
+        if d - self.cur < RING as u64 { self.put(d, u) } else { self.over.push(d, u) }
+    }
+    fn pull(&mut self) {
+        while self.over.0.first().is_some_and(|e| e.0 - self.cur < RING as u64) {
+            let (d, u) = self.over.pop();
+            self.put(d, u);
+        }
+    }
+    /// The smallest queued distance, with the window moved up to it.
+    fn top(&mut self) -> Option<u64> {
+        if self.ring_n == 0 {
+            self.cur = self.over.0.first()?.0;
+        } else {
+            let p = self.cur as usize % RING;
+            let (mut w, mut m) = (p / 64, self.bits[p / 64] & (!0 << (p % 64)));
+            while m == 0 {
+                w = (w + 1) % (RING / 64);
+                m = self.bits[w];
+            }
+            self.cur += ((w * 64 + m.trailing_zeros() as usize).wrapping_sub(p) % RING) as u64;
+        }
+        self.pull();
+        Some(self.cur)
+    }
+    /// An entry at the distance `top` just returned.
+    fn pop(&mut self) -> (u64, u32) {
+        let b = self.cur as usize % RING;
+        let (u, next) = self.pool[self.head[b] as usize];
+        self.head[b] = next;
+        if next == u32::MAX {
+            self.bits[b / 64] &= !(1 << (b % 64));
+        }
+        self.ring_n -= 1;
+        (self.cur, u)
+    }
+    /// The next entry at the distance just popped, if any.
+    fn peek(&self) -> Option<u32> {
+        let h = self.head[self.cur as usize % RING];
+        (h != u32::MAX).then(|| self.pool[h as usize].0)
+    }
+    fn clear(&mut self) {
+        for (w, m) in self.bits.iter_mut().enumerate() {
+            while *m != 0 {
+                self.head[w * 64 + m.trailing_zeros() as usize] = u32::MAX;
+                *m &= *m - 1;
+            }
+        }
+        (self.pool.clear(), self.over.0.clear(), self.cur = 0, self.ring_n = 0);
+    }
+}
+
 /// Tentative distances in pages of 512, handed out on first touch and taken
 /// back after each query, so a thread's memory follows its largest search.
 struct Dist {
@@ -548,7 +627,7 @@ fn main() {
     // it can, so the best meeting seen is the answer.
     on_threads(nt, |_| {
         let mut dist = [Dist::new(n), Dist::new(n)];
-        let mut queue = [Heap::default(), Heap::default()];
+        let mut queue = [Dial::new(), Dial::new()];
         loop {
             let q = next.fetch_add(1, Relaxed);
             let Some(&i) = order.get(q) else { return };
@@ -565,15 +644,18 @@ fn main() {
             queue[0].push(0, s);
             *dist[1].at(t) = 0;
             queue[1].push(0, t);
-            while let (Some(a), Some(b)) = (queue[0].0.first(), queue[1].0.first()) {
-                if a.0 + b.0 >= best {
+            while let (Some(a), Some(b)) = (queue[0].top(), queue[1].top()) {
+                if a + b >= best {
                     break;
                 }
-                let k = (queue[1].0.len() < queue[0].0.len()) as usize;
+                let k = (queue[1].len() < queue[0].len()) as usize;
                 let (go, ga, gh) = sides[k];
                 let (a, b) = dist.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
                 let (d, u) = queue[k].pop();
+                if let Some(nu) = queue[k].peek() {
+                    prefetch(ga.as_ptr().wrapping_add(unsafe { *go.get_unchecked(nu as usize) } as usize));
+                }
                 if d > mine[0].get(u) {
                     continue;
                 }
@@ -596,7 +678,7 @@ fn main() {
                 }
             }
             unsafe { *ansr.at(i) = best };
-            queue.iter_mut().for_each(|q| q.0.clear());
+            queue.iter_mut().for_each(Dial::clear);
             dist.iter_mut().for_each(Dist::reset);
         }
     });
