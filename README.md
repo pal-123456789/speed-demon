@@ -147,8 +147,11 @@ ledger of those is in [docs/JOURNEY.md](docs/JOURNEY.md).
 │   ├── JOURNEY.md             the full engineering narrative: every step, every reversal
 │   ├── TECHNIQUES.md          every optimisation in the submission, and what it bought
 │   ├── MEASUREMENT.md         how every number in this repository was obtained
-│   ├── INDEX.md               "I want to…" → the file that answers it
-│   └── specs/                 the four track specifications
+│   ├── PARSER-TECHNIQUES.md    shared parsing methods, in one place
+│   ├── S-AXIS.md              how the source axis is measured and why it is attacked first
+│   ├── B-/C-/D-*.md           per-track design notes, including rejected designs
+│   ├── depth/                 reference profiles and the codegen/PGO record
+│   └── specs/                 the four track specifications, restated
 ├── track-a/  …  track-d/   each a SELF-CONTAINED build context:
 │       Dockerfile             digest-pinned, allowlisted, two-stage
 │       build.sh               rustc directly — no cargo, no network
