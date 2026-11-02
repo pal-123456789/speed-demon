@@ -1,118 +1,82 @@
-# Track B — Index
+# 🅱 Track B — Index
 
-**Build an inverted index over a 250 MB text corpus, then answer 50,000 boolean and phrase queries. Build time and query time are measured together, as one total wall time. There is no build/query split any more.**
+**254 MB of documents · 50,000 boolean and phrase queries → count, id sum, ten smallest ids.**
 
-The task, the input files and the exact output format are in the
-[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/b-index.md).
+```
+TIME 140.30 ms    MEMORY 46.93 MB    SOURCE 708 lines    BOARD 75.124
+reference 56.35 s — roughly 400× faster
+```
+
+```mermaid
+flowchart LR
+    Q["queries.txt<br/>read first"] --> TT["term table<br/>64-bit hash, bzhi-masked"]
+    TT --> SAMP["sample 1/64 of the corpus<br/>estimate each term's rarity"]
+    SAMP --> PLAN["plan per term:<br/>bitmap if common, id list if rare"]
+    DOCS["docs.txt<br/>254 MB, mapped"] --> WALK["token walk<br/>AVX2 byte classes"]
+    WALK --> MARK["mark postings<br/>branchless lookup ring"]
+    PLAN --> EVAL["evaluate each query<br/>strictly left to right"]
+    MARK --> EVAL
+    EVAL --> OUT["merge counts, id sums,<br/>ten smallest ids"]
+    TT -.->|"unmapped after<br/>the scan"| FREE["table pages returned"]
+    WALK -.->|"each thread drops<br/>its own share"| FREE
+```
 
 ---
 
-## Approach
+> [!NOTE]
+> **The corpus scan is 70% of this track.** That is why the index is built only for terms the queries mention, and why the term lookup itself was made branchless and keyless.
 
-Track B is two optimisation problems that pull against each other, and the
-scoring formula rewards the one you spend your hours on. The build/query
-split is gone. The whole program is one wall time, so the build and the
-queries are simply both part of the number you are measured on. A weighted
-*time* blend
-(`1 / (0.4/rB + 0.6/rQ)`) is always at most an additive *ratio* blend
-(`0.4*rB + 0.6*rQ`), and it is dominated by the slower phase.
+## How it works
 
-That is the whole argument for spending time on the build. Building an
-index is memory-bound — tokenise, sort, encode — and the reference's naive
-build is where the bigger constant is. The query side is then made fast
-enough that it stops being the limiter:
+1. **Queries are read first**, which the specification permits — so **no posting list is ever written for a term no query mentions.** Most of the corpus's tokens are query terms; the rest cost one hash lookup and nothing more.
+2. **A sample pass over the first 1/64 of the corpus** estimates how many documents hold each term. That decides each term's representation: **a bitmap for terms in many documents, an id list for terms in few.** The threshold comes from the data, not a constant.
+3. **The term table is keyed by a 64-bit hash** of the token's first 32 lowercased bytes. `bzhi` masks a token's own bytes out of two 8-byte loads, so **no 32-byte vector key is ever built and no byte comparison happens per probe.** Four slots share an aligned group, and one 32-byte compare finds either the term or the first free slot.
+4. **The token walk classifies 32 bytes at a time** — letters (case-folded with one `or`) and digits in a single mask — so token boundaries fall out of one comparison per half-line.
+5. **The lookup ring is eight entries deep and starts full of throwaways**, so a lookup is always issued for a full slot and the caller simply skips the first eight ids. **That removes the length branch from the hot loop entirely.**
+6. **Boolean operators apply strictly left to right**, switching between id lists and bitmaps based on operand size.
+7. **Phrase candidates are rejected on one non-anchor term first**, so most windows never reach the slice comparison.
+8. **Results merge as counts, id sums and smallest ids** — the answer lists themselves are never materialised.
 
-* **Build.** Tokenise in parallel over document ranges, merge the dictionaries
-  deterministically in byte order, and encode postings in a blocked delta
-  format.
-* **Boolean queries.** Evaluate in the frozen left-associative order, with
-  the smallest posting list intersected first.
-* **Phrase queries.** Anchor on the rarest term in the phrase and verify
-  adjacency positionally.
+## What makes it fast
 
-## Data layout
+| Technique | Axis |
+|---|---|
+| Queries first — index only queried terms | time, memory |
+| Sample-driven bitmap/list choice per term | time, memory |
+| `bzhi`-masked 64-bit token hash | time, **source** |
+| Term table on 2 MB pages, unmapped after the scan | time, memory |
+| Branchless 8-deep lookup ring | time, **source** |
+| AVX2 letter/digit classification | time |
+| Adaptive list/bitmap boolean evaluation | time |
+| Single-term phrase rejection | time |
+| Counts without materialising answers | time, memory |
 
-* **Dictionary.** Terms are interned to dense `u32` ids; the dictionary is merged
-  in byte-sorted order so the term ids are a deterministic function of the
-  corpus.
-* **Postings.** Delta-encoded gaps in blocks, with a per-block base and
-  exception list. StreamVByte and PForDelta are compared head to head on
-  this corpus rather than assumed.
-* **Positions.** Positional postings are kept for every indexed term. Keeping
-  positions only for the terms that appear in the visible sample would be
-  overfitting to a query set we have not been given, and the holdout dataset
-  uses a seed we have never seen.
-* **Stopwords are retained.** The spec says stopwords are retained, and
-  dropping them changes phrase-match results.
+## Correctness
 
-## Memory
+- The scan is a single forward pass over disjoint document ranges; each thread marks its own region of the bitmap, so no two threads write the same word without an atomic.
+- Phrase matching requires **exact adjacency** in the token stream, anchored on the rarest term and verified against the same exact lookups.
+- Sampling only decides **how much work to do** — it never decides an answer.
+- **Verified on three corpora**, including the tiny hostile oracle and the official sample, against a pinned `results.txt.sha256`.
 
-Positions are where the memory goes. The build is streamed rather than
-materialised: postings are encoded block by block and written into a
-pre-sized arena, so the peak is the size of the final index rather than the
-size of the intermediate token list.
+## Build and run
 
-Input is read with a buffered streaming reader rather than `mmap`, for the
-same reason as Track A: mapped pages are charged to cgroup `memory.peak`.
-
-## Determinism
-
-* Term ids come from a byte-sorted dictionary merge — not hash-map iteration.
-* Query results are written into per-query slots and emitted in query-file
-  order, never in completion order.
-* The boolean evaluator reproduces the frozen left-associative, no-parentheses
-  semantics exactly, including how `NOT` binds. Conventional precedence
-  (AND before OR) is *not* what the reference does.
-* Phrase matching is positional and exact, on the same tokenisation the
-  reference uses.
-* 1 worker and 12 workers produce byte-identical output.
-
-## Dependencies
-
-**None.** Standard library only, no third-party crates, nothing vendored.
-The dependency weight is therefore `D = 1 + 0 + 0 = 1.00`, identical to the
-reference's `D_ref = 1.00` — the reference sets no precedent to lose to on
-that axis, and every crate added here would be charged directly against it.
-
-The one thing that is *not* a dependency is the Rust toolchain, which is a
-build-time requirement rather than a runtime one. The build stage uses the
-digest-pinned, allowlisted `rust:1-slim-trixie` image, which ships the
-toolchain, so nothing needs to be vendored.
-
-## Building and running
-
-```bash
-# the scored image is built PER TRACK, from the track folder as context
-docker build --network=none -t speeddemon/$TEAM-B:$COMMIT track-B
-
-docker run --rm \
-  --cpuset-cpus="0-11" --cpuset-mems="0" \
-  --memory=8g --memory-swap=8g \
-  --pids-limit=512 --network=none --read-only \
-  --tmpfs /tmp:rw,size=1g,exec \
-  --ulimit nofile=8192:8192 \
-  -v /srv/speeddemon/data/track-B:/data:ro \
-  -v /srv/speeddemon/out/$RUN:/out:rw \
-  -e TRACK=B \
-  speeddemon/$TEAM-B:$COMMIT
+```sh
+sh build.sh                                        # rustc only — no cargo, no network
+SD_DATA_DIR=/data SD_OUT_DIR=/out ./run            # or the container path in the top-level README
 ```
 
-The build runs `rustc` directly — no cargo, no registry, no network — so it
-works under `--network=none`.
+## Honest limits
 
-## What I would do with another 24 hours
+Term identity is the **top 46 bits of a 64-bit hash** rather than a byte comparison — exact in practice at this vocabulary, but no longer exact by construction, and the published hash on three corpora is what checks it. The table is sized from the query file with a bound that fails loudly rather than spinning, since both the probe and the insert loop stop only at a free slot.
 
-* Try a skip-pointer variant on the posting lists and measure whether the
-  extra index bytes pay for themselves on this corpus size — at 250 MB the
-  answer may genuinely be no, and saying so with a measurement is worth more
-  than the change.
-* Build a small SIMD galloping intersect for the two-list case.
-* Try a `WAND`/`MaxScore`-style upper-bound pruning for the boolean
-  conjuncts, which is where a real engine gets its next order of magnitude.
-* Revisit the build/query split with a real harmonic measurement rather than
-  an estimate, and re-target the remaining hours at whichever phase the
-  measurement says is actually limiting.
+---
 
-## Licence
-
-MIT, at the repository root. The source is public at code freeze.
+<p align="center"><sub>
+<b>Speed Demon 2026</b> · <a href="../README.md">README</a> ·
+<a href="PERF.md">this track's measured ledger</a> ·
+<a href="../docs/TECHNIQUES.md">Techniques</a> ·
+<a href="../docs/MEASUREMENT.md">Measurement</a><br/>
+<a href="../track-a/README.md">🅰 Ingest</a> ·
+<a href="../track-c/README.md">🅲 Join</a> ·
+<a href="../track-d/README.md">🅳 Traverse</a>
+</sub></p>

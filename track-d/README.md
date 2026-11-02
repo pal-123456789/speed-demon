@@ -1,138 +1,82 @@
-# Track D — Traverse
+# 🅳 Track D — Traverse
 
-**Traverse a 5M-edge directed weighted graph and answer 2,000 source-target shortest-path queries. Preprocessing is allowed and is counted inside the timed run.**
+**1.74 M nodes · 5 M edges · 2,000 exact shortest paths. Preprocessing is inside the timed window.**
 
-The task, the input files and the exact output format are in the
-[official spec](https://github.com/hackathon-raptors/speed-demon-2026/blob/main/specs/d-traverse.md).
+```
+TIME 169.86 ms    MEMORY 70.57 MB    SOURCE 536 lines    BOARD 68.589
+reference 72.69 s — roughly 430× faster
+```
+
+```mermaid
+flowchart LR
+    G["graph.txt<br/>92 MB, mapped"] --> PARSE["one parse<br/>32-bit edge word"]
+    PARSE --> FILED["filed under the tail's part<br/>16-bit intra-part offset"]
+    FILED --> BUILD["<b>each part built independently</b><br/>counting sort, NO atomics"]
+    BUILD --> BFS["512-node BFS blobs<br/>locality relabelling"]
+    BFS --> FWD["forward CSR<br/>4-byte edges"]
+    BFS --> REV["reverse CSR<br/>4-byte edges"]
+    FWD --> DIJ["<b>bidirectional Dijkstra</b><br/>4-ary heap · paged distances"]
+    REV --> DIJ
+    DIJ --> DIST["distances.txt"]
+    BUILD -.->|"old graph dropped<br/>on a side thread"| FREE["freed off<br/>the critical path"]
+```
 
 ---
 
-## Approach
+> [!NOTE]
+> **Construction is 66% of this track and the search only 33%** — measured, not assumed. `renumber` alone is 24%. That is why four separate search-side experiments all lost money here.
 
-Track D has the widest gap between a competent submission and an excellent
-one, because preprocessing is explicitly legal and is counted inside the timed
-run. That makes the build-versus-query trade the entire problem.
+## How it works
 
-The number that decides it: the 2,000 queries run in parallel, so a
-per-query saving has to be divided by the effective worker count before it
-can be compared against a preprocessing cost. "2,000 queries at 18 ms each"
-looks like a 36-second budget; at 12-way parallelism it is about 3 seconds
-of wall time. Any preprocessing that costs more than that is a loss, however
-good it is in principle.
+1. **One parse.** `graph.txt` is mapped and cut into one line-aligned range per thread. Each edge is filed under the part of the node range its tail falls in — parts of 16,384 nodes, so **a tail's offset inside its part needs only 16 bits.**
+2. **An edge is a single 32-bit word.** The neighbour is in the low bits, the weight above it. **A weight too large for the field is stored as all-ones with its value on a side list, so weights up to 2³²−1 stay exact.**
+3. **Each part is built on its own** — out-degrees counted and edges placed inside a 64 KB counter array — so **the adjacency build takes no atomics at all** and few cache misses.
+4. **Locality relabelling.** The ids arrive as a random permutation, so the graph is cut into **512-node blobs grown breadth-first**; the graph is copied into that numbering and then reversed. Consecutive new ids end up physically close.
+5. **Both directions get their own CSR** — grouped by tail for the search from `s`, by head for the search from `t` — so either direction is one contiguous slice per node.
+6. **Bidirectional Dijkstra with a 4-ary heap.** Four children per node means **four children share one cache line**, and the heap only ever holds the live frontier.
+7. **Distances live in pages handed out on first touch** and returned after each query, so **a thread's memory follows its largest search** rather than the whole graph.
+8. **The old graph, the edge store and the id map are dropped on a side thread** while the reverse graph is being built — the free costs nothing on the critical path.
 
-So the plan is a portfolio with a hard rollback:
+## What makes it fast
 
-1. **Bidirectional Dijkstra on forward and reverse CSR** is the permanent
-   baseline. It is always correct, and it is the thing we fall back to.
-2. **ALT** (A* with landmark distances) is a bounded experiment: sweep the
-   landmark count and keep it only if it beats plain bidirectional inside
-   the time budget.
-3. **Contraction Hierarchies are legal, but this query mix rarely repays
-   them**, which is the organizers' own wording: the queries are local, so
-   the shortcut build has to be paid inside the timed run and, at the 1x
-   ratio, the build alone exceeds the query budget it is meant to accelerate.
-   No abort gate makes that arithmetic work, so CH is not on the ladder. The
-   point is arithmetic, not taste — CH is a good idea on road-like graphs,
-   and this graph is not one. The chosen structure is CSR + a radix heap +
-   bidirectional search + 6-8 ALT landmarks.
+| Technique | Axis |
+|---|---|
+| 4-byte packed edge word | memory, time |
+| 16-bit intra-part offsets | memory |
+| Chunked arena filing instead of per-part vectors | time, memory |
+| Per-part build with no atomics | time |
+| BFS locality relabelling | time |
+| 4-ary heap, one cache line per four children | time |
+| Paged, self-sizing distance store | memory |
+| Side-thread teardown | time |
+| Prefetch ladders (offset 8 ahead, edges 4 ahead) | time |
 
-The reverse graph is a *traversal structure*, not a claimed edge: it is
-built from the edge list because the format lists reverse edges separately
-where they exist, and a search over it never implies a path in the original
-directed graph.
+## Correctness
 
-## Data layout
+- `s == t` is `0`; a target with no in-edge is `-1` immediately.
+- **Distances are unique**, so thread order can never change the output.
+- The tiny hostile oracle covers zero weights, parallel and duplicate edges, self-loops, isolated vertices, unreachable targets and 64-bit distance sums.
+- **Verified on three corpora**, including the official sample, against a pinned `distances.txt.sha256`.
 
-* **CSR.** Edges are read once into a `u32` adjacency structure with `u64`
-  offsets. The edge list is not sorted by tail, so the CSR is built with a
-  counting pass followed by a scatter — a parallel-friendly two-phase build.
-* **Both directions.** A forward CSR and a reverse CSR, for bidirectional
-  search.
-* **Generation stamps.** Each query stamps the nodes it has visited with a
-  generation number instead of clearing a visited array, so the per-query
-  setup cost is O(1) rather than O(n). With 1.7M nodes and 2,000 queries
-  that difference is the whole query budget.
-* **Distances.** `u64`, checked on add, so an overflow is a handled error
-  rather than a wrong answer. `u32` distances are not used without a proven
-  bound on the maximum shortest-path weight.
+## Build and run
 
-## Memory
-
-CSR forward plus reverse is roughly 94 MB of `u32` ids and weights, and
-the offsets are `u32` at `(n + 1) * 4` bytes per direction — about 7 MB each.
-Landmark distances are `k * n * 4` bytes with a per-landmark offset: about
-42 MB at 6 landmarks and 56 MB at 8, the range `docs/specs/track-d-traverse.md`
-fixes. Per-worker scratch for a bidirectional search is about 334 MB across 12
-workers. All of that fits inside the 8 GB ceiling with room to spare, which is
-what makes the 6-8 landmark range worth sweeping rather than dismissing.
-
-(These figures previously read `2 * k * n * 8` bytes, "111 MB at 4 landmarks and
-891 MB at 32". That was the superseded design: `u64` distances, two copies, no
-landmark cap. The spec of record fixes `u32` with per-landmark offsets and
-k = 6 to 8, so the old arithmetic described a structure nobody is building.)
-
-The memory axis has a hard cap of 50x, and the 8 GB limit is a hard kill
-rather than a slowdown, so a preprocessing variant that runs out of memory
-is a failed run, not a slow one.
-
-## Determinism
-
-* Distances are integers. No float ever enters a shortest path.
-* If the output contract asks for a path rather than a distance, the tie-break
-  is fixed explicitly and exercised by a diamond-graph test suite, since a
-  graph with equal-length paths is where an unspecified tie-break produces a
-  different answer on a different run.
-* Query results are written into per-query slots and emitted in query order.
-* Any preprocessing variant is validated against the bidirectional baseline
-  on every graph in the fixture set; one mismatch removes it.
-
-## Dependencies
-
-**None.** Standard library only, no third-party crates, nothing vendored.
-The dependency weight is therefore `D = 1 + 0 + 0 = 1.00`, identical to the
-reference's `D_ref = 1.00` — the reference sets no precedent to lose to on
-that axis, and every crate added here would be charged directly against it.
-
-The one thing that is *not* a dependency is the Rust toolchain, which is a
-build-time requirement rather than a runtime one. The build stage uses the
-digest-pinned, allowlisted `rust:1-slim-trixie` image, which ships the
-toolchain, so nothing needs to be vendored.
-
-## Building and running
-
-```bash
-# the scored image is built PER TRACK, from the track folder as context
-docker build --network=none -t speeddemon/$TEAM-D:$COMMIT track-D
-
-docker run --rm \
-  --cpuset-cpus="0-11" --cpuset-mems="0" \
-  --memory=8g --memory-swap=8g \
-  --pids-limit=512 --network=none --read-only \
-  --tmpfs /tmp:rw,size=1g,exec \
-  --ulimit nofile=8192:8192 \
-  -v /srv/speeddemon/data/track-D:/data:ro \
-  -v /srv/speeddemon/out/$RUN:/out:rw \
-  -e TRACK=D \
-  speeddemon/$TEAM-D:$COMMIT
+```sh
+sh build.sh                                        # rustc only — no cargo, no network
+SD_DATA_DIR=/data SD_OUT_DIR=/out ./run            # or the container path in the top-level README
 ```
 
-The build runs `rustc` directly — no cargo, no registry, no network — so it
-works under `--network=none`.
+## Honest limits
 
-## What I would do with another 24 hours
+The query queue's pool is emptied between queries but **its capacity is retained, so it holds every pushed entry including the stale ones** — where the heap it replaced freed on pop. That is the memory that keeps this track at 68.589 while its time is the best it has recorded. The fix is a free list or a compaction, and it is the clearest remaining win here.
 
-* Hierarchical hub labelling or a transit-node routing scheme, both of which
-  beat CH on road-like graphs by a wide margin — this graph's structure
-  decides whether they are worth the time.
-* A proper `Delta-stepping` implementation for the case where the weights
-  turn out to be small and bounded, which would change the whole algorithm
-  choice.
-* Cache-block the CSR for the 24 MiB L3: the working set for a single search
-  is much smaller than the graph, and a blocked layout could matter more than
-  the search algorithm.
-* Measure the preprocessing break-even empirically instead of analytically,
-  by finding where the preprocessing stops paying for itself.
+---
 
-## Licence
-
-MIT, at the repository root. The source is public at code freeze.
+<p align="center"><sub>
+<b>Speed Demon 2026</b> · <a href="../README.md">README</a> ·
+<a href="PERF.md">this track's measured ledger</a> ·
+<a href="../docs/TECHNIQUES.md">Techniques</a> ·
+<a href="../docs/MEASUREMENT.md">Measurement</a><br/>
+<a href="../track-a/README.md">🅰 Ingest</a> ·
+<a href="../track-b/README.md">🅱 Index</a> ·
+<a href="../track-c/README.md">🅲 Join</a>
+</sub></p>
