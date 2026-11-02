@@ -241,6 +241,9 @@ mechanically enforced in this repository.
 | **Boundary cases are covered** | zero weights, parallel and duplicate edges, self-loops, isolated and unreachable vertices, 64-bit sums, `""` escapes, bare newlines, mixed line endings, byte order marks, empty inputs |
 | **Nothing is published unverified** | a change that loses its measurement is **reverted**, not shipped |
 
+**The pre-build plan is kept in [plan/](plan/) — including the places measurement proved it wrong,
+which is the more useful half of it.**
+
 **Zero wrong answers have ever been published from this repository.** Every experiment in this
 project's history that could have compromised that was measured, found wanting, and removed — the
 ledger of those is in [docs/JOURNEY.md](docs/JOURNEY.md).
@@ -260,6 +263,10 @@ ledger of those is in [docs/JOURNEY.md](docs/JOURNEY.md).
 │   ├── B-/C-/D-*.md           per-track design notes, including rejected designs
 │   ├── depth/                 reference profiles and the codegen/PGO record
 │   └── specs/                 the four track specifications, restated
+├── plan/                  the PRE-BUILD PLAN, kept deliberately
+│   ├── README.md              what the plan got right, and where measurement contradicted it
+│   ├── MASTER-PLAN.md …       the scoping, costing and sequencing done before any code
+│   └── design/                the per-track design documents
 ├── track-a/  …  track-d/   each a SELF-CONTAINED build context:
 │       Dockerfile             digest-pinned, allowlisted, two-stage
 │       build.sh               rustc directly — no cargo, no network
