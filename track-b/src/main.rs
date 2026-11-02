@@ -529,6 +529,17 @@ fn main() {
     unsafe { mallopt(-3, 1 << 16) }; // M_MMAP_THRESHOLD: freed buffers go back to the kernel
                                      // PR_SET_THP_DISABLE: the box backs part-written regions with whole 2 MB pages.
     unsafe { prctl(41, 1u64, 0u64, 0u64, 0u64) };
+    // `SD_TIME=1` prints cumulative seconds at each phase boundary to stderr. The laps cost
+    // nothing when it is unset, and what they print is cumulative from the start of the run.
+    let t0 = std::time::Instant::now();
+    let timing = std::env::var_os("SD_TIME").is_some();
+    macro_rules! lap {
+        ($name:expr) => {
+            if timing {
+                eprintln!("[t] {:<14} {:>8.3}s", $name, t0.elapsed().as_secs_f64());
+            }
+        };
+    }
     let qtext = map(&format!("{}/queries.txt", data_dir()));
     let slots = vec![0; (qtext.len() / 8).next_power_of_two()];
     let keys = Vec::with_capacity(qtext.len() / 16);
@@ -547,6 +558,7 @@ fn main() {
         }
         spans.push((phrase, from, ids.len() as u32));
     }
+    lap!("parse queries");
     let nterms = terms.keys.len();
     assert!(nterms <= BUCKETS << 12, "too many terms"); // a unit's index has 12 bits
     let mut in_bool = vec![false; nterms];
@@ -624,6 +636,7 @@ fn main() {
     // Where the phrases of anchor a0 + k start in anchored.
     let first_of = |i: usize| anchored.partition_point(|a| (a.0 as usize) < i);
     let astart: Vec<usize> = (a0..=nkeep).map(first_of).collect();
+    lap!("sample+classify");
     let words = ndocs.div_ceil(256) * 4; // whole 4-word vectors, for bit_sums
                                          // Zero pages from the kernel, written only where a bit is set.
     let bits: Vec<AtomicU64> = unsafe { std::mem::transmute(vec![0u64; nbits * words]) };
@@ -701,6 +714,7 @@ fn main() {
         found.lock().unwrap().extend(mine);
         (count, Mutex::new(buckets))
     });
+    lap!("scan");
     drop(terms); // nothing after the scan reads the term tables
                  // Each term's postings lie in one stretch, thread by thread: the segment
                  // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
@@ -738,6 +752,7 @@ fn main() {
             }
         }
     });
+    lap!("scatter");
     drop(scans);
     let post: Vec<u16> = unsafe { std::mem::transmute(post) };
     let bits: Vec<u64> = unsafe { std::mem::transmute(bits) };
@@ -786,6 +801,7 @@ fn main() {
         }
         *chunk.lock().unwrap() = out;
     });
+    lap!("answers");
     // Chunk by chunk, so the answers are never held twice.
     let file = std::fs::File::create(format!("{}/results.txt", out_dir()))
         .expect("cannot create results.txt");
@@ -794,6 +810,7 @@ fn main() {
         std::io::Write::write_all(&mut out, c.into_inner().unwrap().as_bytes()).unwrap();
     }
     std::io::Write::flush(&mut out).unwrap();
+    lap!("write");
 }
 
 /// Input and output directories: `/data` and `/out` on the scoring box; the SD_DATA_DIR and SD_OUT_DIR
