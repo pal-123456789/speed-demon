@@ -19,7 +19,6 @@ use std::sync::{Barrier, Mutex, Once, OnceLock};
 #[cfg(target_os = "linux")]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-    fn madvise(addr: *mut std::ffi::c_void, len: usize, advice: i32) -> i32;
     fn mallopt(param: i32, value: i32) -> i32;
     fn prctl(option: i32, ...) -> i32;
 }
@@ -40,15 +39,6 @@ unsafe fn mmap(addr: *mut u8, len: usize, _prot: i32, _flags: i32, _fd: i32, _of
     }
     let v: Vec<u8> = vec![0u8; len.max(1) + 4096];
     Box::leak(v.into_boxed_slice()).as_mut_ptr()
-}
-
-#[cfg(not(target_os = "linux"))]
-unsafe fn madvise(
-    _addr: *mut std::ffi::c_void,
-    _len: usize,
-    _advice: i32,
-) -> i32 {
-    0
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -745,16 +735,6 @@ fn main() {
         (count, Mutex::new(buckets))
     });
     lap!("scan");
-    // docs.txt has been read end to end and nothing after this touches it, so each thread hands its
-    // own line-aligned share of its pages back. The mapping stays valid, so this cannot change an
-    // answer; it only stops 254 MB of dead pages from competing with the scatter and the answers.
-    on_threads(|t| unsafe {
-        madvise(
-            text.as_ptr().add(cut[t]) as *mut std::ffi::c_void,
-            cut[t + 1] - cut[t],
-            4, // MADV_DONTNEED
-        )
-    });
     drop(terms); // nothing after the scan reads the term tables
                  // Each term's postings lie in one stretch, thread by thread: the segment
                  // from thread t holds seg[i * THREADS + t] offsets from firsts[t]. The
