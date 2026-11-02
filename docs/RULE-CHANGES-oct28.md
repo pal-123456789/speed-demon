@@ -5,7 +5,7 @@
 per-track README/PERF files, `verification/contract.toml` comments and
 `tooling/measure_axes.py`.**
 
-Provenance: the organizers' answers to a competitor's five questions, published
+Provenance: the organizers' answers to an entrant's five questions, published
 in the hackathon channel ahead of the Oct 28 freeze, with the full list to
 appear under "Changes before freeze" on speeddemon.dev. Where this document and
 the event page disagree, the event page wins — but this is the machine-readable

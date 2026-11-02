@@ -288,7 +288,7 @@ no hedging, no generic advice. Output in GitHub-flavored Markdown with tables. D
    diminishing returns (and where the 8 GB OOM wall and the 50× cap change that), and why
    X is a "don't lose" sanity axis not a battleground. Give the generic per-axis TARGET
    ratios you will aim for on a typical track and the K/speed-score they imply on the
-   100×ln(K)/ln(25) curve. Name the realistic K ceiling for a solo competitor vs. the
+   100×ln(K)/ln(25) curve. Name the realistic K ceiling for a solo entrant vs. the
    K=25 (=100 pts) saturation point, and argue what K band is actually worth chasing.
 
 2. ATTACK ORDER across A,B,C,D,E for ONE person over 72h, EV-ranked. Build a table scoring
@@ -608,7 +608,7 @@ real box. This is the capstone that makes the plan "full-proof". Use the CONTEXT
      README + .speed-demon.toml present ✓, repo public + OSI license ✓, final commit recorded
      before Nov 2 15:00 UTC ✓. Make it a literal checkbox list I can execute.
 
-End with the single highest-leverage piece of advice for a solo competitor across all five
+End with the single highest-leverage piece of advice for a solo entrant across all five
 tracks, in two sentences.
 ```
 

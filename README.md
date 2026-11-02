@@ -1,232 +1,238 @@
-# Speed Demon — Solo Campaign Monorepo (4 Tracks, Pre-Kickoff Build)
+# ⚡ Speed Demon 2026 — Four Tracks, Rust, No Dependencies
 
-> **Schedule:** one canonical H-table, UTC and IST, at the top of
-> [docs/KICKOFF-CARD.md](docs/KICKOFF-CARD.md). The plan documents below defer to
-> it; if any of them disagrees about *when*, the table is right.
->
-> **Everything else, by intent:** [docs/INDEX.md](docs/INDEX.md) — "I want to…"
-> to the file that answers it. **Pre-kickoff boundary and evidence:**
-> [docs/RULE-05.md](docs/RULE-05.md).
-
-
-> **Status: PRE-KICKOFF SCAFFOLD — no project code committed before Oct 30 15:00 UTC.**
-> All source under `track-*/src/` is a **correctness-green stub** that compiles offline
-> via `rustc` (no cargo fetch). Real optimization replaces stubs at H0 inside the 72h window.
-> Rules 04/05 explicitly permit reading, designing, and preparing the environment beforehand.
-> The full scored path is already verified locally: offline build, allowlisted
-> digest-pinned base images, a 30 MB image and a sandboxed run that reads the board's
-> full-scale dataset and writes exactly one output file, on all four tracks.
->
-> **▶ RESUMING? OPEN THIS FIRST: [`docs/SESSION-LOG.md`](docs/SESSION-LOG.md)** —
-> the current state in one screen, what is verified and how, the full bug ledger
-> with the class each defect belongs to, the two browser steps still outstanding,
-> and the one command that proves the tree is healthy.
->
-> **▶ AT KICKOFF, OPEN THIS: [`docs/KICKOFF-CARD.md`](docs/KICKOFF-CARD.md)** — the
-> three browser steps, then the exact command sequence for 15:00 UTC / 20:30 IST,
-> the freeze-day publish command, and the three facts that decide the score.
->
-> **Write-up material: [`docs/WRITEUP-EVIDENCE.md`](docs/WRITEUP-EVIDENCE.md)** —
-> twelve real findings, each with the measurement behind it. The side quest closes
-> Nov 10.
->
-> **Start here: [`docs/HANDOVER-oct28.md`](docs/HANDOVER-oct28.md)** — what was
-> done on Oct 28, the kickoff facts (15:00 UTC), the exact H0 command sequence,
-> and the external items that remain.
->
-> **Judge-facing + video: [`docs/MODEL-OUTPUTS-ADOPTED.md`](docs/MODEL-OUTPUTS-ADOPTED.md)**
->
-> **The architecture: [`docs/MODULE-PLAN.md`](docs/MODULE-PLAN.md)** — the modules
-> per track, their acceptance tests, the build order and the risks.
->
-> **The plan: [`docs/KICKOFF-PLAN-pal.md`](docs/KICKOFF-PLAN-pal.md)** — the
-> 72-hour schedule, the module loop, and the video plan.
->
-> **Then: [`docs/WINDOW-RUNBOOK.md`](docs/WINDOW-RUNBOOK.md)** — the hour-by-hour
-> plan and the submission logistics; and
-> [`docs/CAMPAIGN-STATUS.md`](docs/CAMPAIGN-STATUS.md)** — the operational
-> dashboard and the contract of values.
->
-> **The architecture: [`docs/MODULE-PLAN.md`](docs/MODULE-PLAN.md)** — the modules
-> per track, their acceptance tests, the build order and the risks.
->
-> **The plan: [`docs/KICKOFF-PLAN-pal.md`](docs/KICKOFF-PLAN-pal.md)** — the
-> 72-hour schedule, the module loop, and the video plan.
->
-> **Then: [`docs/WINDOW-RUNBOOK.md`](docs/WINDOW-RUNBOOK.md)** — the hour-by-hour
-> plan and the submission logistics; and
-> [`docs/CAMPAIGN-STATUS.md`](docs/CAMPAIGN-STATUS.md)** — the operational
-> dashboard and the contract of values.
-
-## Map
+<p align="center">
+  <b>A complete, board-scored submission to Speed Demon 2026.</b><br/>
+  Four independent Rust programs · one shared engineering discipline · every answer exact.
+</p>
 
 ```
-<repository root>                 # this repo; clone it anywhere
-├── Makefile                    # convenience targets; `make` is not required
-├── LICENSE                     # MIT (OSI-approved, public at freeze)
-├── check.py                    # the organizers' own checker: offline build + sandbox run + sha256
-├── .gitattributes              # pins LF across clones — a CR in build.sh is a silent zero
-├── .dockerignore               # root-context hygiene (scored builds use track-*/ as the context)
-├── .gitignore                  # ignores track-*/run, host binaries, generated data, scratch
-├── track-a/                    # Track A — Ingest   (ref 32.05 s, timeout 321 s, S_ref 56 lines)
-├── track-b/                    # Track B — Index    (ref 56.35 s, timeout 564 s, S_ref 91 lines)
-├── track-c/                    # Track C — Join     (ref 14.44 s, timeout 144 s, S_ref 108 lines) — DQ minefield
-├── track-d/                    # Track D — Traverse (ref 72.69 s, timeout 727 s, S_ref 43 lines)
-│   (each: Dockerfile, build.sh, README.md, PERF.md, .speed-demon.toml, src/, verification/expected/)
-├── prep/                       # track-agnostic H0 primitives (rule 05: deliberately outside every track folder)
-├── reference/                  # the organizers' byte-identical references, generators and harness
-├── verification/               # fsn1 harness replica, contract.toml, tiny corpora, ledger
-├── tooling/                    # official-data, conformance, ci.sh, k_whatif, gates, hooks
-└── docs/                       # MASTER-PLAN, per-track deep dives, CAMPAIGN-STATUS, RULE-CHANGES-oct28
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  TRACK            TIME          MEMORY      SOURCE      BOARD POINTS          │
+│  A  Ingest        26.73 ms      18.41 MB     625 lines        80.039          │
+│  B  Index        140.30 ms      46.93 MB     708 lines        75.124          │
+│  C  Join          23.64 ms       9.61 MB     721 lines        79.292          │
+│  D  Traverse     169.86 ms      70.57 MB     536 lines        68.589          │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  OVERALL — geometric mean of the best three tracks ............  78.121       │
+│  CORRECTNESS — zero wrong answers, on every corpus, ever ......  exact        │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Each track is a **self-contained build context**: `docker build --network=none
--t speeddemon/$TEAM-$TRACK:$COMMIT track-$TRACK` runs `COPY . /src` +
-`RUN ./build.sh`, which compiles `src/main.rs` with `rustc` directly — no
-cargo, no registry, no network.
+Every number above is a **live board measurement**, not a projection.
 
-## Quick start (Windows dev machine — Docker not required for scaffold check)
+---
 
-> On Windows PowerShell there is no `sh` on PATH. Run the shell scripts
-> through the shim: `.\tooling\run.ps1 ci` (or use Git Bash and `sh tooling/ci.sh`).
-> The Python tools locate Git for Windows' `sh.exe` themselves.
+## What this is
 
-```powershell
-# 1. Run the whole gate suite (sh from Git Bash / WSL / Linux)
-sh tooling\ci.sh
+Four standalone programs, one per track. Each is a **single Rust source file** compiled directly
+with `rustc` — **no crates, no registry, no network**, and no third-party runtime dependency of any
+kind. The build runs offline inside digest-pinned, organizer-allowlisted container images.
 
-# 2. Run the three gates on one track (correctness / timeout / sandbox)
-powershell -ExecutionPolicy Bypass -File verification\verify.ps1 -Track A
+The four problems are genuinely different — a 239 MB web-log aggregation, a 254 MB document index
+answering 50,000 boolean and phrase queries, a 202 MB hostile CSV join, and 2,000 shortest-path
+queries on a 5 M-edge graph — so the four programs share a discipline rather than an implementation:
 
-# 3. The full pre-freeze lockdown (freeze-day gate; meaningful after Oct 30)
-powershell -ExecutionPolicy Bypass -File verification\pre-freeze.ps1 -All
+> **Delete before you add. Measure on the board. Never publish a wrong byte.**
 
-# 4. Price a candidate with the K calculator
-python tooling\k_calc.py --t 30 --m 15 --s 0.62 --d 1
+That discipline is not a slogan — it is what the numbers came from, and [docs/JOURNEY.md](docs/JOURNEY.md)
+records every step of it, including the experiments that **lost**.
 
-# 5. See where the S and D axes stand
-python tooling\measure_axes.py --all
+---
 
-# 6. Generate anti-overfit fixtures (synthetic; written to verification\data-fixtures,
-#    never into verification\data, which holds the official dataset the pins match)
-python tooling\gen-fixtures.py --all
+## The four tracks
 
-# 7. Load a known dataset so the correctness pins mean something
-#    (any scale: tiny/sample/full — the expected hash is derived from the bytes)
-python tooling\official-data.py --track all --scale sample
-```
+### 🅰 Track A — Ingest
+**32.05 s reference → 26.73 ms. Hourly latency percentiles over 239 MB of access logs.**
 
-> **Note on `pwsh` vs `powershell`.** These scripts run under Windows
-> PowerShell 5.1 as well as PowerShell 7, and the `.ps1` files carry a UTF-8
-> BOM so 5.1 parses the non-ASCII characters correctly. If you edit a `.ps1`
-> file, re-run `python tooling/fix_ps1_bom.py`. Shell scripts (`tooling/*.sh`,
-> `track-*/build.sh`) must stay **BOM-free** — a BOM before the shebang breaks
-> direct execution on Linux.
+The log is memory-mapped and cut into line-aligned pieces that any of twelve threads claims. The
+timestamp is a fixed 27 bytes and the window is a fixed 72 hours, so **a line's hour index comes
+from its day and hour digits alone — no date parsing at all.**
 
-## On the scoring box (Falkenstein fsn1, Debian 13 + Docker)
+- **One 64-byte AVX2 scan per line** finds the method's end, the endpoint's end and the line's end
+  simultaneously. The latency is decoded from the 16 bytes before the line end with a SIMD
+  digit-fold, no loop.
+- **Endpoints are interned in one lock-free table** shared by all threads — a CRC of the name's first
+  and last eight bytes, with a two-step 64-byte vector compare instead of `memcmp`.
+- Each line files a **4-byte record** (latency, endpoint id, 5xx flag). Long latencies take a side
+  list, so the packing stays exact.
+- Hours are **counting-sorted by endpoint rank**, and the exact nearest-rank p50/p95/p99 come from
+  three nested selections that are **branch-free on the data** (Lomuto partition, unconditional
+  swap, median-of-three pivot, library fallback after 40 rounds).
+- The output is formatted **straight into the mapped file**, so no hour waits on another and no
+  write call queues on a lock.
 
-The build is **per track**: one image per track, built from the track folder as
-the build context. Each image's entrypoint **is** that track's binary — there
-is no dispatcher. The organizer's run command still passes `-e TRACK=$TRACK`,
-which a per-track binary simply ignores.
+### 🅱 Track B — Index
+**56.35 s reference → 140.30 ms. 50,000 boolean and phrase queries over 254 MB of documents.**
 
-```bash
-# offline build — no apt, no cargo, no pip, no curl
-docker build --network=none -t speeddemon/$TEAM-$TRACK:$COMMIT track-$TRACK
+- **Queries are read first**, which the specification permits, so the corpus is indexed only for the
+  terms the queries actually use.
+- **A sample pass estimates term rarity**, which decides each term's representation: a bitmap for
+  common terms, an id list for rare ones, with the threshold chosen from the data.
+- The **term table is keyed by a 64-bit hash** of the token's first 32 lowercased bytes. `bzhi` masks
+  a token's own bytes out of two 8-byte loads, so **no 32-byte vector key is ever constructed and no
+  byte comparison happens per probe.** The table is mapped on 2 MB pages, touched once, and handed
+  back to the kernel immediately after the scan.
+- The token walk uses **AVX2 byte classification** (letters and digits in one mask per 32 bytes) and
+  an **8-deep ring of pending lookups that starts full of throwaways** — which removes the length
+  branch from the hot lookup entirely.
+- Boolean operators are applied **strictly left to right** with a **list/bitmap adaptive
+  representation**, and phrase candidates are rejected on a single non-anchor term before the slice
+  comparison is ever entered.
+- Answers are merged as counts, id sums and smallest ids — **without materialising answer lists.**
 
-# the scored run, verbatim from the events page
-docker run --rm --cpuset-cpus="0-11" --cpuset-mems="0" \
-  --memory=8g --memory-swap=8g --pids-limit=512 --network=none --read-only \
-  --tmpfs /tmp:rw,size=1g,exec --ulimit nofile=8192:8192 \
-  -v /srv/speeddemon/data/track-$TRACK:/data:ro -v /srv/speeddemon/out/$RUN:/out:rw \
-  -e TRACK=$TRACK speeddemon/$TEAM-$TRACK:$COMMIT
+### 🅲 Track C — Join
+**14.44 s reference → 23.64 ms. A deliberately hostile CSV joined against a region table.**
 
-# the M axis, from the cgroup — never from `ps` or `time`
-cat /sys/fs/cgroup/system.slice/docker-*.scope/memory.peak
+The input is hostile by design: quoted fields, `""` escapes, bare newlines inside notes, mixed CRLF
+and LF endings, and a byte order mark that can appear before any record.
 
-# the correctness gate
-sha256sum /out/*
-```
+- **The file is classified, not walked.** Each 64-byte block becomes **quote, comma and LF masks**
+  at once; the "inside quotes" state is the **prefix XOR of the quote mask, computed with one
+  `PCLMULQDQ` carry-less multiply**, carried block to block — so a `""` pair turns quoting off and on
+  again with no special case at all.
+- Separators outside quotes are listed into an array, and each record consumes **five of them**.
+- **The record's id, region and amount are decoded together in one 256-bit vector**, using
+  `_mm256_sllv_epi64` for the per-lane leading-zero mask — three decodes become one operation.
+- The bitset of names-seen-per-country and the per-thread totals share **one 2 MB-aligned huge-page
+  block**, so a record's mark lands on a huge page instead of missing the first-level TLB across
+  a multi-megabyte table built from ordinary pages. Each country's totals are **exactly one aligned cache line.**
+- Region ids map to country groups through a **direct-address table**, and a missing id reads as the
+  unmatched group — **the hot path contains no comparison.**
+- The **input is read once and never again**, and each thread releases its own pages as it finishes
+  rather than leaving a teardown at exit.
 
-Every `FROM` must name an image from `speeddemon.dev/allowlist.json`, pinned by
-digest, and nothing else may enter the image: no `COPY --from` of another
-image, no `ADD` of a URL. This repository pins both stages — the toolchain
-build stage and the runtime stage — and `tooling/check_base_pinned.py` verifies
-every Dockerfile against `tooling/base-image.txt`:
+### 🅳 Track D — Traverse
+**72.69 s reference → 169.86 ms. 2,000 exact shortest paths on 1.74 M nodes and 5 M edges.**
 
-- build:   `rust:1-slim-trixie@sha256:1a939748a7cbab172de91a014e3804a97af1394a8c844faa67fce9401c4e40fb`
-- runtime: `debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad`
+- **One parse.** Edges are filed under their tail's part of the node range, so a tail's offset needs
+  only 16 bits, and an edge is a single 32-bit word. Weights too large for the packed field go to a
+  side list, so **weights up to 2³²−1 stay exact.**
+- **Each part is built independently** — out-degrees counted and edges placed inside a 64 KB counter
+  array, so **the build takes no atomics at all.**
+- **Locality relabelling:** the graph is cut into 512-node blobs grown breadth-first, so consecutive
+  new ids are physically close, and the corpus is copied into that numbering and reversed.
+- **Bidirectional Dijkstra with a 4-ary heap** (four children per cache line) and distances in pages
+  handed out on first touch and returned after each query, so **a thread's memory follows its largest
+  search.**
+- `s == t` is 0 and a target with no in-edge is `-1` immediately; **distances are unique, so thread
+  order can never change the output.**
 
-Builds stay offline under `--network=none`, are capped at 10 minutes, and
-images at 2 GB. The rust image ships the toolchain, so nothing is vendored and
-no build-time network is needed.
+---
 
-## Doctrine (enforced by hooks)
+## Why the answers can be trusted
 
-1. **SHA-green before speed.** Every optimization re-runs the SHA gate.
-2. **Deterministic output** — no HashMap iteration, no float reduction, fixed merge order.
-3. **D=1** — std-only Rust, no non-stdlib runtime dependencies. The Oct 28
-   formula is `D = 1 + direct deps`; one dependency makes D = 2 and multiplies
-   K by `(1/2)^0.15 ≈ 0.90` — a ~10% cut for every crate.
-4. **Buffered reads, not mmap** — mmap may inflate `memory.peak`.
-5. **Honest claims** — every number in PERF.md is `KNOWN` (measured) or `EXPECTED`.
-6. **One image per track** — each entrypoint is its track's binary; each track
-   folder is a self-contained context, so a broken build costs one track, not four.
+This is the part that matters most, and it is the part that is easiest to fake — so it is
+mechanically enforced in this repository.
 
-The pre-commit hook enforces 1, 2, 5, and the offline build:
-
-```bash
-sh tooling/install-hooks.sh
-```
-
-## Scoring model
-
-Four axes, weights summing to 1.0:
-
-```
-K = (T_ref/T)^0.50 × (M_ref/M)^0.20 × (S_ref/S)^0.15 × (D_ref/D)^0.15
-```
-
-- **T** wall time (0.50) — no cap.
-- **M** peak memory (0.20) — capped at 50×.
-- **S** source size (0.15) — code lines counted by `scc` after your formatter,
-  **across each track's folder** (which is all the build can see), minus
-  registry packages first published before Oct 1, 2026 by people outside the
-  team. It can cost you but never pay (factor capped at 1.0).
-- **D** dependencies (0.15) — `D = 1 + direct non-stdlib runtime dependencies`
-  declared in the manifest. One dependency ⇒ D = 2 ⇒ K × 0.90. It can cost you
-  but never pay.
-
-Speed score = `50 × log10(K)`, clamped to 0–100: K = 10 is half marks and
-K = 100 is full marks.
-
-**Gates (three):** correctness (SHA-256 match), the timeout, and the sandbox
-(no network, read-only dataset, one output file). The speed floor gate is gone.
-The practice board enforces `timeout_factor = 3.0` — three times the reference
-time. Every one of our tracks sits two to three orders of magnitude inside it:
-Track A's worst recorded run is 0.126 s against a 32.05 s reference.
-
-**Overall title:** the geometric mean of your best three track totals, from
-three or more tracks entered. Ties on the final total are broken by raw K, then
-by wall time, then by earliest submission commit.
-
-**Live board:** install the Speed Demon Board GitHub App on your repo; one run
-per team per 15 minutes; the board closes at code freeze. Final scoring is on a
-holdout seed. PERF.md steps must cite live-board run IDs.
-
-## Timeline
-
-| When (UTC) | What |
+| Guarantee | How it is enforced |
 |---|---|
-| Oct 28 15:00 | Specs + refs + harness frozen — pin all deferred values in `verification/contract.toml` |
-| Oct 30 06:00 | Sample datasets + expected hashes — load into `track-*/verification/expected/` |
-| Oct 30 15:00 | **KICKOFF — H0** — replace stubs with real baselines, first SHA-green |
-| ~H17 | **All 4 SHA-green + deterministic** — tag `baseline-green` |
-| Nov 02 15:00 | **CODE FREEZE** — public repo, OSI license, final commit; the live board closes |
-| Nov 02–04 | Scoring (holdout seed) — gate pass/fail published by Nov 04 |
-| Nov 03–12 | Judging; Nov 10 write-up deadline; Nov 13 winners announced |
+| **Answers are exact** | every track reproduces a **published sha256** of its output on the full corpus |
+| **…on more than one corpus** | 5 runs on the full corpus, plus a **tiny hostile oracle** and the **official sample** |
+| **…repeatedly, not once** | the full-corpus gate is 5 hash-checked runs, and the measure harness is interleaved against the baseline |
+| **The output is thread-schedule independent** | no answer depends on which thread did which piece — distances are unique, sums merge in a fixed order, percentiles are nearest-rank on a counting sort |
+| **Boundary cases are covered** | zero weights, parallel and duplicate edges, self-loops, isolated and unreachable vertices, 64-bit sums, `""` escapes, bare newlines, mixed line endings, byte order marks, empty inputs |
+| **Nothing is published unverified** | a change that loses its measurement is **reverted**, not shipped |
 
-See [docs/CAMPAIGN-STATUS.md](docs/CAMPAIGN-STATUS.md) for the runbook, and
-[docs/MASTER-PLAN.md](docs/MASTER-PLAN.md) for the full 72h schedule and
-per-track deep dives. The digested Oct 26 rule changes live in
-[docs/RULE-CHANGES-oct28.md](docs/RULE-CHANGES-oct28.md).
+**Zero wrong answers have ever been published from this repository.** Every experiment in this
+project's history that could have compromised that was measured, found wanting, and removed — the
+ledger of those is in [docs/JOURNEY.md](docs/JOURNEY.md).
+
+---
+
+## Repository layout
+
+```
+├── README.md              ← you are here: what this is and what it scores
+├── docs/
+│   ├── JOURNEY.md             the full engineering narrative: every step, every reversal
+│   ├── TECHNIQUES.md          every optimisation in the submission, and what it bought
+│   ├── MEASUREMENT.md         how every number in this repository was obtained
+│   ├── INDEX.md               "I want to…" → the file that answers it
+│   └── specs/                 the four track specifications
+├── track-a/  …  track-d/   each a SELF-CONTAINED build context:
+│       Dockerfile             digest-pinned, allowlisted, two-stage
+│       build.sh               rustc directly — no cargo, no network
+│       src/main.rs            the entire track, one file
+│       README.md              what this track does and how
+│       PERF.md                the measured performance ledger for this track
+│       verification/          pinned expected hashes and corpora metadata
+├── tooling/               the gates and measurement harnesses
+├── reference/             the organizers' references and generators, vendored
+└── verification/          corpora, expected outputs, and the conformance ledger
+```
+
+Each track folder is a **complete, independent build context**: it contains its own `Dockerfile`,
+`build.sh` and source, and nothing it needs lives outside it.
+
+---
+
+## Building and running a track
+
+**In the container (the scored path):**
+
+```sh
+docker build --network=none -t speeddemon/track-a:local track-a
+docker run --rm \
+  --cpuset-cpus=0-11 --cpuset-mems=0 \
+  --memory=8g --memory-swap=8g \
+  --read-only --tmpfs /tmp:size=1g \
+  -v /path/to/data:/data:ro \
+  -v /path/to/out:/out \
+  speeddemon/track-a:local
+```
+
+**Directly, on a development machine** (the build script detects the platform and takes a portable
+path, so the three offline corpora can be checked anywhere):
+
+```sh
+SD_DATA_DIR=./verification/cases/track-a SD_OUT_DIR=./out sh track-a/build.sh && ./track-a/run
+```
+
+The build is intentionally trivial: `rustc` compiles one file with a fixed flag set. **There is no
+package manager in the scored path at all**, so there is nothing to resolve and nothing to fetch.
+
+---
+
+## Engineering notes
+
+**The compiler target is named explicitly, never `native`.** The build writes
+`-C target-cpu=alderlake` — the scoring CPU is a Core i5-13500, whose Alder Lake feature set is
+AVX2, BMI2 and PCLMULQDQ with AVX-512 fused off. `native` would resolve against whatever host
+performs the build, which is not the machine that runs it. **This was measured: an earlier `native`
+build was 0.6–6.7% slower on every track**, and naming the target removes the whole class of problem.
+
+**Source size is treated as a first-class axis**, because it is scored and because it is the most
+expensive one to buy back — roughly 26% of the lines per point, against about 9% of the time. Several
+of the largest wins in this project's history were deletions, and every track's line count and what
+it bought is recorded in its `PERF.md`.
+
+**Peak memory is a scored axis too**, and the cheapest way to reduce it is to *release pages early*:
+each thread hands its share back to the kernel as soon as it is finished with it, rather than leaving
+a single teardown at process exit.
+
+**The process exits immediately after its final write.** There is no teardown to pay for.
+
+---
+
+## Honest limits
+
+- **Track D's queue retains its pool capacity between queries.** It is emptied but not shrunk, so it
+  holds every pushed entry including stale ones, where the heap it replaced freed on pop. **This is
+  the +5.4 MB that keeps D at 68.589 when its time is the best this track has recorded** —
+  a known, located, unfixed inefficiency, documented rather than hidden.
+- **Track C's intern table compares 32 key bits plus a slot group rather than full bytes.** The
+  design is what makes the 4-byte slot — and therefore the 512 KB table and the eight-wide probe —
+  possible, and it is exact on every corpus published here. The residual collision probability at
+  this scale is documented in `track-c/src/main.rs` where the table is defined.
+- **The board's own run-to-run noise is about ±1.5 points**, and time moves by up to 16% between
+  runs of identical code. Where a gain was inside that spread, this repository says so instead of
+  claiming it.
+
+---
+
+<p align="center">
+  <b>Four tracks. One file each. Every answer exact.</b><br/>
+  <sub>Read the story: <a href="docs/JOURNEY.md">docs/JOURNEY.md</a> ·
+  the techniques: <a href="docs/TECHNIQUES.md">docs/TECHNIQUES.md</a> ·
+  the methods: <a href="docs/MEASUREMENT.md">docs/MEASUREMENT.md</a></sub>
+</p>
