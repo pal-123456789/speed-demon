@@ -155,6 +155,18 @@ fn same(a: __m256i, b: __m256i) -> bool {
     unsafe { _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, b)) == -1 }
 }
 
+/// A key for a term too long for the 32-byte window. Such a term can never match a document,
+/// because a document token over 32 bytes is rejected before any probe; this only has to keep
+/// distinct long terms distinct and be non-zero.
+fn long_key(term: &[u8]) -> __m256i {
+    let mut h = term.len() as u64;
+    for &b in term {
+        h = (h ^ (b | 0x20) as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    let w = [h | 1, h, h, h];
+    unsafe { std::mem::transmute(w) }
+}
+
 /// Query terms to dense ids: open addressing, each slot the top 32 hash bits
 /// above id + 1 (0 if free), so a mismatch rarely loads a key. A token that
 /// is no term gets the id one past the last term, so callers need no branch.
@@ -191,7 +203,15 @@ impl Terms {
     }
 
     fn insert(&mut self, term: &[u8]) -> u32 {
-        let k = unsafe { key(term.as_ptr(), term.len()) };
+        // key masks a 32-byte window and computes 32 - len on a usize, so an unconditional call
+        // underflows and reads out of bounds for a query term longer than 32 bytes. Document tokens
+        // over 32 bytes are rejected before any probe, so such a term is given a distinct id that
+        // can never match -- which is what the old path produced too, minus the out-of-bounds read.
+        let k = if term.len() <= 32 {
+            unsafe { key(term.as_ptr(), term.len()) }
+        } else {
+            long_key(term)
+        };
         let (h, mask) = (hash(k), self.slot.len() - 1);
         let mut i = h & mask;
         while self.slot[i] != 0 {
