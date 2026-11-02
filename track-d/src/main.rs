@@ -267,6 +267,16 @@ fn heavy_weight(heavy: &[(u32, u32)], e: u32) -> u32 {
 
 fn main() {
     tune_allocator();
+    // `SD_TIME=1` prints cumulative seconds at each phase boundary to stderr.
+    let t0 = std::time::Instant::now();
+    let timing = std::env::var_os("SD_TIME").is_some();
+    macro_rules! lap {
+        ($name:expr) => {
+            if timing {
+                eprintln!("[t] {:<12} {:>8.3}s", $name, t0.elapsed().as_secs_f64());
+            }
+        };
+    }
     let data = std::env::var("SD_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     let outd = std::env::var("SD_OUT_DIR").unwrap_or_else(|_| "/out".to_string());
     let nt = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 12);
@@ -333,6 +343,7 @@ fn main() {
     }
     let lines = base[parts] as usize + filed.iter().map(|f| f.1).sum::<usize>();
     assert_eq!(lines, declared, "graph.txt: parsed {lines} edges, header declares {declared}");
+    lap!("parse");
 
     // 2. Build each part's adjacency on its own.
     let m = base[parts] as usize;
@@ -372,6 +383,7 @@ fn main() {
     .concat();
     heavy.sort_unstable();
     drop(filed);
+    lap!("part build");
 
     // 3. Locality order: compact BFS blobs. A thread grows a blob over
     // unclaimed nodes (claimed by compare-exchange), then starts the next one
@@ -443,6 +455,8 @@ fn main() {
     let ir = Raw::of(&mut id_v);
     on_threads(nt, |t| chains[t].iter().zip(start[t]..).for_each(|(&u, k)| unsafe { *ir.at(u as usize) = k }));
     drop((claimed, chains));
+    lap!("blobs");
+    lap!("new ids");
 
     // The graph in the new numbering: degrees scattered, summed, then each
     // edge's head mapped (weight bits kept), with the random reads of later
@@ -481,6 +495,7 @@ fn main() {
     })
     .concat();
     heavy2.sort_unstable();
+    lap!("renumber");
     // Queries in the new numbering (sorted later), then the old graph and the
     // id map can go, freed on a side thread while the reverse graph is built.
     let ends: Vec<(u32, u32)> = queries.iter().map(|&(s, t)| (id[s as usize], id[t as usize])).collect();
@@ -517,6 +532,7 @@ fn main() {
     rheavy.sort_unstable();
     roff.copy_within(0..n, 1);
     roff[0] = 0;
+    lap!("reverse");
 
     // 4. Queries sorted so neighbouring searches share cached pages.
     let mut order: Vec<usize> = (0..ends.len()).collect();
@@ -586,6 +602,11 @@ fn main() {
     });
 
     // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
+    lap!("search");
+    // INF prints as -1 (u64::MAX as i64); every real distance is below 2^63.
     let out: String = ans.iter().map(|&a| format!("{}\n", a as i64)).collect();
     std::fs::write(format!("{outd}/distances.txt"), out).unwrap();
+    lap!("write");
+    // The answers are on disk; skip freeing the graph.
+    std::process::exit(0);
 }
