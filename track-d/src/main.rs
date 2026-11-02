@@ -628,9 +628,17 @@ fn main() {
     on_threads(nt, |_| {
         let mut dist = [Dist::new(n), Dist::new(n)];
         let mut queue = [Dial::new(), Dial::new()];
+        // Claimed four at a time: order is sorted for locality, so a thread taking one query at a
+        // time picks up neighbours at random as twelve threads interleave, while four in a row lets
+        // one thread run a locality-adjacent group with its Dist pages and adj rows still warm.
+        let (mut q, mut end) = (0usize, 0usize);
         loop {
-            let q = next.fetch_add(1, Relaxed);
+            if q == end {
+                q = next.fetch_add(4, Relaxed);
+                end = q + 4;
+            }
             let Some(&i) = order.get(q) else { return };
+            q += 1;
             let ((s0, t0), (s, t)) = (queries[i], ends[i]);
             if s0 == t0 {
                 unsafe { *ansr.at(i) = 0 };
