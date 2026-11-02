@@ -195,8 +195,60 @@ impl Heap {
     }
 }
 
-/// Tentative distances in pages of 512, handed out on first touch and taken
-/// back after each query, so a thread's memory follows its largest search.
+/// The saturation limit of the 16-bit label store. A label equal to it is read back as infinity,
+/// so "never reached" and "at the limit" are the same value -- which is safe only because a search
+/// that reaches the limit abandons before writing anything.
+const LINF: u16 = u16::MAX;
+
+/// Tentative distances in 16-bit pages of 512, handed out on first touch and taken back after each
+/// query. The search touches this twice per relaxation, so its width is the whole point: a quarter
+/// of the cache lines of the 64-bit store below.
+struct Small {
+    tab: Vec<u32>,
+    used: Vec<u32>,
+    pool: Vec<u16>,
+}
+
+impl Small {
+    fn new(n: usize) -> Self {
+        Small { tab: vec![0; n / PAGE + 1], used: Vec::new(), pool: Vec::new() }
+    }
+    /// Infinity for a node this search never reached; hands out no page.
+    #[inline(always)]
+    fn get(&self, v: u32) -> u64 {
+        match unsafe { *self.tab.get_unchecked(v as usize / PAGE) } as usize {
+            0 => INF,
+            pg => {
+                let x = unsafe { *self.pool.get_unchecked((pg - 1) * PAGE + v as usize % PAGE) };
+                if x == LINF {
+                    INF
+                } else {
+                    x as u64
+                }
+            }
+        }
+    }
+    #[inline(always)]
+    fn at(&mut self, v: u32) -> &mut u16 {
+        let i = v as usize / PAGE;
+        if unsafe { *self.tab.get_unchecked(i) } == 0 {
+            self.used.push(i as u32);
+            self.tab[i] = self.used.len() as u32;
+            let s = (self.used.len() - 1) * PAGE;
+            self.pool.resize(self.pool.len().max(s + PAGE), LINF);
+            self.pool[s..s + PAGE].fill(LINF);
+        }
+        let k = (self.tab[i] as usize - 1) * PAGE + v as usize % PAGE;
+        unsafe { self.pool.get_unchecked_mut(k) }
+    }
+    fn reset(&mut self) {
+        self.used.iter().for_each(|&i| self.tab[i as usize] = 0);
+        self.used.clear();
+    }
+}
+
+/// The same labels in 64 bits, for the queries the 16-bit store cannot represent. Its pages are
+/// handed out on first touch too, so on a corpus where nothing saturates it stays at its table.
 struct Dist {
     tab: Vec<u32>,
     used: Vec<u32>,
@@ -547,6 +599,7 @@ fn main() {
     // keys add up to at least that. A side that runs dry has reached every node
     // it can, so the best meeting seen is the answer.
     on_threads(nt, |_| {
+        let mut small = [Small::new(n), Small::new(n)];
         let mut dist = [Dist::new(n), Dist::new(n)];
         let mut queue = [Heap::default(), Heap::default()];
         loop {
@@ -561,9 +614,10 @@ fn main() {
                 continue; // no in-edge: unreachable
             }
             let mut best = INF;
-            *dist[0].at(s) = 0;
+            let mut over = false;
+            *small[0].at(s) = 0;
             queue[0].push(0, s);
-            *dist[1].at(t) = 0;
+            *small[1].at(t) = 0;
             queue[1].push(0, t);
             while let (Some(a), Some(b)) = (queue[0].0.first(), queue[1].0.first()) {
                 if a.0 + b.0 >= best {
@@ -571,7 +625,7 @@ fn main() {
                 }
                 let k = (queue[1].0.len() < queue[0].0.len()) as usize;
                 let (go, ga, gh) = sides[k];
-                let (a, b) = dist.split_at_mut(1);
+                let (a, b) = small.split_at_mut(1);
                 let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
                 let (d, u) = queue[k].pop();
                 if d > mine[0].get(u) {
@@ -584,20 +638,67 @@ fn main() {
                     let (v, w) = (x & hmask, x >> hb);
                     let w = if w == big { heavy_weight(gh, e) } else { w };
                     let nd = d + w as u64;
+                    if nd >= LINF as u64 {
+                        // The 16-bit store cannot hold this tentative distance. Abandon BEFORE
+                        // writing, and recompute the query with 64-bit labels below.
+                        over = true;
+                        break;
+                    }
                     if nd < best {
                         let slot = mine[0].at(v);
-                        if nd < *slot {
-                            *slot = nd;
+                        if nd < *slot as u64 {
+                            *slot = nd as u16;
                             queue[k].push(nd, v);
                             prefetch(go.as_ptr().wrapping_add(v as usize));
                             best = best.min(nd.saturating_add(other[0].get(v)));
                         }
                     }
                 }
+                if over {
+                    break;
+                }
+            }
+            if over {
+                best = INF;
+                *dist[0].at(s) = 0;
+                queue[0].push(0, s);
+                *dist[1].at(t) = 0;
+                queue[1].push(0, t);
+                while let (Some(a), Some(b)) = (queue[0].0.first(), queue[1].0.first()) {
+                    if a.0 + b.0 >= best {
+                        break;
+                    }
+                    let k = (queue[1].0.len() < queue[0].0.len()) as usize;
+                    let (go, ga, gh) = sides[k];
+                    let (a, b) = dist.split_at_mut(1);
+                    let (mine, other) = if k == 0 { (a, b) } else { (b, a) };
+                    let (d, u) = queue[k].pop();
+                    if d > mine[0].get(u) {
+                        continue;
+                    }
+                    let lo = unsafe { *go.get_unchecked(u as usize) };
+                    let hi = unsafe { *go.get_unchecked(u as usize + 1) };
+                    for e in lo..hi {
+                        let x = unsafe { *ga.get_unchecked(e as usize) };
+                        let (v, w) = (x & hmask, x >> hb);
+                        let w = if w == big { heavy_weight(gh, e) } else { w };
+                        let nd = d + w as u64;
+                        if nd < best {
+                            let slot = mine[0].at(v);
+                            if nd < *slot {
+                                *slot = nd;
+                                queue[k].push(nd, v);
+                                prefetch(go.as_ptr().wrapping_add(v as usize));
+                                best = best.min(nd.saturating_add(other[0].get(v)));
+                            }
+                        }
+                    }
+                }
+                dist.iter_mut().for_each(Dist::reset);
             }
             unsafe { *ansr.at(i) = best };
             queue.iter_mut().for_each(|q| q.0.clear());
-            dist.iter_mut().for_each(Dist::reset);
+            small.iter_mut().for_each(Small::reset);
         }
     });
 
