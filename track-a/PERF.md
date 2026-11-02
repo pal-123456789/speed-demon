@@ -25,6 +25,19 @@
 
 ---
 
+---
+
+## Current measured state
+
+| Board points | Time | Peak memory | Source | Measured bottleneck |
+|---|---|---|---|---|
+| **80.039** | 26.73 ms | 18.41 MB | 625 lines | parse 50.8% · hours 24.4% · text 22.0% |
+
+Every entry below is a change that was made, measured and kept — or made, measured and
+**reverted**, which is why the rejected ones are here too. The result above is the live board
+measurement of the frozen commit; the design is in [README.md](README.md) and the cross-track
+record is in [docs/JOURNEY.md](../docs/JOURNEY.md).
+
 ## 1. The task
 
 Aggregate 3.1M structured log lines (239 MB) into per-endpoint request counts, p50/p95/p99 latency, and error rates bucketed by hour.

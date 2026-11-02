@@ -16,6 +16,19 @@
 
 ---
 
+---
+
+## Current measured state
+
+| Board points | Time | Peak memory | Source | Measured bottleneck |
+|---|---|---|---|---|
+| **75.124** | 140.30 ms | 46.93 MB | 708 lines | corpus scan 70% |
+
+Every entry below is a change that was made, measured and kept — or made, measured and
+**reverted**, which is why the rejected ones are here too. The result above is the live board
+measurement of the frozen commit; the design is in [README.md](README.md) and the cross-track
+record is in [docs/JOURNEY.md](../docs/JOURNEY.md).
+
 > **Read 2f first if you want the current state of this track.** The table in
 > section 1 and the stage narrative in 2c/2e/3/4 record the shape this track was
 > frozen at (stage 2, 55.63 points) and the stage that was reverted on the board

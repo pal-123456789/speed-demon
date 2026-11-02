@@ -16,6 +16,19 @@
 
 ---
 
+---
+
+## Current measured state
+
+| Board points | Time | Peak memory | Source | Measured bottleneck |
+|---|---|---|---|---|
+| **68.589** | 169.86 ms | 70.57 MB | 536 lines | construction 66% · search 33% |
+
+Every entry below is a change that was made, measured and kept — or made, measured and
+**reverted**, which is why the rejected ones are here too. The result above is the live board
+measurement of the frozen commit; the design is in [README.md](README.md) and the cross-track
+record is in [docs/JOURNEY.md](../docs/JOURNEY.md).
+
 ## 1. The task
 
 Traverse a 5M-edge directed weighted graph and answer 2,000 source-target shortest-path queries. Preprocessing is allowed and is counted inside the timed run.

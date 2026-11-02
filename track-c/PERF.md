@@ -16,6 +16,19 @@
 
 ---
 
+---
+
+## Current measured state
+
+| Board points | Time | Peak memory | Source | Measured bottleneck |
+|---|---|---|---|---|
+| **79.292** | 23.64 ms | 9.61 MB | 721 lines | every record, three random reads each |
+
+Every entry below is a change that was made, measured and kept — or made, measured and
+**reverted**, which is why the rejected ones are here too. The result above is the live board
+measurement of the frozen commit; the design is in [README.md](README.md) and the cross-track
+record is in [docs/JOURNEY.md](../docs/JOURNEY.md).
+
 ## 1. The task
 
 Parse a hostile multi-megabyte CSV — quoted commas, escaped quotes, embedded newlines, mixed line endings, a UTF-8 BOM on some chunks and not others — join it against a lookup table, and emit sorted aggregates.
