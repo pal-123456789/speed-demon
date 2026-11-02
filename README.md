@@ -20,6 +20,49 @@
 
 Every number above is a **live board measurement**, not a projection.
 
+## The shape of the submission
+
+```mermaid
+flowchart TB
+    subgraph INPUT["one memory-mapped input, read exactly once"]
+        direction LR
+        I1["requests.log<br/>239 MB"]
+        I2["docs.txt + queries.txt<br/>254 MB + 1.7 MB"]
+        I3["records.csv + regions.csv<br/>202 MB"]
+        I4["graph.txt + queries.txt<br/>92 MB"]
+    end
+
+    subgraph POOL["one pool of twelve threads per track &mdash; no third-party dependency"]
+        direction LR
+        A["<b>A</b> Ingest<br/>parse &rarr; hours &rarr; text"]
+        B["<b>B</b> Index<br/>plan &rarr; scan &rarr; merge"]
+        C["<b>C</b> Join<br/>classify &rarr; intern &rarr; aggregate"]
+        D["<b>D</b> Traverse<br/>build &rarr; relabel &rarr; search"]
+    end
+
+    subgraph OUT["one output file, written once"]
+        direction LR
+        O1["summary.txt"]
+        O2["results.txt"]
+        O3["aggregates.txt"]
+        O4["distances.txt"]
+    end
+
+    I1 --> A --> O1
+    I2 --> B --> O2
+    I3 --> C --> O3
+    I4 --> D --> O4
+
+    A -.->|"sha256 gate<br/>full corpus &times; 5<br/>+ tiny oracle + sample"| O1
+    B -.-> O2
+    C -.-> O3
+    D -.-> O4
+```
+
+**Every program is a single Rust file.** The build resolves nothing: `rustc` compiles one source file
+with a fixed flag set inside a digest-pinned, organizer-allowlisted image, with `--network=none` set.
+There is no package manager anywhere in the scored path.
+
 ---
 
 ## What this is
@@ -42,6 +85,20 @@ records every step of it, including the experiments that **lost**.
 ## The four tracks
 
 ### 🅰 Track A — Ingest
+
+```mermaid
+flowchart LR
+    LOG["requests.log<br/>239 MB, mapped"] --> CUT["cut into line-aligned<br/>pieces, claimed in turn"]
+    CUT --> SCAN["<b>one 64-byte AVX2 scan</b><br/>method end &middot; endpoint end &middot; line end"]
+    SCAN --> INT["intern the endpoint<br/>lock-free table, 64-byte compare"]
+    INT --> REC["4-byte record<br/>latency &lt;&lt; 13 | id | 5xx"]
+    REC --> HOUR["counting sort by endpoint rank<br/>per-hour scratch"]
+    HOUR --> PCT["exact p50/p95/p99<br/>three branch-free selections"]
+    PCT --> MAP["format straight into<br/>the mapped output"]
+    REC -.->|"chunks handed back<br/>as hours finish"| FREE["pages returned<br/>to the kernel"]
+```
+
+**Measured split:** `parse 50.8% · hours 24.4% · text 22.0% · rank 2.8% · size+map 0.6%`
 **32.05 s reference → 26.73 ms. Hourly latency percentiles over 239 MB of access logs.**
 
 The log is memory-mapped and cut into line-aligned pieces that any of twelve threads claims. The
@@ -62,6 +119,23 @@ from its day and hour digits alone — no date parsing at all.**
   write call queues on a lock.
 
 ### 🅱 Track B — Index
+
+```mermaid
+flowchart LR
+    Q["queries.txt<br/>read first"] --> TT["term table<br/>64-bit hash, bzhi-masked"]
+    TT --> SAMP["sample 1/64 of the corpus<br/>estimate each term's rarity"]
+    SAMP --> PLAN["plan per term:<br/>bitmap if common, id list if rare"]
+    DOCS["docs.txt<br/>254 MB, mapped"] --> WALK["token walk<br/>AVX2 byte classes"]
+    WALK --> MARK["mark postings<br/>8-deep branchless lookup ring"]
+    PLAN --> EVAL
+    MARK --> EVAL["evaluate each query<br/>strictly left to right"]
+    EVAL --> MERGE["merge counts, id sums,<br/>ten smallest ids"]
+    MERGE --> RES["results.txt"]
+    TT -.->|"unmapped<br/>after the scan"| FREE["table pages<br/>returned"]
+    WALK -.->|"each thread drops<br/>its own share"| FREE
+```
+
+**Measured split:** the corpus scan is **70%** of the run.
 **56.35 s reference → 140.30 ms. 50,000 boolean and phrase queries over 254 MB of documents.**
 
 - **Queries are read first**, which the specification permits, so the corpus is indexed only for the
@@ -81,6 +155,24 @@ from its day and hour digits alone — no date parsing at all.**
 - Answers are merged as counts, id sums and smallest ids — **without materialising answer lists.**
 
 ### 🅲 Track C — Join
+
+```mermaid
+flowchart LR
+    REG["regions.csv"] --> DIRECT["direct-address table<br/>id &rarr; group, one byte"]
+    REC["records.csv<br/>202 MB, mapped"] --> SPLIT["split at CRLF<br/>one run per worker"]
+    SPLIT --> CLASSIFY["<b>classify each 64-byte block</b><br/>quote &middot; comma &middot; LF masks"]
+    CLASSIFY --> QUOTE["inside-quotes state<br/>= prefix XOR of the quote mask<br/>one PCLMULQDQ per block"]
+    QUOTE --> SEPS["separator list<br/>five per record"]
+    SEPS --> VEC["<b>id &middot; region &middot; amount<br/>decoded in ONE 256-bit vector</b>"]
+    DIRECT --> VEC
+    VEC --> INTERN["name &rarr; id<br/>lock-free, 8-wide group probe"]
+    INTERN --> BITS["bitset row per country<br/>huge-page block"]
+    BITS --> AGG["per-country totals<br/>one aligned cache line"]
+    AGG --> OUT["aggregates.txt"]
+```
+
+**Three random reads per record** — the region table, the name table and the bitset word — are each
+issued a fixed number of records ahead, so all three have a steady lead.
 **14.44 s reference → 23.64 ms. A deliberately hostile CSV joined against a region table.**
 
 The input is hostile by design: quoted fields, `""` escapes, bare newlines inside notes, mixed CRLF
@@ -102,6 +194,22 @@ and LF endings, and a byte order mark that can appear before any record.
   rather than leaving a teardown at exit.
 
 ### 🅳 Track D — Traverse
+
+```mermaid
+flowchart LR
+    G["graph.txt<br/>92 MB, mapped"] --> PARSE["one parse<br/>32-bit edge word"]
+    PARSE --> FILED["filed under the tail's part<br/>16-bit intra-part offset"]
+    FILED --> BUILD["<b>each part built independently</b><br/>counting sort, NO atomics"]
+    BUILD --> BFS["512-node BFS blobs<br/>locality relabelling"]
+    BFS --> FWD["forward CSR<br/>4-byte edges"]
+    BFS --> REV["reverse CSR"]
+    FWD --> DIJ
+    REV --> DIJ["<b>bidirectional Dijkstra</b><br/>4-ary heap &middot; paged distances"]
+    DIJ --> DIST["distances.txt"]
+    BUILD -.->|"old graph dropped<br/>on a side thread"| FREE["freed off<br/>the critical path"]
+```
+
+**Measured split:** construction is **66%** of the run, search 33%; `renumber` alone is 24%.
 **72.69 s reference → 169.86 ms. 2,000 exact shortest paths on 1.74 M nodes and 5 M edges.**
 
 - **One parse.** Edges are filed under their tail's part of the node range, so a tail's offset needs

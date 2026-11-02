@@ -10,6 +10,27 @@
 
 These apply to all four tracks and were chosen once, deliberately.
 
+## The loop every change went through
+
+```mermaid
+flowchart LR
+    IDEA["an idea"] --> IMPL["implement it"]
+    IMPL --> EXACT{"exact?<br/>full corpus &times; 5<br/>+ tiny oracle<br/>+ official sample"}
+    EXACT -->|"no"| FIX["find the bug"]
+    FIX --> EXACT
+    EXACT -->|"yes"| MEASURE["measure it<br/>interleaved, smallest of N"]
+    MEASURE --> PAYS{"does it pay<br/>on the board?"}
+    PAYS -->|"yes"| KEEP["keep it"]
+    PAYS -->|"no"| REVERT["<b>revert it</b><br/>and record why"]
+    KEEP --> LEDGER["PERF.md"]
+    REVERT --> LEDGER
+    LEDGER --> IDEA
+```
+
+**The revert branch is the one that matters.** A losing change is removed from the source, not merely
+superseded on the board — because final scoring measures the frozen commit, and the board's
+best-per-track rule does not transfer to it.
+
 ### Name the compiler target; never use `native`
 
 ```
