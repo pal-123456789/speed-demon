@@ -203,7 +203,37 @@ impl Terms {
         }
         self.keys.push(k);
         self.slot[i] = (h as u64 >> 32) << 32 | self.keys.len() as u64;
+        // Keep the load factor under 1/2 by doubling. Without this, a query file
+        // with more distinct terms than the table has slots fills it, after which
+        // BOTH find and insert probe for a zero slot that does not exist and the
+        // run never terminates -- a hang, which is the one failure mode a holdout
+        // seed could reach that a wrong answer check cannot see coming. The table
+        // starts at (queries.txt bytes / 8) slots and the shipped file sits well
+        // under half of that, so this never fires on it; it exists for the seed
+        // that is denser than the one we can see.
+        if self.keys.len() * 2 >= self.slot.len() {
+            self.grow();
+        }
         self.keys.len() as u32 - 1
+    }
+
+    /// Double the table and re-place every key, keeping each slot's low 32 bits
+    /// (the key's index + 1) and recomputing only the hash tag above them.
+    fn grow(&mut self) {
+        let cap = self.slot.len() * 2;
+        let old = std::mem::replace(&mut self.slot, vec![0u64; cap]);
+        let mask = cap - 1;
+        for s in old {
+            if s == 0 {
+                continue;
+            }
+            let h = hash(self.keys[s as u32 as usize - 1]);
+            let mut i = h & mask;
+            while self.slot[i] != 0 {
+                i = (i + 1) & mask;
+            }
+            self.slot[i] = (h as u64 >> 32) << 32 | (s as u32) as u64;
+        }
     }
 }
 
